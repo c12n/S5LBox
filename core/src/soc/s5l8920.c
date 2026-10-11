@@ -52,6 +52,16 @@ static bool dmc_address(uint32_t address) {
     return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
 }
 
+static bool iop_address(uint32_t address) {
+    return address>=S5L8920_IOP_BASE && address-S5L8920_IOP_BASE<0x1000u;
+}
+static bool iop_enabled(const s5l8920_t *m) {
+    return m->iop && m->clock_gate[S5L8920_IOP_RESET_GATE].configured &&
+        m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].configured &&
+        (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x8000000fu)==15u &&
+        (m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].value&15u)==15u;
+}
+
 static bool dsim_address(uint32_t address) {
     return address>=S5L8920_DSIM_BASE && address-S5L8920_DSIM_BASE<0x1000u;
 }
@@ -146,6 +156,10 @@ static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
 static uint8_t *cdma_ram(void *owner,uint32_t address,uint32_t size) {
     s5l8920_t *m=owner;uint32_t offset;
     return size && ram_offset(m,address,size,&offset)?m->ram+offset:NULL;
+}
+static uint8_t *iop_ram(void *owner,uint32_t address,uint32_t size) {
+    /* The controller programs a physical DRAM base, not the AP boot alias. */
+    return address>=S5L8920_RAM_BASE?cdma_ram(owner,address,size):NULL;
 }
 
 static s5l8920_uart_t *uart_bank(s5l8920_t *m,unsigned bank) {
@@ -338,6 +352,17 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         uint32_t value = 0u;
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
+    }
+    if(iop_address(address)) {
+        uint32_t offset=address-S5L8920_IOP_BASE,value;
+        if(!m->iop || offset<0x100u || offset>=0x11cu)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if(!iop_enabled(m) || !s5l8920_iop_read(m->iop,offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
     }
     bool aes;uint32_t cdma_offset;
     if(cdma_address(address,&aes,&cdma_offset)) {
@@ -532,6 +557,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
         return;
     }
+    if(iop_address(address)) {
+        uint32_t offset=address-S5L8920_IOP_BASE;
+        if(!m->iop || offset<0x100u || offset>=0x11cu)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if(!iop_enabled(m) || !s5l8920_iop_write(m->iop,offset,value,iop_ram,m))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
     bool aes;uint32_t cdma_offset;
     if(cdma_address(address,&aes,&cdma_offset)) {
         if(!m->cdma || (aes?cdma_offset>=0x40u:(cdma_offset%0x1000u)>=0x18u))
@@ -716,10 +751,15 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             }
         } else if (address>=S5L8920_CLOCK_GATE_BASE &&
                    address-S5L8920_CLOCK_GATE_BASE<4u*S5L8920_CLOCK_GATE_COUNT) {
-            s5l8920_clock_gate_t *gate=&m->clock_gate[(address-S5L8920_CLOCK_GATE_BASE)/4u];
-            if (gate->configured && !((value^gate->value)&~15u) &&
-                ((value&15u)==0u || (value&15u)==15u)) gate->value=value;
-            else fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+            unsigned index=(address-S5L8920_CLOCK_GATE_BASE)/4u;
+            s5l8920_clock_gate_t *gate=&m->clock_gate[index];
+            bool iop_reset=m->iop && index==S5L8920_IOP_RESET_GATE;
+            uint32_t writable=iop_reset?0x8000000fu:15u;
+            if (!gate->configured || ((value^gate->value)&~writable) ||
+                ((value&15u)!=0u && (value&15u)!=15u) ||
+                (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)))
+                fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+            else gate->value=value;
         } else if (offset==S5L8920_DEADLINE_COUNT) {
             m->deadline.remaining=value;
             m->deadline.programmed=true;
@@ -1445,6 +1485,31 @@ bool s5l8920_cdma_board_service(s5l8920_t *m) {
     refresh_interrupts(m);return true;
 }
 
+bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
+    if(!m || !m->ram || !iop || !iop->initialized || access_failed(m) ||
+       !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
+       !m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].configured)return false;
+    if(m->iop)return m->iop==iop;
+    if(iop->reset_seen || iop->servicing ||
+       (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x80000000u))return false;
+    m->iop=iop;return true;
+}
+arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
+    if(!m || !m->ram || !m->iop || access_failed(m) ||
+       !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
+       !m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].configured)return ARM_HALT;
+    unsigned a=m->clock_gate[S5L8920_IOP_RESET_GATE].value&15u;
+    unsigned b=m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].value&15u;
+    if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
+    if(!a || !b)return ARM_OK;
+    uint64_t before=m->iop->bytes_written;
+    arm_status_t result=s5l8920_iop_service(m->iop,iop_ram,m);
+    if(before!=m->iop->bytes_written) {
+        m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
+    }
+    return result;
+}
+
 bool s5l8920_dsim_attach(s5l8920_t *m,s5l8920_dsim_t *dsim) {
     if (!m || !m->ram || !dsim || !dsim->configured ||
         !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
@@ -1524,6 +1589,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->pinot=NULL;
     m->swi=NULL;
     m->cdma=NULL;
+    m->iop=NULL;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;

@@ -14,6 +14,7 @@
 #include "pinot_panel.h"
 #include "s5l8920_swi.h"
 #include "s5l8920_cdma.h"
+#include "s5l8920_iop.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -273,6 +274,7 @@ typedef struct {
     s5l8920_audio_nco_t audio_nco;
     s5l8920_aes_key_disable_t aes_key_disable;
     s5l8920_cdma_t *cdma;
+    s5l8920_iop_t *iop;
     s5l8920_dmc_t dmc;
     s5l8920_dart_t dart[S5L8920_DART_COUNT];
     s5l8920_spi_t spi[S5L8920_SPI_COUNT];
@@ -735,6 +737,19 @@ bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial);
  * No component is attached by default; other channels/contexts stay unmapped. */
 bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma);
 bool s5l8920_cdma_board_service(s5l8920_t *m);
+
+/* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
+ * with both raw gates explicitly configured and reset bit31 initially clear.
+ * Only gate2E bit31 drives its reset line. MMIO/execution require both gate2E
+ * and gate31 low nibbles F; either closed gate pauses execution without
+ * manufacturing STOP. The gates' individual roles/rates remain unknown.
+ * One explicit service call retires at most one IOP instruction, independent
+ * of AP time. Actual IOP stores invalidate the AP exclusive monitor even if
+ * a later access in that instruction fails. AP and IOP faults stay separate.
+ * Reset/free detach the peer; no RAM/owner pointer survives service. The
+ * owner must reset and reattach explicitly. No component or image by default. */
+bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop);
+arm_status_t s5l8920_iop_board_service(s5l8920_t *m);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

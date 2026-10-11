@@ -31,6 +31,7 @@ add_library(emucore STATIC
     src/soc/pl192.c
     src/soc/s5l8920.c
     src/soc/s5l8920_cdma.c
+    src/soc/s5l8920_iop.c
     src/soc/s5l8920_uart.c
     src/soc/s5l8920_dart.c
     src/soc/s5l8920_dsim.c
@@ -239,6 +240,9 @@ add_test(NAME s5l8920_machine COMMAND test_s5l8920)
 add_executable(test_s5l8920_cdma tests/test_s5l8920_cdma.c)
 target_link_libraries(test_s5l8920_cdma PRIVATE emucore)
 add_test(NAME s5l8920_cdma COMMAND test_s5l8920_cdma)
+add_executable(test_s5l8920_iop tests/test_s5l8920_iop.c)
+target_link_libraries(test_s5l8920_iop PRIVATE emucore)
+add_test(NAME s5l8920_iop COMMAND test_s5l8920_iop)
 
 add_executable(test_s5l8920_uart tests/test_s5l8920_uart.c)
 target_link_libraries(test_s5l8920_uart PRIVATE emucore)

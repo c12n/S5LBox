@@ -25,6 +25,54 @@ OS 3 machine and application defaults remain ARM1176/S5L8900.
 
 ## IOP execution foundation
 
+An optional version1 IOP controller connects the partial ARMv4T core to
+actual shared DRAM. It requires an explicit reset pulse and firmware-window
+programming before RUN. The original target driver supplies the protocol:
+`+0x100` requests hold/run, `+0x110` supplies the physical firmware base,
+`+0x114` supplies the inverse power-of-two window mask, and `+0x118` supplies
+the controller's self address. The bounded model maps IOP low addresses to
+that physical buffer. It does not copy firmware or synthesize message replies.
+
+The original kernel opens raw gates `0x2e` and `0x31` before pulsing bit31
+at `0xbf100130`. Only that reset bit, with an attached controller, resets
+and holds the IOP CPU. Both gates must be fully open for controller access
+or execution; their individual clock roles and rates remain unestablished.
+The initial register state is unavailable until reset. Unknown bits, widths,
+live remapping, out-of-RAM windows and unsupported MMIO are refused. The
+post-reset control request `0x10` is accepted only while freshly held with
+no window programmed; its additional live effects are not implemented.
+
+Each explicit board service call executes at most one IOP instruction.
+Reads and AP execution do not implicitly advance it. Hold preserves CPU
+state; reset invalidates the window without erasing shared RAM. STOP reflects
+an actual hold request, never an unsupported instruction or missing register.
+IOP failures preserve their own PC/access diagnostics separately from the AP.
+Successful stores invalidate the AP exclusive monitor, including the prefix
+of a multi-store that later fails. Board reset/free detach the borrowed
+component; service retains no RAM or owner pointer. No controller is attached
+by default, and no AP/IOP clock ratio is inferred.
+
+The bounded original kernel segment `0x8065f7d0..0x8065f840` executes 32
+instructions with an explicit version1 caller object, image buffer and absent
+optional callback. Its five controller writes and one status read configure
+and start the real IOP core. The subsequent unmodified firmware entry passes
+eight strict/shipping cases with four RAM fill patterns, reaching the same
+88 unique original instructions and 65,668 successful byte stores as the
+isolated prefix. The first unsupported cache write preserves registers and
+retirement, leaves RUN set, and does not fault the AP. This bounded sequence
+does not establish execution of the whole driver, reset helper or boot chain.
+
+A separate whole-kernel diagnostic, still conditional on the earlier single
+audio-write exception and inherited board inputs, lets the original kernel
+reset and start this controller. At one supplied IOP instruction per diagnostic
+tick, the IOP retires 2,286 instructions and writes 57,184 bytes before the AP
+stops at `PC=0x8065f97a`, writing `8` to unimplemented `0xbf300018`. Its actual
+firmware base is `0x40a1f000`, window mask `0x3ffc0000`, and RUN remains set.
+This is the next host-to-IOP interrupt boundary, reached before the IOP cache
+stop at this unmeasured schedule. With the audio exception disabled and IOP
+unattached, the guarded kernel trace remains exactly unchanged. These are
+distinct diagnostics; neither establishes a connected bootloader/kernel boot.
+
 The prelinked `IOP_s5l8920x_firmware` bundle contains a 164 KiB firmware
 image. An isolated host probe executes its unmodified A32 entry, establishes
 banked stacks and verifies the guest's BSS clearing. The probe stops at
@@ -47,7 +95,7 @@ Thumb execution, multiply, swap, halfword/signed transfers, SWI and
 coprocessors remain unavailable in this profile. Later ARM extensions stop
 before side effects; failed conditions still skip instructions. Unsupported
 instructions return `ARM_UNDEFINED` to the host without retirement. No CPU
-ID, CP15/MMU, cache-controller replies, IOP reset/run controller or mailbox
+ID, CP15/MMU, cache-controller replies or mailbox
 responses are supplied. Existing shared decoder restrictions also apply;
 this is not complete ARMv4T conformance. Native engines and the legacy
 snapshot format continue to reject this profile. CPU reset's zero values
