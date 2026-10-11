@@ -16,9 +16,41 @@ explicit initial divisors, receive interrupts and supplied receive-timeout
 events. Automatic transmit flow control requires an explicit CTS observation.
 Three audio NCO words support bounded clock configuration and coefficient
 readback; audio output and the remaining audio registers are unavailable.
+The AES key-disable latch accepts explicit initial state and sticky disables;
+AES key material, context programming and DMA operations remain unavailable.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
+
+## AES key-disable state
+
+`s5l8920_aes_key_disable_configure` supplies a known initial 16-bit latch at
+`0x87800000`. With configured raw CDMA gate `0x25` fully open, aligned word
+reads return that state and writes set the requested bits without clearing
+earlier disables. Repeating the same configuration preserves guest writes;
+changing the initial value is refused. Functional board reset restores the
+supplied initial word and gate state. Free/init discards both. No initial
+zero, fuse value or hardware key is assumed.
+
+The target's original CDMAAES initialization queries bits 0..7 through
+`0x808a236c`, then stores inverted availability bytes. Its disable path
+`0x808a2ef6` calls the single-bit writer `0x808a2380`; other cached key states
+remain unchanged. The original iBoot writer`0x4ff01cb0` and LLB writer
+`0x84000bf4` construct a 16-bit mask from their two arguments. This supports
+the bounded disable latch. The target bootloader opens raw DMA gate `0x25`
+for crypto operations; its channel-enable helper returns immediately.
+An additional AES clock gate from another driver is not assumed.
+
+Missing initial state, closed/intermediate/unconfigured gates, unsupported
+bits, misaligned accesses and non-word widths refuse atomically. A latched
+bus fault prevents further effects. Other AES/CDMA addresses remain
+unmapped, including key/context registers and transfer/completion state.
+The latch alone does not provide usable keys or cryptographic acceleration.
+
+The kernel's key query was reached only in an explicitly conditional
+diagnostic that accepted one unimplemented audio write. The production
+audio stop at `0x84304000` remains unresolved; this register support does not
+establish a later genuine boot stage.
 
 ## Display clock setup
 

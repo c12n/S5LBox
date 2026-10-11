@@ -74,6 +74,8 @@
 #define S5L8920_USB_CONTROL_COUNT 6u
 #define S5L8920_AUDIO_NCO_BASE UINT32_C(0x84300014)
 #define S5L8920_AUDIO_GATE 0x18u
+#define S5L8920_CDMA_GATE 0x25u
+#define S5L8920_AES_KEY_DISABLE UINT32_C(0x87800000)
 #define S5L8920_DMC_BASE UINT32_C(0xbfc00000)
 #define S5L8920_DMC_CONFIG_COUNT 36u
 
@@ -191,6 +193,12 @@ typedef struct {
     uint8_t programmed; /* Control bit0, coefficient A bit1, B bit2. */
 } s5l8920_audio_nco_t;
 
+/* Key-disable latch only. No default fuse/handoff value or key material. */
+typedef struct {
+    uint16_t initial, value;
+    bool configured;
+} s5l8920_aes_key_disable_t;
+
 typedef enum {
     S5L8920_DMC_CONFIG = 0,
     S5L8920_DMC_READY = 1,
@@ -262,6 +270,7 @@ typedef struct {
     s5l8920_pmu_ldo_t pmu_ldo;
     s5l8920_pmu_saved_t pmu_saved;
     s5l8920_audio_nco_t audio_nco;
+    s5l8920_aes_key_disable_t aes_key_disable;
     s5l8920_dmc_t dmc;
     s5l8920_dart_t dart[S5L8920_DART_COUNT];
     s5l8920_spi_t spi[S5L8920_SPI_COUNT];
@@ -704,6 +713,19 @@ bool s5l8920_miu_configure(s5l8920_t *m, uint32_t initial);
  * power/clock state. Call between CPU steps; CPU/IRQ and latched diagnostics
  * are preserved. */
 bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t initial);
+
+/* Supply the known low 16 key-disable bits before the guest accesses them.
+ * The aligned word at 87800000 reads this latch; writes set bits without
+ * clearing earlier disables. The configured CDMA gate must be fully open.
+ * Unknown initial state, unsupported bits, other widths and closed gates
+ * refuse access. Same-initial configuration is idempotent and never undoes
+ * guest writes; a different initial word is refused. Functional board reset
+ * restores this explicit initial word, not an inferred hardware fuse value.
+ * Call between CPU steps; configuration preserves CPU, IRQ and diagnostics.
+ * This does not provide keys or implement AES contexts, DMA or completion.
+ * All other AES and CDMA registers remain unavailable. Free/init discards
+ * the configuration. */
+bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

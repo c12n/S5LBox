@@ -28,6 +28,15 @@ static bool audio_nco_enabled(const s5l8920_t *m) {
         (m->clock_gate[S5L8920_AUDIO_GATE].value&15u)==15u;
 }
 
+static bool aes_key_disable_address(uint32_t address) {
+    return address>=S5L8920_AES_KEY_DISABLE && address-S5L8920_AES_KEY_DISABLE<4u;
+}
+
+static bool aes_key_disable_enabled(const s5l8920_t *m) {
+    return m->aes_key_disable.configured && m->clock_gate[S5L8920_CDMA_GATE].configured &&
+        (m->clock_gate[S5L8920_CDMA_GATE].value&15u)==15u;
+}
+
 static bool dmc_address(uint32_t address) {
     return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
 }
@@ -375,6 +384,14 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else return m->dmc.value[index];
         return 0u;
     }
+    if (aes_key_disable_address(address)) {
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if (!aes_key_disable_enabled(m))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return m->aes_key_disable.value;
+        return 0u;
+    }
     if (audio_nco_address(address)) {
         unsigned index=(address-S5L8920_AUDIO_NCO_BASE)/4u;
         if (size!=4u || (address&3u))
@@ -545,6 +562,14 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             m->dmc.value[index]=index==2 ? value&~1u : value;
             m->dmc.programmed|=UINT64_C(1)<<(unsigned)index;
         }
+        return;
+    }
+    if (aes_key_disable_address(address)) {
+        if (size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if (!aes_key_disable_enabled(m) || value>UINT16_MAX)
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else m->aes_key_disable.value|=(uint16_t)value;
         return;
     }
     if (audio_nco_address(address)) {
@@ -1351,6 +1376,15 @@ bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t init
     return true;
 }
 
+bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial) {
+    if (!m || !m->ram || initial>UINT16_MAX) return false;
+    s5l8920_aes_key_disable_t *state=&m->aes_key_disable;
+    if (state->configured) return state->initial==initial;
+    state->initial=state->value=(uint16_t)initial;
+    state->configured=true;
+    return true;
+}
+
 bool s5l8920_dsim_attach(s5l8920_t *m,s5l8920_dsim_t *dsim) {
     if (!m || !m->ram || !dsim || !dsim->configured ||
         !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
@@ -1434,6 +1468,7 @@ bool s5l8920_reset(s5l8920_t *m) {
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
     memset(m->clock_selector,0,sizeof m->clock_selector);
     memset(&m->audio_nco,0,sizeof m->audio_nco);
+    m->aes_key_disable.value=m->aes_key_disable.initial;
     memset(&m->dmc,0,sizeof m->dmc);
     m->dmc.state=S5L8920_DMC_CONFIG;
     for (unsigned bank=0;bank<S5L8920_DART_COUNT;bank++)

@@ -2740,6 +2740,121 @@ static void test_audio_nco(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"NCO final reset");
 }
 
+static bool test_aes_key_disable(s5l8920_t *m) {
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) return false;
+    const uint32_t reg=S5L8920_AES_KEY_DISABLE;
+    const uint32_t gate=S5L8920_CLOCK_GATE_BASE+4u*S5L8920_CDMA_GATE;
+    s5l8920_t empty={0};
+    CHECK(!s5l8920_aes_key_disable_configure(NULL,0u) &&
+          !s5l8920_aes_key_disable_configure(&empty,0u),"invalid board accepted AES state");
+    CHECK(!s5l8920_aes_key_disable_configure(m,0x10000u) &&
+          !s5l8920_aes_key_disable_configure(m,UINT32_MAX) &&
+          !m->aes_key_disable.configured,"unsupported initial AES bits accepted");
+    (void)m->bus.read32(m,reg);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+          m->bus_failure.address==reg,"unknown AES key state invented a response");
+    arm_cpu_t cpu=m->cpu;
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(s5l8920_aes_key_disable_configure(m,0x8000u) &&
+          !memcmp(&cpu,&m->cpu,sizeof cpu) && !memcmp(&failure,&m->bus_failure,sizeof failure) &&
+          m->aes_key_disable.value==0x8000u,"AES input altered CPU or diagnostics");
+    s5l8920_clear_bus_failure(m);
+    (void)m->bus.read32(m,reg);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"missing DMA gate accepted AES read");
+    s5l8920_clear_bus_failure(m);
+    for(unsigned nibble=0;nibble<15u;nibble++) {
+        s5l8920_free(m);
+        if(!s5l8920_init(m))return false;
+        CHECK(s5l8920_aes_key_disable_configure(m,0x8000u) &&
+              s5l8920_clock_gate_configure(m,S5L8920_CDMA_GATE,nibble),
+              "supply intermediate DMA gate input");
+        m->bus.write32(m,reg,1u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->aes_key_disable.value==0x8000u,"incomplete DMA clock accepted AES disable");
+        s5l8920_clear_bus_failure(m);
+        (void)m->bus.read32(m,reg);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"incomplete DMA clock exposed AES state");
+        s5l8920_clear_bus_failure(m);
+    }
+    s5l8920_free(m);
+    if(!s5l8920_init(m))return false;
+    CHECK(s5l8920_aes_key_disable_configure(m,0x8000u) &&
+          s5l8920_clock_gate_configure(m,S5L8920_CDMA_GATE,0u),"configure AES and DMA initial state");
+    m->bus.write32(m,gate,15u);
+    CHECK(m->bus.read32(m,reg)==0x8000u && !m->bus_failure.reason,"explicit AES initial value unreadable");
+    const uint32_t bad_values[]={0x10000u,0x10001u,UINT32_MAX};
+    for(unsigned i=0;i<sizeof bad_values/sizeof bad_values[0];i++) {
+        m->bus.write32(m,reg,bad_values[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->bus_failure.value==bad_values[i] && m->aes_key_disable.value==0x8000u,
+              "unsupported AES write partly changed the latch");
+        s5l8920_clear_bus_failure(m);
+    }
+    cpu=m->cpu;
+    uint64_t ticks=m->timebase_ticks;
+    uint32_t expected=0x8000u;
+    for(unsigned bit=0;bit<16u;bit++) {
+        m->bus.write32(m,reg,1u<<bit);expected|=1u<<bit;
+        CHECK(m->bus.read32(m,reg)==expected && !m->bus_failure.reason,"AES disable cleared another key bit");
+        m->bus.write32(m,reg,0u);
+        CHECK(m->bus.read32(m,reg)==expected && !m->bus_failure.reason,"zero write re-enabled a key");
+    }
+    CHECK(s5l8920_aes_key_disable_configure(m,0x8000u) &&
+          !s5l8920_aes_key_disable_configure(m,0xffffu) &&
+          m->aes_key_disable.value==0xffffu,"AES reconfiguration bypassed sticky disable");
+    CHECK(!memcmp(&cpu,&m->cpu,sizeof cpu) && ticks==m->timebase_ticks,
+          "key-disable access changed CPU, interrupt input or time");
+    CHECK(s5l8920_reset(m),"reset AES state");
+    CHECK(m->aes_key_disable.configured && m->aes_key_disable.initial==0x8000u &&
+          m->aes_key_disable.value==0x8000u && m->clock_gate[S5L8920_CDMA_GATE].value==0u,
+          "reset did not restore supplied AES and clock state");
+    m->bus.write32(m,gate,15u);
+    for(unsigned n=1;n<=4;n*=2) for(unsigned offset=0;offset<4;offset++) {
+        if(n==4u && !offset)continue;
+        uint32_t address=reg+offset;
+        if(n==1u)(void)m->bus.read8(m,address);
+        else if(n==2u)(void)m->bus.read16(m,address);
+        else (void)m->bus.read32(m,address);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+              m->bus_failure.address==address && m->bus_failure.size==n,
+              "invalid AES read width/alignment accepted");
+        s5l8920_clear_bus_failure(m);
+        if(n==1u)m->bus.write8(m,address,1u);
+        else if(n==2u)m->bus.write16(m,address,1u);
+        else m->bus.write32(m,address,1u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED &&
+              m->bus_failure.address==address && m->bus_failure.write &&
+              m->aes_key_disable.value==0x8000u,"invalid AES store altered latch");
+        s5l8920_clear_bus_failure(m);
+    }
+    const uint32_t unavailable[]={reg-4u,reg+4u,reg+0x428u,reg+0x1000u,reg+0x1020u,0x87000000u,0x87001000u};
+    for(unsigned i=0;i<sizeof unavailable/sizeof unavailable[0];i++) {
+        (void)m->bus.read32(m,unavailable[i]);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED,"AES key latch exposed an unimplemented engine");
+        s5l8920_clear_bus_failure(m);
+        m->bus.write32(m,unavailable[i],1u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_UNMAPPED && m->aes_key_disable.value==0x8000u,
+              "AES key latch accepted an unimplemented engine command");
+        s5l8920_clear_bus_failure(m);
+    }
+    m->bus.write32(m,reg,1u);m->bus.write32(m,gate,0u);
+    (void)m->bus.read32(m,reg);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && m->aes_key_disable.value==0x8001u,
+          "closing DMA clock cleared AES disable bits");
+    m->bus.write32(m,reg,2u);
+    CHECK(m->aes_key_disable.value==0x8001u && !m->bus_failure.write,"latched fault allowed a later AES side effect");
+    s5l8920_clear_bus_failure(m);m->bus.write32(m,gate,15u);
+    CHECK(m->bus.read32(m,reg)==0x8001u,"reopening clock lost AES key state");
+    s5l8920_free(m);
+    CHECK(!m->aes_key_disable.configured && !m->aes_key_disable.value && !m->aes_key_disable.initial &&
+          !s5l8920_aes_key_disable_configure(m,0u),"freed board retained AES configuration");
+    if(!s5l8920_init(m))return false;
+    (void)m->bus.read32(m,reg);
+    CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED,"new board inherited AES input");
+    return s5l8920_reset(m);
+}
+
 static bool test_pmu_saved(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     CHECK(s5l8920_reset(m),"saved-state reset");
@@ -4127,6 +4242,7 @@ int main(void) {
     test_dmc_refresh(&m);
     test_dmc_configuration(&m);
     test_audio_nco(&m);
+    if (!test_aes_key_disable(&m)) return 1;
     if (!test_pmu_saved(&m)) return 1;
     s5l8920_free(&m);
     CHECK(!m.ram && !m.cpu.bus && !m.bus.ctx && !s5l8920_reset(&m), "free left live host wiring");
