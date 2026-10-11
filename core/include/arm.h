@@ -377,8 +377,19 @@ typedef struct arm_cp15 {
 typedef enum {
     ARM_ARCH_V6_ARM1176 = 0,  /* S5L8900 / iPhone OS 3 -- the current target */
     ARM_ARCH_V7_SWIFT   = 1,  /* S5L8950X / iPhone 5, ARMv7s -- roadmap P2   */
-    ARM_ARCH_V7_CORTEX_A8 = 2 /* S5L8920 / iPhone 3GS; no integer divide   */
+    ARM_ARCH_V7_CORTEX_A8 = 2,/* S5L8920 / iPhone 3GS; no integer divide   */
+    ARM_ARCH_V4T = 3         /* Partial generic A32 bootstrap; see below */
 } arm_arch_t;
+
+/* ARM_ARCH_V4T is an explicit little-endian bootstrap profile, not an IOP
+ * hardware/revision identification. Currently supported: A32 data processing,
+ * MRS/MSR, B/BL/BX, byte/word and block transfers, IRQ/FIQ and exception return.
+ * Thumb execution, multiply, swap, halfword/signed transfers, SWI and all
+ * coprocessors stop with ARM_UNDEFINED. There is no CP15/MMU or CPU-ID reply.
+ * Reset chooses zero for architecturally indeterminate registers/flags;
+ * those values are emulator initialization choices, not measured silicon.
+ * Unknown/unimplemented encodings stop without retirement or guest emulation.
+ * This profile uses arm_step; legacy snapshots and native engines exclude it. */
 
 /* Explicit generic core configuration from DDI0344K. Selecting r3p2 is not
  * evidence of a particular board's CPU revision. The ordinary A8 instruction
@@ -397,7 +408,7 @@ typedef struct {
  * must not inherit the capabilities of the last known profile. */
 static inline bool arm_arch_is_valid(arm_arch_t arch) {
     return arch == ARM_ARCH_V6_ARM1176 || arch == ARM_ARCH_V7_SWIFT ||
-           arch == ARM_ARCH_V7_CORTEX_A8;
+           arch == ARM_ARCH_V7_CORTEX_A8 || arch == ARM_ARCH_V4T;
 }
 
 static inline bool arm_arch_has_movw_movt(arm_arch_t arch) {

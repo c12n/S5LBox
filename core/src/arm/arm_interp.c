@@ -538,8 +538,9 @@ static void take_exception(arm_cpu_t *c, uint32_t vector, uint32_t mode,
      * every CPSR it prints on a panic carries it, and a nested exception taken
      * inside an abort handler must see A already set in the SPSR it stacks.
      */
-    if (vector == ARM_VEC_PREFETCH || vector == ARM_VEC_DATA_ABORT ||
-        vector == ARM_VEC_IRQ      || vector == ARM_VEC_FIQ)
+    if (c->arch != ARM_ARCH_V4T &&
+        (vector == ARM_VEC_PREFETCH || vector == ARM_VEC_DATA_ABORT ||
+         vector == ARM_VEC_IRQ      || vector == ARM_VEC_FIQ))
         c->cpsr |= ARM_CPSR_A;
     c->cpsr &= ~ARM_CPSR_T;                /* exceptions enter in ARM state */
     if (arm_arch_uses_thumb2_encoding(c->arch))
@@ -2079,6 +2080,8 @@ bool arm_reset_profile(arm_cpu_t *cpu, const arm_bus_t *bus, arm_arch_t arch) {
      * with high vectors). We start at 0x0; the machine layer relocates PC as
      * needed. */
     cpu->cpsr   = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A;
+    /* DDI0210C 2.10: ARMv4T has no imprecise-abort mask (CPSR.A). */
+    if (arch == ARM_ARCH_V4T) cpu->cpsr &= ~ARM_CPSR_A;
     cpu->cycles = 0;
     cpu->bus    = bus;
     return true;
@@ -2409,11 +2412,20 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
 
                 if (spsr) {
                     if (!has_spsr) return ARM_UNDEFINED;
+                    if (c->arch == ARM_ARCH_V4T &&
+                        ((val ^ c->spsr[bank]) & mask & 0x0fffff00u))
+                        return ARM_UNDEFINED;
                     c->spsr[bank] = (c->spsr[bank] & ~mask) | (val & mask);
                 } else {
                     /* User mode may only change the flags byte. */
                     if (!has_spsr && (c->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR)
                         mask &= 0xff000000u;
+                    /* DDI0210C 2.7: reserved bits must be preserved; MSR
+                     * must not change CPSR.T. Refuse unpredictable writes,
+                     * after User-mode control writes have been discarded. */
+                    if (c->arch == ARM_ARCH_V4T &&
+                        ((val ^ c->cpsr) & mask & (0x0fffff00u | ARM_CPSR_T)))
+                        return ARM_UNDEFINED;
                     uint32_t newcpsr = (c->cpsr & ~mask) | (val & mask);
                     if ((mask & ARM_CPSR_MODE_MASK) != 0u &&
                         !arm_mode_is_valid(newcpsr))
@@ -2593,9 +2605,12 @@ static arm_status_t exec_single_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
         /* Base Restored Abort Model: on a fault the destination and base must
          * be left untouched so the handler can fix the mapping and re-execute. */
         if (c->abort_pending) return ARM_OK;
-        if (rd == 15u && (val & 3u) == 2u) return ARM_UNDEFINED;
+        if (c->arch != ARM_ARCH_V4T && rd == 15u && (val & 3u) == 2u)
+            return ARM_UNDEFINED;
         c->r[rd] = val;
-        if (rd == 15) {                      /* LDR to PC interworks too */
+        if (rd == 15 && c->arch == ARM_ARCH_V4T) {
+            *next = val & ~3u; /* Before ARMv5, loads do not change state. */
+        } else if (rd == 15) {               /* ARMv5+ LDR to PC interworks */
             if (val & 1u) c->cpsr |= ARM_CPSR_T; else c->cpsr &= ~ARM_CPSR_T;
             *next = val & (uint32_t)((val & 1u) ? ~1u : ~3u);
         }
@@ -2840,7 +2855,7 @@ static arm_status_t exec_block_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
         /* Plain LDM interworks from bit 0, so an ARM destination ending in
          * 0b10 is not representable. The exception-return LDM(3) is kept on
          * its established restored-state align-down path below. */
-        if (!restore_cpsr && (list & (1u << 15)) != 0u &&
+        if (c->arch != ARM_ARCH_V4T && !restore_cpsr && (list & (1u << 15)) != 0u &&
             (loaded[15] & 3u) == 2u)
             return ARM_UNDEFINED;
         /* LDM(3) takes instruction state from SPSR, not from loaded PC bit 0.
@@ -2856,7 +2871,9 @@ static arm_status_t exec_block_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
             if (!(list & (1u << i))) continue;
             if (user_bank) { reg_write_user(c, i, loaded[i]); continue; }
             c->r[i] = loaded[i];
-            if (i == 15 && !restore_cpsr) {
+            if (i == 15 && !restore_cpsr && c->arch == ARM_ARCH_V4T) {
+                *next = loaded[i] & ~3u;
+            } else if (i == 15 && !restore_cpsr) {
                 /* ARMv5 and later: loading PC INTERWORKS. Bit 0 selects the
                  * instruction set, so "POP {..,pc}" returning to a Thumb caller
                  * must switch to Thumb. Masking bit 0 off without setting T
@@ -4699,6 +4716,38 @@ static arm_status_t thumb32_step(arm_cpu_t *c, uint32_t pc, uint16_t first,
     return ARM_UNDEFINED;
 }
 
+/* A positive A32 boundary keeps this partial ARMv4T profile out of every
+ * later extension, including miscellaneous instructions otherwise accepted
+ * by the ARM1176 decoder. This deliberately excludes valid but unaudited
+ * ARMv4T families as well. Expand with architectural and execution tests. */
+static bool v4t_a32_supported(const arm_cpu_t *c, uint32_t insn) {
+    unsigned group = (insn >> 25) & 7u;
+    if (group == 5u) return true;                        /* B / BL */
+    if (group == 4u) {                                  /* LDM / STM */
+        if ((insn & 0x00508000u) == 0x00508000u &&
+            (c->spsr[arm_bank_of_mode(c->cpsr)] & 0x0fffff00u))
+            return false;
+        return true;
+    }
+    if (group == 2u || (group == 3u && !(insn & 0x10u))) return true;
+    if (group > 1u) return false;
+    if ((insn & 0x0ffffff0u) == 0x012fff10u) return true; /* BX */
+    if ((insn & 0x0fbf0fffu) == 0x010f0000u)             /* MRS */
+        return ((insn >> 12) & 15u) != 15u;
+    if ((insn & 0x0fb0fff0u) == 0x0120f000u)             /* MSR reg */
+        return (insn & 15u) != 15u && (insn & 0x000f0000u) != 0u;
+    if ((insn & 0x0fb0f000u) == 0x0320f000u)             /* MSR imm */
+        return (insn & 0x000f0000u) != 0u;
+    if (group == 0u && (insn & 0x90u) == 0x90u) return false;
+    unsigned opcode = (insn >> 21) & 15u, rd = (insn >> 12) & 15u;
+    if (opcode >= 8u && opcode <= 11u)                  /* TST..CMN */
+        return (insn & 0x00100000u) != 0u && rd == 0u;
+    if (rd == 15u && (insn & 0x00100000u) &&
+        (c->spsr[arm_bank_of_mode(c->cpsr)] & 0x0fffff00u))
+        return false;
+    return true;                                       /* ordinary ALU */
+}
+
 arm_status_t arm_step(arm_cpu_t *c) {
     if (!arm_arch_is_valid(c->arch)) return ARM_UNDEFINED;
     if (arm_bus_access_failed(c->bus)) return ARM_HALT;
@@ -4707,6 +4756,11 @@ arm_status_t arm_step(arm_cpu_t *c) {
     /* A corrupted snapshot or malformed exception frame must not turn an
      * unimplemented CPSR mode into privileged User-bank execution. */
     if (!arm_mode_is_valid(c->cpsr)) return ARM_UNDEFINED;
+    /* No ARMv6 status bits, CP15 translation or alignment configuration may
+     * be injected into this core through host state. */
+    if (c->arch == ARM_ARCH_V4T &&
+        ((c->cpsr & 0x0fffff00u) || c->cp15.sctlr != 0u))
+        return ARM_UNDEFINED;
 
     /* Sample the interrupt lines before fetching. FIQ outranks IRQ. The return
      * address convention is "next instruction + 4", so handlers return with
@@ -4725,6 +4779,11 @@ arm_status_t arm_step(arm_cpu_t *c) {
         c->r[15] = vec;
         return ARM_OK;
     }
+
+    /* Thumb execution is a separate missing capability. IRQ/FIQ entry above
+     * may still leave Thumb state architecturally before this boundary. */
+    if (c->arch == ARM_ARCH_V4T && ((c->cpsr & ARM_CPSR_T) || (pc & 3u)))
+        return ARM_UNDEFINED;
 
     /* Instruction fetch is translated too; a fault here is a prefetch abort.
      * ARM_ACCESS_FETCH rather than "a read": it is what lets the walker check
@@ -4855,6 +4914,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
      * it loaded. ARMv6-optimised code (memcpy loops in libSystem, XNU copy
      * routines) issues PLD constantly. */
     if (cond == 0xfu) {
+        if (c->arch == ARM_ARCH_V4T) { c->cycles--; return ARM_UNDEFINED; }
         /* PLD is a hint; a no-op is architecturally correct. Both the immediate
          * and register forms have bits[27:26]==01 and the Rd field SBO (1111). */
         /*
@@ -5092,6 +5152,11 @@ arm_status_t arm_step(arm_cpu_t *c) {
     if (cond != 0xeu && !arm_cond_passed(c, cond)) {
         c->r[15] = next;
         return ARM_OK;
+    }
+
+    if (c->arch == ARM_ARCH_V4T && !v4t_a32_supported(c, insn)) {
+        c->cycles--;
+        return ARM_UNDEFINED;
     }
 
     /* Coarse top-level decode. This intentionally covers only the encodings
@@ -5395,7 +5460,10 @@ arm_status_t arm_step(arm_cpu_t *c) {
      * of VFP all fall out of the bottom of the tree, and MCR/MRC comes back
      * from exec_coprocessor. One choke point, one rule. */
     if (st == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
-    if (st == ARM_UNDEFINED) return undefined_instruction(c, pc, insn);
+    if (st == ARM_UNDEFINED) {
+        if (c->arch == ARM_ARCH_V4T) { c->cycles--; return ARM_UNDEFINED; }
+        return undefined_instruction(c, pc, insn);
+    }
 
     if (st == ARM_OK) c->r[15] = next;
     return st;

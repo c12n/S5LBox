@@ -23,6 +23,36 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## IOP execution foundation
+
+The prelinked `IOP_s5l8920x_firmware` bundle contains a 164 KiB firmware
+image. An isolated host probe executes its unmodified A32 entry, establishes
+banked stacks and verifies the guest's BSS clearing. The probe stops at
+`PC=0x8000`, writing `1` to the unavailable register `0x86300020`, after
+2,646 retired instructions. The tested initial register/RAM patterns reach
+the same boundary. This is separate from kernel boot and does not establish
+the IOP's exact CPU implementation or its controller's semantics.
+
+`ARM_ARCH_V4T` is an explicitly selected, partial, little-endian A32 profile
+for this investigation. Its reset and status-register rules follow the
+[ARM7TDMI TRM, DDI0210C](https://documentation-service.arm.com/static/5f4786a179ff4c392c0ff819),
+sections 1.4 and 2.2-2.10. It does not select an ARM7TDMI revision for the
+S5L8920. The profile supports data processing, MRS/MSR, B/BL/BX, byte/word
+and block transfers, IRQ/FIQ entry and exception return. LDR/LDM into PC
+retain ARM state; BX and exception returns select state architecturally.
+CPSR has NZCV, I/F/T and mode fields, without ARMv6 A/Q/GE/endianness bits.
+Writes changing reserved PSR bits or CPSR.T through MSR are refused.
+
+Thumb execution, multiply, swap, halfword/signed transfers, SWI and
+coprocessors remain unavailable in this profile. Later ARM extensions stop
+before side effects; failed conditions still skip instructions. Unsupported
+instructions return `ARM_UNDEFINED` to the host without retirement. No CPU
+ID, CP15/MMU, cache-controller replies, IOP reset/run controller or mailbox
+responses are supplied. Existing shared decoder restrictions also apply;
+this is not complete ARMv4T conformance. Native engines and the legacy
+snapshot format continue to reject this profile. CPU reset's zero values
+for otherwise indeterminate state are host choices, not hardware evidence.
+
 ## AES key-disable state
 
 `s5l8920_aes_key_disable_configure` supplies a known initial 16-bit latch at

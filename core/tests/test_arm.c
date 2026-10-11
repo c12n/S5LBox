@@ -6453,7 +6453,7 @@ static void test_reset_initializes_the_default_profile(void) {
 
 static void test_explicit_profile_reset_and_invalid_configuration(void) {
     static const arm_arch_t profiles[] = {
-        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8
+        ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V4T
     };
     arm_cpu_t c, before;
     for (size_t i = 0; i < sizeof profiles / sizeof profiles[0]; i++) {
@@ -6507,7 +6507,7 @@ static void test_explicit_profile_reset_and_invalid_configuration(void) {
 static void test_profile_instruction_boundaries(void) {
     static const arm_arch_t profiles[] = {
         ARM_ARCH_V6_ARM1176, ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8,
-        (arm_arch_t)-1, (arm_arch_t)3, (arm_arch_t)0x7fffffff
+        ARM_ARCH_V4T, (arm_arch_t)-1, (arm_arch_t)4, (arm_arch_t)0x7fffffff
     };
     static const uint32_t encodings[] = {
         0xe30b3eefu, 0xe34d3eadu, 0xe713f011u, 0xe733f011u

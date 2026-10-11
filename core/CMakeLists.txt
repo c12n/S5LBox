@@ -213,6 +213,10 @@ add_executable(test_arm tests/test_arm.c)
 target_link_libraries(test_arm PRIVATE emucore)
 add_test(NAME arm_interp COMMAND test_arm)
 
+add_executable(test_arm_v4t tests/test_arm_v4t.c)
+target_link_libraries(test_arm_v4t PRIVATE emucore)
+add_test(NAME arm_v4t COMMAND test_arm_v4t)
+
 add_executable(test_mmu_memory_type tests/test_mmu_memory_type.c)
 target_link_libraries(test_mmu_memory_type PRIVATE emucore)
 add_test(NAME arm_mmu_memory_type COMMAND test_mmu_memory_type)

@@ -1258,7 +1258,7 @@ static void test_legacy_snapshot_requires_arm1176(void) {
           m.cpu.tlb_arch_stamp == ARM_ARCH_V7_CORTEX_A8, "snapshot save mutated derived memory types");
     free(inactive);
     static const arm_arch_t other_profiles[] = {
-        ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8, (arm_arch_t)99
+        ARM_ARCH_V7_SWIFT, ARM_ARCH_V7_CORTEX_A8, ARM_ARCH_V4T, (arm_arch_t)99
     };
     for (size_t i = 0; i < sizeof other_profiles / sizeof other_profiles[0]; i++) {
         uint8_t *out = NULL;
