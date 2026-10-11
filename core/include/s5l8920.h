@@ -13,6 +13,7 @@
 #include "s5l8920_dsim.h"
 #include "pinot_panel.h"
 #include "s5l8920_swi.h"
+#include "s5l8920_cdma.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -271,6 +272,7 @@ typedef struct {
     s5l8920_pmu_saved_t pmu_saved;
     s5l8920_audio_nco_t audio_nco;
     s5l8920_aes_key_disable_t aes_key_disable;
+    s5l8920_cdma_t *cdma;
     s5l8920_dmc_t dmc;
     s5l8920_dart_t dart[S5L8920_DART_COUNT];
     s5l8920_spi_t spi[S5L8920_SPI_COUNT];
@@ -723,9 +725,16 @@ bool s5l8920_usb_control_configure(s5l8920_t *m, uint32_t address, uint32_t init
  * restores this explicit initial word, not an inferred hardware fuse value.
  * Call between CPU steps; configuration preserves CPU, IRQ and diagnostics.
  * This does not provide keys or implement AES contexts, DMA or completion.
- * All other AES and CDMA registers remain unavailable. Free/init discards
- * the configuration. */
+ * Other AES/CDMA registers require the separate optional component below.
+ * Free/init discards this latch configuration. */
 bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial);
+/* Optional borrowed CDMA component. Reset detaches it; the owner must reset
+ * and reattach explicitly. MMIO/service require configured raw gate25=F.
+ * Closed gate pauses service. Unknown/intermediate gates or latched faults
+ * refuse. A service call moves at most16 bytes without advancing CPU/time.
+ * No component is attached by default; other channels/contexts stay unmapped. */
+bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma);
+bool s5l8920_cdma_board_service(s5l8920_t *m);
 
 /* Supply timebase source ticks explicitly, modulo 2^64, and advance the enabled
  * deadline countdown. Reads and CPU steps do not advance time. A programmed

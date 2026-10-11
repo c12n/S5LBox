@@ -16,8 +16,9 @@ explicit initial divisors, receive interrupts and supplied receive-timeout
 events. Automatic transmit flow control requires an explicit CTS observation.
 Three audio NCO words support bounded clock configuration and coefficient
 readback; audio output and the remaining audio registers are unavailable.
-The AES key-disable latch accepts explicit initial state and sticky disables;
-AES key material, context programming and DMA operations remain unavailable.
+The AES key-disable latch accepts explicit initial state and sticky disables.
+An optional CDMA component executes the bootloader's polled RAM-to-RAM
+AES-CBC path with a supplied software key; hardware keys remain unavailable.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
@@ -43,14 +44,61 @@ An additional AES clock gate from another driver is not assumed.
 
 Missing initial state, closed/intermediate/unconfigured gates, unsupported
 bits, misaligned accesses and non-word widths refuse atomically. A latched
-bus fault prevents further effects. Other AES/CDMA addresses remain
-unmapped, including key/context registers and transfer/completion state.
+bus fault prevents further effects. Without an attached CDMA component,
+other AES/CDMA addresses remain unmapped.
 The latch alone does not provide usable keys or cryptographic acceleration.
 
 The kernel's key query was reached only in an explicitly conditional
 diagnostic that accepted one unimplemented audio write. The production
 audio stop at `0x84304000` remains unresolved; this register support does not
 establish a later genuine boot stage.
+
+## Polled DMA/AES data path
+
+An explicitly attached `s5l8920_cdma_t` supplies context1 at `0x87801000`
+and channels1/2 at `0x87001000`/`0x87002000`. The original iBoot-1537.9.55
+command at `0x4ff01cdc` programs four IV words, 128/192/256-bit software
+keys, the context, and a 32-byte data descriptor plus terminal for each
+channel. Feed flags `0x30103` select AES and restart CBC chaining; drain
+flags are `0x103`. Data length must match both programmed byte counts and
+be a nonzero multiple of16. Only bounded RAM views are used, including the
+explicitly selected low RAM alias. Partial buffer overlap refuses; equal
+backing buffers support in-place encryption and decryption.
+
+The original channel reset and polled control words are supported. GO
+validates descriptors before publishing state; malformed chains, incomplete
+keys/IVs and unavailable RAM refuse without output. Both channels must start
+before work can proceed. Each explicit `s5l8920_cdma_board_service` call
+transforms at most one16-byte block using the existing AES implementation.
+Remaining counts and addresses reflect actual bytes consumed. Running clears
+and completion latches only after all output has been written. Completion is
+write-one-to-clear. Reads do not process data. The configured raw gate25
+must be fully open for MMIO; a closed gate pauses service, intermediate or
+unknown gate state refuses. A latched board fault also prevents work.
+
+The service quantum is a functional scheduling choice, not measured hardware
+latency. No interrupt mode, peripheral FIFO, scatter/gather, live channel
+reset, hold/abort or other AES context is accepted. The kernel's distinct
+control words remain refused. In particular, its M2M setup at `0x808a472a`
+uses `0x88`, whereas the bootloader programs `0x80`; the polled path does
+not infer interrupt wiring from another emulator. Key/IV register reads
+also remain refused. Functional board reset detaches the borrowed component;
+the caller resets and reattaches it explicitly. No DMA is attached by default.
+
+Hardware key selectors refuse. The original command's type`0x200` queries
+disable bit1 and type`0x201` queries bit2; unavailable keys are not substituted.
+The unchanged command, including its real clock/cache helpers and final key
+erasure, has been exercised with36 public known-answer cases covering all
+three sizes, both directions, in-place buffers, a zero/null IV and four-block
+CBC. Four additional cases verify disabled-key returns and refusal of an
+enabled but unavailable hardware key. The CBC vectors are from
+[NIST SP800-38A, Appendix F.2](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf).
+The matching public platform driver at
+[openiBoot866562f, CDMA](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/cdma.c)
+corroborates the register sequence; implementation is independent.
+These are isolated original-firmware routine tests with explicit scheduling,
+not a connected boot chain or physical-device observation. The genuine
+kernel stop at the unknown audio write`0x84304000=7` remains unchanged.
 
 ## Display clock setup
 

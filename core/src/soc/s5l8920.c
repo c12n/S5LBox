@@ -37,6 +37,17 @@ static bool aes_key_disable_enabled(const s5l8920_t *m) {
         (m->clock_gate[S5L8920_CDMA_GATE].value&15u)==15u;
 }
 
+static bool cdma_address(uint32_t address,bool *aes,uint32_t *offset) {
+    *aes=address>=S5L8920_AES_CONTEXT1 && address-S5L8920_AES_CONTEXT1<0x1000u;
+    if(*aes) { *offset=address-S5L8920_AES_CONTEXT1;return true; }
+    *offset=address-S5L8920_CDMA_BASE;
+    return address>=S5L8920_CDMA_BASE+0x1000u && *offset<0x3000u;
+}
+static bool cdma_enabled(const s5l8920_t *m) {
+    return m->cdma && m->clock_gate[S5L8920_CDMA_GATE].configured &&
+        (m->clock_gate[S5L8920_CDMA_GATE].value&15u)==15u;
+}
+
 static bool dmc_address(uint32_t address) {
     return address>=S5L8920_DMC_BASE && address-S5L8920_DMC_BASE<0x1000u;
 }
@@ -130,6 +141,11 @@ static bool ram_offset(const s5l8920_t *m, uint32_t address, size_t size,
         return true;
     }
     return false;
+}
+
+static uint8_t *cdma_ram(void *owner,uint32_t address,uint32_t size) {
+    s5l8920_t *m=owner;uint32_t offset;
+    return size && ram_offset(m,address,size,&offset)?m->ram+offset:NULL;
 }
 
 static s5l8920_uart_t *uart_bank(s5l8920_t *m,unsigned bank) {
@@ -323,6 +339,18 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    bool aes;uint32_t cdma_offset;
+    if(cdma_address(address,&aes,&cdma_offset)) {
+        uint32_t value;
+        if(!m->cdma || (aes?cdma_offset>=0x40u:(cdma_offset%0x1000u)>=0x18u))
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if(!cdma_enabled(m) || !s5l8920_cdma_read(m->cdma,aes,cdma_offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     if (dsim_address(address)) {
         uint32_t offset=address-S5L8920_DSIM_BASE,value;
         if (!m->dsim || offset>=0x80u)
@@ -502,6 +530,17 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    bool aes;uint32_t cdma_offset;
+    if(cdma_address(address,&aes,&cdma_offset)) {
+        if(!m->cdma || (aes?cdma_offset>=0x40u:(cdma_offset%0x1000u)>=0x18u))
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if(!cdma_enabled(m) || !s5l8920_cdma_write(m->cdma,aes,cdma_offset,value,cdma_ram,m))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else refresh_interrupts(m);
         return;
     }
     if (dsim_address(address)) {
@@ -1385,6 +1424,27 @@ bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial) {
     return true;
 }
 
+bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma) {
+    if(!m || !m->ram || !cdma || !cdma->initialized ||
+       !m->clock_gate[S5L8920_CDMA_GATE].configured || access_failed(m))return false;
+    if(m->cdma)return m->cdma==cdma;
+    m->cdma=cdma;refresh_interrupts(m);return true;
+}
+bool s5l8920_cdma_board_service(s5l8920_t *m) {
+    if(!m || !m->ram || !m->cdma || !m->clock_gate[S5L8920_CDMA_GATE].configured ||
+       access_failed(m))return false;
+    unsigned gate=m->clock_gate[S5L8920_CDMA_GATE].value&15u;
+    if(!gate)return true;
+    if(gate!=15u)return false;
+    uint32_t remaining=m->cdma->channel[1].remaining;
+    if(!s5l8920_cdma_service(m->cdma,cdma_ram,m))return false;
+    if(remaining!=m->cdma->channel[1].remaining) {
+        /* A DMA store can invalidate the local exclusive monitor. */
+        m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
+    }
+    refresh_interrupts(m);return true;
+}
+
 bool s5l8920_dsim_attach(s5l8920_t *m,s5l8920_dsim_t *dsim) {
     if (!m || !m->ram || !dsim || !dsim->configured ||
         !m->clock_gate[S5L8920_DSIM_GATE].configured) return false;
@@ -1463,6 +1523,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->dsim=NULL;
     m->pinot=NULL;
     m->swi=NULL;
+    m->cdma=NULL;
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
