@@ -767,7 +767,11 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m);
  * alone does not rearm an expired interval. External source6 is ORed with the
  * timer cause. Functional reset disables/unprograms the deadline and starts
  * the timebase at zero. No physical reset phase, source frequency or gating
- * is inferred. Like other host events this preserves a latched bus diagnostic. */
+ * is inferred. An attached, explicitly configured IOP timer receives the same
+ * supplied ticks, independently of CPU RUN/gates. Reentry during IOP service
+ * refuses before advancing either timer. Board service lends the actual
+ * counter for selected IOP timebase reads without stepping the AP or clock.
+ * Like other host events this preserves a latched bus diagnostic. */
 bool s5l8920_timebase_clock(s5l8920_t *m, uint64_t ticks);
 
 /* Host preparation is bounded to RAM and never performs MMIO. Rejected loads

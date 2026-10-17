@@ -998,6 +998,8 @@ bool s5l8920_gpio_inactive_readback(s5l8920_t *m,unsigned pin,bool high) {
 
 bool s5l8920_timebase_clock(s5l8920_t *m,uint64_t ticks) {
     if (!m || !m->ram) return false;
+    if(m->iop && m->iop->timer.configured &&
+       !s5l8920_iop_timer_clock(m->iop,ticks))return false;
     m->timebase_ticks+=ticks;
     if (ticks && m->deadline.enabled && m->deadline.programmed && !m->deadline.expired) {
         if (ticks>=m->deadline.remaining) {
@@ -1525,6 +1527,9 @@ static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
        !pl192_write(&m->vic[bank],PL192_SOFTINT,false,sources))return false;
     refresh_interrupts(m);return true;
 }
+static uint64_t iop_timebase(void *owner) {
+    const s5l8920_t *m=owner;return m->timebase_ticks;
+}
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if(!m || !m->ram || !m->iop || access_failed(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
@@ -1534,7 +1539,7 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
     uint64_t before=m->iop->bytes_written;
-    arm_status_t result=s5l8920_iop_service_with_signal(m->iop,iop_ram,iop_signal_ap,m);
+    arm_status_t result=s5l8920_iop_service_with_timebase(m->iop,iop_ram,iop_signal_ap,iop_timebase,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }

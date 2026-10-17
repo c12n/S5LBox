@@ -12,11 +12,44 @@ static bool ap_vic_address(uint32_t address) {
 
 static void refresh_interrupts(s5l8920_iop_t *i) {
     if(!i->vic_configured)return;
+    if(i->timer.configured)(void)pl192_set_line(&i->vic[0],5,i->timer.pending);
     bool irq=false,fiq=false;
     for(unsigned n=0;n<S5L8920_IOP_VIC_COUNT;++n) {
         irq=irq || pl192_irq(&i->vic[n]);fiq=fiq || pl192_fiq(&i->vic[n]);
     }
     i->cpu.irq_line=irq;i->cpu.fiq_line=fiq;
+}
+bool s5l8920_iop_timer_configure(s5l8920_iop_t *i) {
+    if(!i || !i->initialized || i->servicing || !i->vic_configured)return false;
+    if(i->timer.configured)return true;
+    if(i->reset_seen || i->running)return false;
+    i->timer=(s5l8920_iop_timer_t){.configured=true};
+    refresh_interrupts(i);return true;
+}
+bool s5l8920_iop_timer_clock(s5l8920_iop_t *i,uint64_t ticks) {
+    if(!i || !i->initialized || i->servicing || !i->timer.configured ||
+       !i->vic_configured)return false;
+    s5l8920_iop_timer_t *t=&i->timer;
+    if(ticks && t->enabled && t->programmed && !t->expired) {
+        if(ticks>=t->remaining) {t->remaining=0;t->expired=true;t->pending=true;}
+        else t->remaining-=(uint32_t)ticks;
+    }
+    refresh_interrupts(i);return true;
+}
+static bool timer_address(uint32_t address) {
+    return address>=UINT32_C(0xbf100200) && address<UINT32_C(0xbf100228);
+}
+static bool timer_write(s5l8920_iop_t *i,uint32_t address,uint32_t value) {
+    s5l8920_iop_timer_t *t=&i->timer;
+    if(!t->configured)return false;
+    if(address==UINT32_C(0xbf10020c)) {
+        t->remaining=value;t->programmed=true;t->expired=false;
+    } else if(address==UINT32_C(0xbf100224) && !(value&~3u) &&
+              (!(value&1u) || t->programmed)) {
+        t->enabled=(value&1u)!=0u;
+        if(value&2u)t->pending=false;
+    } else return false;
+    refresh_interrupts(i);return true;
 }
 static bool vic_address(uint32_t address) {
     return address>=S5L8920_IOP_VIC_BASE &&
@@ -149,6 +182,15 @@ static bool cache_command(s5l8920_iop_t *i,uint32_t offset,uint32_t value) {
 }
 static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
     if(bus_failed(i))return 0;
+    if(timer_address(address)) {
+        if(i->timer.configured && i->timebase && size==4u &&
+           (address==UINT32_C(0xbf100200) || address==UINT32_C(0xbf100204))) {
+            uint64_t ticks=i->timebase(i->memory_owner);
+            return address==UINT32_C(0xbf100200)?(uint32_t)ticks:(uint32_t)(ticks>>32);
+        }
+        fail(i,i->timer.configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,false,0);return 0;
+    }
     if(cache_address(address)) {
         fail(i,i->cache_lines?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
              address,size,false,0);return 0;
@@ -176,6 +218,11 @@ static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
 }
 static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t value) {
     if(bus_failed(i))return;
+    if(timer_address(address)) {
+        if(size==4u && timer_write(i,address,value))return;
+        fail(i,i->timer.configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,true,value);return;
+    }
     if(cache_address(address)) {
         if(size==4u && !(address&3u) && cache_command(i,address-S5L8920_IOP_BASE,value))return;
         fail(i,i->cache_lines?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
@@ -290,11 +337,17 @@ arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
 }
 arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,void *owner) {
+    return s5l8920_iop_service_with_timebase(i,memory,signal_ap,NULL,owner);
+}
+arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,void *owner) {
     if(!i || !i->initialized || !i->reset_seen || i->servicing)return ARM_HALT;
     if(!i->running || i->reset_asserted)return ARM_OK;
     if(i->failure.reason || !memory)return ARM_HALT;
-    i->memory=memory;i->signal_ap=signal_ap;i->memory_owner=owner;i->servicing=true;
+    i->memory=memory;i->signal_ap=signal_ap;i->timebase=timebase;
+    i->memory_owner=owner;i->servicing=true;
     arm_status_t result=arm_step(&i->cpu);
-    i->servicing=false;i->memory=NULL;i->signal_ap=NULL;i->memory_owner=NULL;
+    i->servicing=false;i->memory=NULL;i->signal_ap=NULL;i->timebase=NULL;i->memory_owner=NULL;
     return result;
 }

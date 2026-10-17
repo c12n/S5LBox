@@ -23,6 +23,12 @@ typedef uint8_t *(*s5l8920_iop_memory_fn)(void *,uint32_t,uint32_t);
  * return must leave the receiver unchanged. This does not acknowledge a
  * message or advance the AP CPU. The owner is shared with the RAM provider. */
 typedef bool (*s5l8920_iop_signal_fn)(void *,unsigned,uint32_t);
+/* Pure read of the owner's currently supplied counter; never advances time. */
+typedef uint64_t (*s5l8920_iop_timebase_fn)(void *);
+typedef struct {
+    uint32_t remaining;
+    bool configured,programmed,enabled,expired,pending;
+} s5l8920_iop_timer_t;
 /* Resident storage for the optional functional cache policy. Sixteen-byte
  * granules follow the firmware's maintenance stride, not measured geometry. */
 typedef struct {
@@ -54,6 +60,7 @@ typedef struct {
     /* Transient execution binding: never retained after service returns. */
     s5l8920_iop_memory_fn memory;
     s5l8920_iop_signal_fn signal_ap;
+    s5l8920_iop_timebase_fn timebase;
     void *memory_owner;
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
@@ -62,6 +69,7 @@ typedef struct {
     size_t cache_capacity;
     uint32_t cache_address;
     bool cache_ready,cache_enabled,cache_address_valid;
+    s5l8920_iop_timer_t timer;
 } s5l8920_iop_t;
 
 /* Explicit partial ARMv4T profile, not a physical CPU/revision identification.
@@ -93,7 +101,8 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
  * no inferred ratio to AP clocks. Unsupported memory and instructions stop
  * at the original PC. Earlier successful stores in a multi-store remain.
  * This standalone form maps the low firmware window and explicitly
- * configured IOP VIC/cache windows. */
+ * configured IOP VIC/cache/timer windows; shared timebase reads require the
+ * separately borrowed capability below. */
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                s5l8920_iop_memory_fn memory,void *owner);
 /* As above, with a borrowed AP signal capability for this instruction only.
@@ -102,6 +111,27 @@ arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
  * Neither capability nor owner survives the call, including failure. */
 arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,void *owner);
+/* Also lends a read-only shared timebase for this instruction. Only a selected
+ * timer exposes aligned BF100200/204 reads; NULL leaves them unavailable.
+ * Each word samples the actual supplied counter independently. No callback,
+ * owner or implicit clock advance survives the call, including failure. */
+arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,void *owner);
+
+/* Explicit cold functional timer1: BF10020C count, BF100224 control, VIC0
+ * hardware source5. Requires configured VICs and precedes first CPU reset.
+ * Repeated configuration preserves state. Count replacement rearms without
+ * acknowledging pending; control bit0 enables, bit1 acknowledges. Expiry is
+ * latched until acknowledgement. Zero waits for the next positive tick.
+ * Count/control readbacks, other bits/widths and timer0 accesses are refused.
+ * Permitted CPU reset/hold preserves this peripheral; init discards it. This
+ * does not establish physical reset, gating, frequency or synchronization.
+ * Supplied ticks advance only this timer, independent of CPU execution/RUN.
+ * An attached board forwards its supplied timebase ticks to a selected timer.
+ * Clock/configuration calls must occur between instructions. */
+bool s5l8920_iop_timer_configure(s5l8920_iop_t *i);
+bool s5l8920_iop_timer_clock(s5l8920_iop_t *i,uint64_t ticks);
 
 /* Explicit generic unified write-back policy for low shared RAM. This is
  * not a measured cache identity/geometry/replacement policy. The owner lends
@@ -124,7 +154,8 @@ bool s5l8920_iop_cache_configure(s5l8920_iop_t *i,
 /* Explicit optional cold PL192 configuration for the three observed windows.
  * Independent controller IRQ/FIQ outputs are aggregated into the IOP CPU's
  * inputs; physical daisy topology, synchronizer latency and revision are not
- * inferred. No external peripheral levels or mailbox completion are supplied.
+ * inferred. VIC configuration supplies no external peripheral levels or
+ * mailbox completion; an optional timer separately drives hardware source5.
  * Configure before the first CPU reset. Repeating configuration preserves
  * state. CPU reset affects only the CPU/window; it does not reset these
  * separately configured controllers. Reinitialize the component for cold

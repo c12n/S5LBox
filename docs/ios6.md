@@ -23,6 +23,54 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional IOP deadline timer
+
+An explicitly configured IOP timer implements the original timer1 count and
+control writes at `0xbf10020c` and `0xbf100224`. The firmware's table at
+`0xfb90` identifies both timer pairs and interrupt sources. Startup selects
+entry1; the original registration and enable helpers install its callback and
+enable source5 in the IOP's first interrupt controller. Configuration requires
+those controllers and precedes the first CPU reset. No timer is selected by
+default.
+
+Count writes replace the remaining interval and rearm expiry without clearing
+an existing cause. Control bit0 enables counting; bit1 acknowledges the cause.
+Supplied ticks decrement an enabled interval and latch one event at expiry;
+a zero interval waits for the next positive tick. Masking or ending interrupt
+service does not acknowledge it. Timer acknowledgement preserves an independent
+software request on source5. The AP's timer and interrupt state stay separate.
+Count/control readbacks, timer0 access from the IOP, unsupported control bits
+and widths remain unavailable.
+
+Board service lends a read-only capability for the actual supplied 64-bit
+timebase at `0xbf100200/204`. Each word samples the counter independently,
+allowing the original high/low/high retry loop to handle rollover. Standalone
+service without this capability refuses those reads. Reads and CPU execution
+do not advance time. An attached selected timer receives the same explicit
+ticks as the board, even while its CPU is held or gated; this is a functional
+clock policy, not a measured frequency or physical gating/reset contract.
+Permitted CPU reset preserves the separately configured peripheral, while
+component initialization discards it. No borrowed capability survives service.
+
+Bounded original routines now initialize the timer, read stable or rolling
+time, program future, clamped, past, equal and null-callback deadlines, and
+handle real timer IRQ/FIQ expiration. The original handler acknowledges the
+timer before its callback and restores the interrupted registers. These tests
+use explicit thread, callback-table and vector state. The isolated startup
+passes timer initialization but later reports `grab_chunk: heap overflow`,
+then enters its fatal loop at `0x8a3c`; that fixture does not establish a
+complete host setup or boot. Its diagnostic executes the original panic path,
+including cache cleaning and disable, without patching instructions.
+
+In the separate conditional kernel run, the original AP driver supplies heap
+address `0x01718000` and length `0xa000`. With the timer selected, the IOP
+retires 3,354 instructions and stops at `0xd448` on its first word store to
+that heap. The controller currently maps only the low firmware window, so
+translation of this additional RAM range remains unavailable. This run retains
+the earlier audio-write exception and explicit clock, cache and board inputs;
+it does not establish a genuine connected boot. The genuine audio-control
+stop and the previous cache-only kernel trace remain unchanged.
+
 ## Optional functional IOP cache
 
 The IOP can explicitly select a generic unified write-back cache for its low
@@ -95,8 +143,8 @@ controllers; reinitializing the component discards them. Physical reset wiring
 is not inferred. Both observed clock gates must be open for AP access. The
 IOP bus has the same aligned-word register semantics. Protection programming
 and identification replies remain unavailable, as do external peripheral
-levels, timers and mailbox message completion. Cache operations require the
-separately selected functional policy above.
+levels and mailbox message completion. The optional timer and cache each
+require explicit configuration as described above.
 
 The unmodified IOP IRQ vector, exception wrappers, dispatcher and software-clear
 helper execute with an explicit interrupted context, thread and callback table.
@@ -2131,7 +2179,7 @@ external input while clearing the timer configuration. This is a functional
 one-shot interpretation of the firmware sequences. Logical expiry follows
 the supplied interval; a zero interval waits for the next supplied tick.
 It does not establish physical bus/clock phase. Unprogrammed and post-expiry
-count reads, control reads, other control bits and the second timer remain
+count reads, control reads, other control bits and AP access to the second timer remain
 refused because their observable semantics are not established.
 
 A frozen private fixture executes eight original iBoot calls, including a
