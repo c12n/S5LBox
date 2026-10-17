@@ -15,6 +15,7 @@
 #include "s5l8920_swi.h"
 #include "s5l8920_cdma.h"
 #include "s5l8920_iop.h"
+#include "s5l8920_fmi.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -284,6 +285,7 @@ typedef struct {
     s5l8920_dsim_t *dsim;
     pinot_panel_t *pinot;
     s5l8920_swi_t *swi;
+    s5l8920_fmi_t *fmi[S5L8920_FMI_COUNT];
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -737,6 +739,18 @@ bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial);
  * No component is attached by default; other channels/contexts stay unmapped. */
 bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma);
 bool s5l8920_cdma_board_service(s5l8920_t *m);
+
+/* Optional cold, caller-owned polled NAND controller on81200000/81300000
+ * and raw gate26/27. Bit31 asserts the functional controller reset. Gate0
+ * pauses service; nibbleF permits service/MMIO. No default attachment or
+ * endpoint. Keep each peer alive and exclusively owned by one board. Board
+ * reset/free detach without mutating/freeing the peer; they refuse reentry
+ * during an endpoint callback.
+ * The transient endpoint capability only runs during explicit board_service;
+ * reads never execute commands. Unknown registers/widths/commands refuse. */
+bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi);
+bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
+                             s5l8920_fmi_device_fn device,void *owner);
 
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.

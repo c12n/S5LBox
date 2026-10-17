@@ -67,6 +67,22 @@ static bool iop_vic_address(uint32_t address) {
         (address-S5L8920_IOP_VIC_BASE)%S5L8920_IOP_VIC_STRIDE<0x1000u;
 }
 
+static bool fmi_address(uint32_t address,unsigned *bank,uint32_t *offset) {
+    if(address<S5L8920_FMI_BASE)return false;
+    uint32_t relative=address-S5L8920_FMI_BASE;
+    *bank=relative/S5L8920_FMI_STRIDE;*offset=relative%S5L8920_FMI_STRIDE;
+    return *bank<S5L8920_FMI_COUNT && *offset<0x1000u;
+}
+static bool fmi_enabled(const s5l8920_t *m,unsigned bank) {
+    const s5l8920_clock_gate_t *g=&m->clock_gate[S5L8920_FMI_GATE+bank];
+    return m->fmi[bank] && g->configured && (g->value&0x8000000fu)==15u;
+}
+static bool fmi_servicing(const s5l8920_t *m) {
+    for(unsigned bank=0;bank<S5L8920_FMI_COUNT;bank++)
+        if(m->fmi[bank] && m->fmi[bank]->servicing)return true;
+    return false;
+}
+
 static bool dsim_address(uint32_t address) {
     return address>=S5L8920_DSIM_BASE && address-S5L8920_DSIM_BASE<0x1000u;
 }
@@ -358,6 +374,18 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    unsigned fmi_bank;uint32_t fmi_offset;
+    if(fmi_address(address,&fmi_bank,&fmi_offset)) {
+        uint32_t value;
+        if(!m->fmi[fmi_bank] || fmi_offset<0x400u || fmi_offset>=0x450u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if(!fmi_enabled(m,fmi_bank) || !s5l8920_fmi_read(m->fmi[fmi_bank],fmi_offset,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     if(iop_address(address)) {
         uint32_t offset=address-S5L8920_IOP_BASE,value;
         if(!m->iop || offset<0x100u || offset>=0x11cu)
@@ -573,6 +601,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
         return;
     }
+    unsigned fmi_bank;uint32_t fmi_offset;
+    if(fmi_address(address,&fmi_bank,&fmi_offset)) {
+        if(!m->fmi[fmi_bank] || fmi_offset<0x400u || fmi_offset>=0x450u)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if(!fmi_enabled(m,fmi_bank) || !s5l8920_fmi_write(m->fmi[fmi_bank],fmi_offset,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
     if(iop_address(address)) {
         uint32_t offset=address-S5L8920_IOP_BASE;
         if(!m->iop || offset<0x100u || offset>=0x11cu)
@@ -779,10 +817,13 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             unsigned index=(address-S5L8920_CLOCK_GATE_BASE)/4u;
             s5l8920_clock_gate_t *gate=&m->clock_gate[index];
             bool iop_reset=m->iop && index==S5L8920_IOP_RESET_GATE;
-            uint32_t writable=iop_reset?0x8000000fu:15u;
+            s5l8920_fmi_t *fmi=index>=S5L8920_FMI_GATE && index<S5L8920_FMI_GATE+S5L8920_FMI_COUNT?
+                m->fmi[index-S5L8920_FMI_GATE]:NULL;
+            uint32_t writable=iop_reset || fmi?0x8000000fu:15u;
             if (!gate->configured || ((value^gate->value)&~writable) ||
                 ((value&15u)!=0u && (value&15u)!=15u) ||
-                (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)))
+                (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)) ||
+                (fmi && !s5l8920_fmi_reset_line(fmi,(value>>31)!=0u)))
                 fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
             else gate->value=value;
         } else if (offset==S5L8920_DEADLINE_COUNT) {
@@ -1521,6 +1562,26 @@ bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
        (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x80000000u))return false;
     m->iop=iop;return true;
 }
+
+bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
+    if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !fmi || !fmi->initialized ||
+       access_failed(m) || fmi->servicing || fmi_servicing(m) ||
+       !m->clock_gate[S5L8920_FMI_GATE+bank].configured)return false;
+    if(m->fmi[bank])return m->fmi[bank]==fmi;
+    for(unsigned n=0;n<S5L8920_FMI_COUNT;n++)if(m->fmi[n]==fmi)return false;
+    if(fmi->enabled || fmi->pending || fmi->reset_asserted ||
+       (m->clock_gate[S5L8920_FMI_GATE+bank].value&0x80000000u))return false;
+    m->fmi[bank]=fmi;return true;
+}
+bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
+                             s5l8920_fmi_device_fn device,void *owner) {
+    if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !m->fmi[bank] ||
+       !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || fmi_servicing(m))return false;
+    uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
+    if((gate&15u)!=0u && (gate&15u)!=15u)return false;
+    if(!(gate&15u) || (gate&0x80000000u))return true;
+    return s5l8920_fmi_service(m->fmi[bank],device,owner);
+}
 static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
     s5l8920_t *m=owner;
     if(bank>=S5L8920_VIC_COUNT || !vic_access_supported(&m->vic[bank],PL192_SOFTINT) ||
@@ -1609,7 +1670,7 @@ bool s5l8920_swi_board_source_clock(s5l8920_t *m,uint64_t cycles) {
 }
 
 bool s5l8920_reset(s5l8920_t *m) {
-    if (!m || !m->ram) return false;
+    if (!m || !m->ram || fmi_servicing(m)) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
     m->miu.value=m->miu.initial;
     m->ram_boot_window=m->miu.configured && (m->miu.value&3u)==2u;
@@ -1626,6 +1687,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->swi=NULL;
     m->cdma=NULL;
     m->iop=NULL;
+    memset(m->fmi,0,sizeof m->fmi);
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)
         m->clock_gate[gate].value=m->clock_gate[gate].initial;
@@ -1687,7 +1749,7 @@ bool s5l8920_init(s5l8920_t *m) {
 }
 
 void s5l8920_free(s5l8920_t *m) {
-    if (!m) return;
+    if (!m || fmi_servicing(m)) return;
     free(m->ram);
     memset(m,0,sizeof *m);
 }

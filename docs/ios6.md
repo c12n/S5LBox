@@ -23,6 +23,63 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional polled NAND reset and identification
+
+A separate optional controller now supports the matching iBoot's polled NAND
+reset and READID paths on `0x81200000` and `0x81300000`. Original routines
+at `0x4ff164b8` and `0x4ff164e8` select raw gates `0x26` and `0x27`; the
+reset helper pulses their bit 31. Each controller is borrowed explicitly.
+Board reset detaches it, and the existing machine defaults remain unchanged.
+
+The implemented path selects one of eight chip lines, stages command `0xff`
+or `0x90`, and queues work through register `0x410`. An explicit service call
+invokes a transient device capability. Reset completion requires the endpoint
+to perform its reset; READID completion requires eight supplied bytes for the
+requested address. Missing or rejecting backing leaves the command pending
+without setting completion bits. No IDs, chip count, or absent-chip responses
+are installed by default. The original discovery loop also issues commands
+with no chip selected. That case requires explicit bus backing for completion
+and sampled data; it has no implicit zero/all-ones result. Multiple selected
+chips remain unsupported.
+
+Register `0x444` exposes serviced command completion with write-one-to-clear
+acknowledgements. Original `0x50`/zero strobes latch one backed ID byte per
+explicit service quantum, and repeated reads of `0x448` return that stable
+byte. They neither consume additional bytes nor advance device work. Timing
+register `0x408` retains programmed configuration; this PIO path requires
+zero timing and `0x424=0` for byte transfers. This is functional scheduling,
+not measured electrical timing. Reset assertion cancels pending work and
+invalidates controller programming; endpoint reset remains a separate NAND
+command. Closed gates pause service and refuse MMIO.
+
+Isolated original firmware now executes reset at `0x4ff0370c` and READID at
+`0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
+byte transfers, timing restoration and deselection. Reset returns after 95
+instructions, selected-chip READID after 589 and an explicitly backed
+unselected-bus READID after 578 with the fixture's explicit
+one-tick/service-per-instruction schedule. These fixtures supply a controller
+object, initial mode/timing, stack and diagnostic ID backing from two original
+match-table records. They also retain an explicit all-`ff` response case.
+Those inputs do not select or establish the target's physical NAND geometry.
+Unavailable backing/address cases leave the output unchanged, including
+unselected chip lines without an explicit bus response.
+
+Independent original-firmware fixtures establish that the `#ce` handoff
+property is a count derived from 16 eight-byte ID records, accompanied by a
+bitmap. An isolated sparse-memory fixture also executes the original 16-slot
+scanner, transferring 128 backed bytes in 9,584 instructions. Its output goes
+through the original geometry matcher, which checks IDs, chip layout and a
+caller-supplied bus count. One tested diagnostic layout matches original tables;
+the other tested layouts take the original rejection paths. The publisher
+then writes count, bitmap and a bounded geometry prefix before refusing an
+unprepared state read at `0x4ff16a74`. Its property lookup requires existing
+fields of the expected size. This does not establish a complete NAND handoff
+or the target's physical geometry. No resulting diagnostic
+property value is supplied to the kernel. Its guarded `#ce` read remains the
+conditional frontier, and the genuine audio-control write remains unresolved.
+Page/OOB storage, ECC, DMA, interrupts, FTL, complete controller initialization,
+the connected bootloader chain, SpringBoard and physical behavior are unverified.
+
 ## Optional IOP shared RAM aperture
 
 The original version1 AppleARM7M address conversion at `0x8065f9bc` subtracts
