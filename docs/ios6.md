@@ -26,6 +26,41 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## IOP access to shared NAND controllers
+
+The IOP can access the two explicitly attached FMI controllers through a
+capability borrowed for one instruction. Only aligned word accesses in the
+existing `0x81200000` and `0x81300000` register windows are forwarded. The
+board applies the same attachment, clock-gate, reset and register checks as
+its AP path, using the existing controller state. Missing backing and
+unsupported accesses stop the IOP with its own first-fault diagnostics;
+they do not set the AP bus-failure latch. Standalone service without this
+capability still refuses these windows. All callbacks and owners are cleared
+when service returns, including instruction and bus failures.
+
+Register accesses do not clock NAND commands, supply data, advance time or
+add interrupt routing. They do not count as shared-RAM stores or invalidate
+the AP exclusive monitor. IOP board service is refused during a CDMA/FMI
+endpoint callback, before either CPU executes.
+
+The matching original IOP instruction at `0x2884`, `STR r8,[lr,#0x400]`,
+attempts to enable FMI0 with `0x81200400=1`. An actual instruction regression
+failed before routing and now enables the attached controller and retires
+once, preserving the AP CPU. Tests also cover both banks, shared readback,
+pending commands without endpoints, reset/gating, absent capabilities,
+unsupported accesses, first-fault retention and reentry.
+
+A conditional whole-kernel run with explicit cold FMI attachments now retires
+that original store and reaches IOP `0x28b4`, an unsupported ARMv4T `STRH`.
+The IOP retires 202,958 instructions, 268 beyond the previous stop; the AP
+reaches 324,677,925, an additional 6,700. FMI0 is enabled with the original
+zero-mask programming, no pending command, and no supplied NAND bytes. The
+first 514 preceding trace lines match the previous run. The experiment keeps
+the earlier audio exception and CPU/cache/clock/device hypotheses, and treats
+the complete captured NAND device-tree node as final handoff data. These
+inputs and cold controllers do not establish a continuous firmware handoff.
+Complete iOS 6 boot and usable storage remain unproven.
+
 ## Optional polled NAND commands
 
 A separate optional controller now supports the matching iBoot's polled NAND
@@ -230,8 +265,8 @@ zero, `0xffff`, `0x10000` and `0xfffff`, within its diagnostic geometry;
 unlisted rows have no implicit backing. Earlier `0x123456` testing established
 address packing only and exceeded that fixture's capacity.
 
-The kernel's guarded `#ce` read remains the conditional frontier, and the
-genuine audio-control write remains unresolved. Full NAND read completion,
+At that checkpoint, the kernel's guarded `#ce` read was the conditional
+frontier. The genuine audio-control write remains unresolved. Full NAND read completion,
 physical page/OOB geometry, ECC processing, NAND-controller interrupts, FTL,
 alternate initialization modes, the connected
 bootloader chain, SpringBoard and physical behavior are unverified.

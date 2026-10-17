@@ -26,6 +26,12 @@ typedef uint8_t *(*s5l8920_iop_memory_fn)(void *,uint32_t,uint32_t);
 typedef bool (*s5l8920_iop_signal_fn)(void *,unsigned,uint32_t);
 /* Pure read of the owner's currently supplied counter; never advances time. */
 typedef uint64_t (*s5l8920_iop_timebase_fn)(void *);
+/* Borrowed access to one existing FMI controller. Only aligned word accesses
+ * in the two FMI windows reach this callback; bank/offset identify the target.
+ * For writes, value is input only; successful reads supply it. False means
+ * refused with no device effect. Do not mutate the IOP or its owning board,
+ * service endpoints, or advance time. The owner is shared with RAM. */
+typedef bool (*s5l8920_iop_fmi_fn)(void *,unsigned,uint32_t,bool,uint32_t *);
 typedef struct {
     uint32_t remaining;
     bool configured,programmed,enabled,expired,pending;
@@ -62,6 +68,7 @@ typedef struct {
     s5l8920_iop_memory_fn memory;
     s5l8920_iop_signal_fn signal_ap;
     s5l8920_iop_timebase_fn timebase;
+    s5l8920_iop_fmi_fn fmi;
     void *memory_owner;
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
@@ -129,6 +136,14 @@ arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
 arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
     s5l8920_iop_timebase_fn timebase,void *owner);
+/* Also lends FMI access for this instruction only. No arbitrary board-bus
+ * forwarding or RAM fallback: only 81200000/81300000 + offsets below 1000
+ * can reach the capability. Its owner enforces attachment, clocks, reset and
+ * supported registers/values. NULL leaves both windows unavailable. Failure
+ * belongs to the IOP, not the AP. All bindings are cleared on return. */
+arm_status_t s5l8920_iop_service_with_fmi(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,void *owner);
 
 /* Explicit cold functional timer1: BF10020C count, BF100224 control, VIC0
  * hardware source5. Requires configured VICs and precedes first CPU reset.

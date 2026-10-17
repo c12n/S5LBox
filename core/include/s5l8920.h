@@ -782,6 +782,10 @@ bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
  * Original IOP word writes to the three AP SOFTINT selectors set real pending
  * sources through the existing PL192 masks and IRQ/FIQ routing. Such signals
  * do not count as RAM stores, acknowledge messages or execute the AP CPU.
+ * Aligned IOP word accesses to attached FMI banks use their existing register,
+ * gate and reset checks. Missing/refusing controllers fault only the IOP;
+ * accesses do not service endpoints, advance time or add interrupt routing.
+ * Service during a CDMA/FMI endpoint callback is refused without CPU work.
  * Reset/free detach the peer; no RAM/owner pointer survives service. The
  * owner must reset and reattach explicitly. No component or image by default. */
 bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop);

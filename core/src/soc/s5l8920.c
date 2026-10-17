@@ -1661,8 +1661,18 @@ static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
 static uint64_t iop_timebase(void *owner) {
     const s5l8920_t *m=owner;return m->timebase_ticks;
 }
+static bool iop_fmi(void *owner,unsigned bank,uint32_t offset,bool write,uint32_t *value) {
+    s5l8920_t *m=owner;
+    if(!m || !m->ram || !m->iop || !m->iop->servicing || !iop_enabled(m) ||
+       access_failed(m) || endpoint_servicing(m) || bank>=S5L8920_FMI_COUNT ||
+       (offset&3u) || !fmi_register_window(offset) || !fmi_enabled(m,bank) || !value)return false;
+    /* Reuse the controller, not the AP bus: a refusal must leave the AP's
+     * first-fault latch and CPU untouched. No endpoint work happens here. */
+    return write?s5l8920_fmi_write(m->fmi[bank],offset,*value):
+                 s5l8920_fmi_read(m->fmi[bank],offset,value);
+}
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
-    if(!m || !m->ram || !m->iop || access_failed(m) ||
+    if(!m || !m->ram || !m->iop || access_failed(m) || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
        !m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].configured)return ARM_HALT;
     unsigned a=m->clock_gate[S5L8920_IOP_RESET_GATE].value&15u;
@@ -1670,7 +1680,7 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
     uint64_t before=m->iop->bytes_written;
-    arm_status_t result=s5l8920_iop_service_with_timebase(m->iop,iop_ram,iop_signal_ap,iop_timebase,m);
+    arm_status_t result=s5l8920_iop_service_with_fmi(m->iop,iop_ram,iop_signal_ap,iop_timebase,iop_fmi,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }
