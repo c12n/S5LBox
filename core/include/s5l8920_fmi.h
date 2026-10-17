@@ -30,6 +30,7 @@ typedef struct {
     uint8_t programmed, pending;
     bool initialized, enabled, reset_asserted, id_valid, data_valid, servicing;
     uint64_t commands, bytes_latched;
+    uint32_t ecc_mask;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -38,6 +39,10 @@ typedef struct {
  * Timing writes at 0x408 are accepted before mode enable, as required by the
  * bootloader's initialization order. They do not enable commands or readback;
  * reset, pending work and an active byte strobe still refuse timing writes.
+ * ECC mask 0x814 retains only the observed zero programming after mode enable;
+ * readback requires that explicit write. Reset invalidates its programming.
+ * Other mask values, ECC pending/status, mask polarity and ECC IRQ effects
+ * are not modeled. Mask programming never completes or acknowledges a command.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
@@ -49,7 +54,7 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
  * strobe exposes a stable byte at 0x448 until lowered; repeated reads do not
  * consume more data. Register 0x444 reports actual command completion with W1C
  * masks 1/9 (bits 0/3).
- * No IRQ, page/OOB access, DMA, ECC, status 0x70 command, multiple-chip selection,
+ * No IRQ, page/OOB access, DMA, ECC processing, status 0x70 command, multiple-chip selection,
  * physical timing model or default endpoint is provided. Timing 0x408 retains
  * configuration; PIO ID strobes require its value zero and register 0x424=0.
  * Counters are diagnostic effects, not measured physical time or capacity. */

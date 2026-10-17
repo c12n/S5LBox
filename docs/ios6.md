@@ -59,6 +59,16 @@ that first timing write. This change preserves the programmed value without
 enabling commands or readback. Reset still invalidates it; reset assertion,
 pending work, an active byte strobe and callback reentry still refuse writes.
 
+The ECC mask at `0x814` now retains the observed zero programming after mode
+enable. Matching controller firmware identifies it by reading `0x810` and
+`0x814` for its ECC pending/mask diagnostic. Original iBoot initialization
+at `0x4ff037f4` writes zero to the mask before setting its object flag.
+Readback requires an explicit write, and reset invalidates that programming.
+Nonzero masks and adjacent ECC registers remain unavailable. Mask polarity,
+ECC processing and interrupt effects are not established; this write neither
+completes nor acknowledges a command. Gate, reset, pending-work, active-byte
+and callback restrictions still apply.
+
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
 byte transfers, timing restoration and deselection. Reset returns after 95
@@ -80,8 +90,15 @@ These remain explicit routine entries with diagnostic endpoints and supplied
 physical RAM, not a connected boot sequence or measured timing. Extending into
 the original `0x4ff0219c` caller executes its actual heap allocation and
 zeroing, then controller initialization. With the timing-order fix it reaches
-the unsupported `0x81200814` write at `0x4ff037f4`; neither that write nor
-the remaining initialization is bypassed.
+the ECC-mask write at `0x4ff037f4`. With explicit zero-mask programming it now
+completes initialization and reset/sleep/wake/READID on both controllers,
+then the original logging, filtering, merge and geometry matching. All 256
+scanner bytes and the merged table match the diagnostic endpoint inputs.
+The caller stops in its original divide-by-zero fatal path: its timing
+calculation consumes clock state that this fragment fixture has not yet
+initialized. Neither the clock result nor fatal path is substituted. The
+next dependency is executing the original clock-state producer before this
+caller; complete initialization remains unverified.
 
 Independent original-firmware fixtures establish that the `#ce` handoff
 property is a count derived from 16 eight-byte ID records, accompanied by a
@@ -96,7 +113,7 @@ fields of the expected size. This does not establish a complete NAND handoff
 or the target's physical geometry. No resulting diagnostic
 property value is supplied to the kernel. Its guarded `#ce` read remains the
 conditional frontier, and the genuine audio-control write remains unresolved.
-Page/OOB storage, ECC, DMA, interrupts, FTL, complete controller initialization,
+Page/OOB storage, ECC processing, DMA, interrupts, FTL, complete controller initialization,
 the connected bootloader chain, SpringBoard and physical behavior are unverified.
 
 ## Optional IOP shared RAM aperture

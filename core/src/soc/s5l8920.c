@@ -77,6 +77,10 @@ static bool fmi_enabled(const s5l8920_t *m,unsigned bank) {
     const s5l8920_clock_gate_t *g=&m->clock_gate[S5L8920_FMI_GATE+bank];
     return m->fmi[bank] && g->configured && (g->value&0x8000000fu)==15u;
 }
+static bool fmi_register_window(uint32_t offset) {
+    return (offset>=0x400u && offset<0x450u) ||
+           (offset>=0x814u && offset<0x818u);
+}
 static bool fmi_servicing(const s5l8920_t *m) {
     for(unsigned bank=0;bank<S5L8920_FMI_COUNT;bank++)
         if(m->fmi[bank] && m->fmi[bank]->servicing)return true;
@@ -377,7 +381,7 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
     unsigned fmi_bank;uint32_t fmi_offset;
     if(fmi_address(address,&fmi_bank,&fmi_offset)) {
         uint32_t value;
-        if(!m->fmi[fmi_bank] || fmi_offset<0x400u || fmi_offset>=0x450u)
+        if(!m->fmi[fmi_bank] || !fmi_register_window(fmi_offset))
             fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
         else if(size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
@@ -603,7 +607,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     }
     unsigned fmi_bank;uint32_t fmi_offset;
     if(fmi_address(address,&fmi_bank,&fmi_offset)) {
-        if(!m->fmi[fmi_bank] || fmi_offset<0x400u || fmi_offset>=0x450u)
+        if(!m->fmi[fmi_bank] || !fmi_register_window(fmi_offset))
             fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
         else if(size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);

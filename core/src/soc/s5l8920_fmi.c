@@ -3,7 +3,7 @@
 #include "s5l8920_fmi.h"
 #include <string.h>
 
-enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u };
+enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u };
 enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u };
 
 bool s5l8920_fmi_init(s5l8920_fmi_t *f) {
@@ -32,6 +32,9 @@ bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     case 0x448u:
         if(f->control!=0x50u || !f->data_valid)return false;
         *value=f->data;return true;
+    case 0x814u:
+        if(!(f->programmed&ECC_MASK))return false;
+        *value=f->ecc_mask;return true;
     default:return false;
     }
 }
@@ -92,6 +95,9 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     case 0x424u:
         if(value)return false;
         f->programmed|=PIO;return true;
+    case 0x814u:
+        if(value)return false;
+        f->ecc_mask=value;f->programmed|=ECC_MASK;return true;
     default:return false;
     }
 }

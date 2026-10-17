@@ -25,6 +25,8 @@ static bool device(void *owner,unsigned chip,uint8_t command,uint8_t address,uin
         CHECK(!s5l8920_fmi_reset_line(e->controller,true));
         CHECK(!s5l8920_fmi_write(e->controller,0x400,1));
         CHECK(!s5l8920_fmi_write(e->controller,0x408,0xffff));
+        CHECK(!s5l8920_fmi_write(e->controller,0x814,0));
+        CHECK(!s5l8920_fmi_read(e->controller,0x814,&value) && value==0xa5a5a5a5);
         CHECK(!s5l8920_fmi_read(e->controller,0x444,&value) && value==0xa5a5a5a5);
         CHECK(!s5l8920_fmi_service(e->controller,device,e));
         CHECK(!memcmp(&before,e->controller,sizeof before));
@@ -69,7 +71,7 @@ static void test_configuration(void) {
     reject(0x40c,1);reject_read(0x444);reject(0x400,0);reject(0x400,2);wr(0x400,1);
     CHECK(rd(0x40c)==0 && rd(0x444)==0);reject_read(0x408);reject_read(0x448);
     CHECK(!s5l8920_fmi_read(&fmi,0x444,NULL));
-    const uint32_t unknown[]={0,0x404,0x40d,0x41c,0x428,0x440,0x44c,0x814,UINT32_MAX};
+    const uint32_t unknown[]={0,0x404,0x40d,0x41c,0x428,0x440,0x44c,0x808,0x810,0x818,UINT32_MAX};
     for(unsigned n=0;n<sizeof unknown/sizeof unknown[0];n++) { reject(unknown[n],0);reject_read(unknown[n]); }
     reject_read(0x400);reject_read(0x410);reject_read(0x414);reject_read(0x418);reject_read(0x420);reject_read(0x424);
     reject(0x40c,3);reject(0x40c,256);reject(0x414,0x70);reject(0x414,0);reject(0x418,256);
@@ -99,13 +101,25 @@ static void test_timing_before_mode(void) {
     CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);reject_read(0x408);
     wr(0x408,0x12345678);CHECK(rd(0x408)==0x12345678);
 }
+static void test_ecc_mask(void) {
+    init();reject_read(0x814);reject(0x814,0);wr(0x400,1);reject_read(0x814);
+    reject(0x814,1);reject(0x814,0x1a8);reject(0x814,UINT32_MAX);wr(0x814,0);
+    CHECK(rd(0x814)==0 && !fmi.pending && !fmi.status && !fmi.commands && !fmi.bytes_latched);
+    s5l8920_fmi_t before=fmi;wr(0x814,0);
+    CHECK(!memcmp(&before,&fmi,sizeof before));reject_read(0x810);
+    CHECK(s5l8920_fmi_service(&fmi,device,&endpoint) && !endpoint.calls);
+    CHECK(s5l8920_fmi_reset_line(&fmi,true));reject(0x814,0);reject_read(0x814);
+    CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);reject_read(0x814);
+    wr(0x814,0);CHECK(rd(0x814)==0);CHECK(s5l8920_fmi_init(&fmi));
+    wr(0x400,1);reject_read(0x814);
+}
 static void test_data(void) {
     for(unsigned chip=0;chip<8;chip++) {
-        init();uint8_t address=chip&1?0x20:0;configure(chip,address);wr(0x410,9);
+        init();uint8_t address=chip&1?0x20:0;configure(chip,address);wr(0x814,0);wr(0x410,9);
         s5l8920_fmi_t pending=fmi;
         for(unsigned n=0;n<10;n++)CHECK(rd(0x444)==0);
         CHECK(!memcmp(&pending,&fmi,sizeof pending) && !endpoint.calls);
-        reject(0x40c,0);reject(0x414,0xff);reject(0x408,0);reject(0x410,0);reject(0x400,1);
+        reject(0x40c,0);reject(0x414,0xff);reject(0x408,0);reject(0x410,0);reject(0x400,1);reject(0x814,0);
         CHECK(!s5l8920_fmi_service(&fmi,NULL,NULL));CHECK(!memcmp(&pending,&fmi,sizeof pending));
         endpoint.refuse=true;CHECK(!s5l8920_fmi_service(&fmi,device,&endpoint));
         CHECK(!memcmp(&pending,&fmi,sizeof pending));endpoint.refuse=false;endpoint.reenter=true;
@@ -118,7 +132,7 @@ static void test_data(void) {
             CHECK(s5l8920_fmi_service(&fmi,NULL,NULL));
             unsigned expected=(uint8_t)(endpoint.ids[chip][n]^address);
             CHECK(rd(0x448)==expected && rd(0x448)==expected && fmi.cursor==n+1);
-            reject(0x410,0x50);reject(0x408,1);wr(0x410,0);reject_read(0x448);
+            reject(0x410,0x50);reject(0x408,1);reject(0x814,0);wr(0x410,0);reject_read(0x448);
         }
         CHECK(fmi.bytes_latched==8 && endpoint.calls==2 && fmi.commands==1);reject(0x410,0x50);
         wr(0x408,0x12345678);CHECK(rd(0x408)==0x12345678);wr(0x40c,0);
@@ -161,6 +175,22 @@ static void test_board(void) {
     CHECK(!fmi.enabled && !other.enabled && fmi.timing==0xffff && other.timing==0x1234);
     s5l8920_clear_bus_failure(&board);
     bw(0,0x400,1);bw(1,0x400,1);bw(1,0x40c,128);CHECK(board.bus.read32(&board,reg(0,0x40c))==0);
+    (void)board.bus.read32(&board,reg(0,0x814));
+    CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED);s5l8920_clear_bus_failure(&board);
+    cold=fmi;board.bus.write32(&board,gate(0),0);board.bus.write32(&board,reg(0,0x814),0);
+    CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&cold,&fmi,sizeof cold));
+    s5l8920_clear_bus_failure(&board);board.bus.write32(&board,gate(0),15);
+    bw(0,0x814,0);s5l8920_clear_bus_failure(&board);bw(1,0x814,0);s5l8920_clear_bus_failure(&board);
+    CHECK(board.bus.read32(&board,reg(0,0x814))==0 && !board.bus_failure.reason);s5l8920_clear_bus_failure(&board);
+    CHECK(board.bus.read32(&board,reg(1,0x814))==0 && !board.bus_failure.reason);s5l8920_clear_bus_failure(&board);
+    cold=fmi;board.bus.write32(&board,reg(0,0x814),1);
+    CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
+    board.bus.write16(&board,reg(0,0x814),0);
+    CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
+    board.bus.write32(&board,reg(0,0x815),0);
+    CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
+    (void)board.bus.read32(&board,reg(0,0x810));
+    CHECK(board.bus_failure.reason==S5L8920_BUS_UNMAPPED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
     bw(0,0x408,0);bw(0,0x40c,2);bw(0,0x414,0x90);bw(0,0x418,0);bw(0,0x420,0);bw(0,0x410,9);
     s5l8920_fmi_t before=fmi;board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;board.timebase_ticks=123;
     arm_cpu_t cpu=board.cpu;
@@ -192,6 +222,6 @@ static void test_board(void) {
     before=fmi;s5l8920_free(&board);CHECK(!board.ram && !memcmp(&before,&fmi,sizeof before));
 }
 int main(void) {
-    test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_reset();test_board();s5l8920_free(&board);
+    test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_ecc_mask();test_reset();test_board();s5l8920_free(&board);
     printf("s5l8920_fmi: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }
