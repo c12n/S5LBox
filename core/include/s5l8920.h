@@ -66,6 +66,8 @@
 #define S5L8920_CHIPID_BASE UINT32_C(0xbf500000)
 #define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
 #define S5L8920_CLOCK_GATE_COUNT 52u
+#define S5L8920_CPU_GATE 0u
+#define S5L8920_CPU_IDLE_CONTROL UINT32_C(0x10)
 #define S5L8920_CLOCK_SELECT_BASE UINT32_C(0xbf100010)
 #define S5L8920_CLOCK_SELECT_COUNT 25u
 #define S5L8920_PLL_BASE UINT32_C(0xbf100004)
@@ -648,12 +650,14 @@ bool s5l8920_chipid_configure(s5l8920_t *m, unsigned offset, uint32_t value);
 /* Supply the initial raw word for one of 52 clock gates. Each gate requires
  * independent configuration before reads or writes. Identical reapplication
  * preserves guest programming; replacing the supplied initial word fails.
- * Aligned guest word writes may select low nibble 0/f only, preserving all
- * upper bits. Other widths, mixed modes, reset-bit changes and unconfigured
- * accesses refuse. Functional reset restores these inputs; free/init clears
+ * Aligned guest word writes may select low nibble 0/f. Gate zero also retains
+ * bit4 CPU idle control, independently of the CPU's WFI hint. Attached IOP/FMI
+ * gates handle their existing bit31 reset lines; all other upper-bit changes,
+ * other widths, mixed modes and unconfigured accesses refuse.
+ * Functional reset restores these inputs; free/init clears
  * them. Call between CPU steps; CPU and latched diagnostics are preserved.
  * This models bounded programming state, not clock signal generation, source
- * readiness, connected-device reset effects or physical power-on values. */
+ * readiness, CPU power transitions or physical power-on values. */
 bool s5l8920_clock_gate_configure(s5l8920_t *m, unsigned gate, uint32_t initial);
 
 /* Three independently configured PLL words. Supply a disabled initial word,

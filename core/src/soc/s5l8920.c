@@ -833,6 +833,9 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             s5l8920_fmi_t *fmi=index>=S5L8920_FMI_GATE && index<S5L8920_FMI_GATE+S5L8920_FMI_COUNT?
                 m->fmi[index-S5L8920_FMI_GATE]:NULL;
             uint32_t writable=iop_reset || fmi?0x8000000fu:15u;
+            /* The original CPU idle-update method changes bit4 of gate0.
+             * Retain its control state; the CPU's WFI hint remains separate. */
+            if (index==S5L8920_CPU_GATE) writable|=S5L8920_CPU_IDLE_CONTROL;
             if (!gate->configured || ((value^gate->value)&~writable) ||
                 ((value&15u)!=0u && (value&15u)!=15u) ||
                 (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)) ||

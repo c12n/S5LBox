@@ -3769,8 +3769,10 @@ static bool test_clock_gates(s5l8920_t *m) {
         for (unsigned bit=4;bit<32u;bit++) {
             uint32_t previous=m->clock_gate[i].value;
             s5l8920_clear_bus_failure(m);m->bus.write32(m,address,previous^(1u<<bit));
-            CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
-                  m->clock_gate[i].value==previous,"unknown upper gate bit accepted");
+            bool idle=i==S5L8920_CPU_GATE && (1u<<bit)==S5L8920_CPU_IDLE_CONTROL;
+            CHECK(m->bus_failure.reason==(idle?S5L8920_BUS_OK:S5L8920_BUS_REGISTER_REFUSED) &&
+                  m->clock_gate[i].value==(idle?previous^S5L8920_CPU_IDLE_CONTROL:previous),
+                  "CPU idle control or unknown upper gate bit boundary");
         }
         before=*m;
         CHECK(s5l8920_clock_gate_configure(m,i,initial) && !memcmp(m,&before,sizeof before),
@@ -3831,6 +3833,74 @@ static bool test_clock_gates(s5l8920_t *m) {
               m->cpu.r[0]==(write?0xaabbccdfu:0xaabbccd0u) &&
               m->clock_gate[gate].value==(write?0xaabbccdfu:0xaabbccd0u),"gate CPU retry failed");
     }
+    return true;
+}
+
+static bool test_cpu_idle_gate(s5l8920_t *m) {
+    static s5l8920_t before,after;
+    s5l8920_free(m);
+    bool ready=s5l8920_init(m);CHECK(ready,"idle gate initialize");if(!ready)return false;
+    CHECK(s5l8920_clock_gate_configure(m,0u,0x501fu),"explicit original idle control input");
+    put(m,0x100u,0xbf005042u); /* Original Thumb STR r2,[r0,r1] at 0x8078a094. */
+    m->cpu.r[0]=0xbf100000u;m->cpu.r[1]=0x78u;m->cpu.r[2]=0x500fu;
+    m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+    m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_I|ARM_CPSR_F|ARM_CPSR_C;
+    uint32_t flags=m->cpu.cpsr,pc=m->cpu.r[15];
+    CHECK(arm_step(&m->cpu)==ARM_OK && m->cpu.cycles==1u && m->cpu.r[15]==pc+2u,
+          "original CPU idle control store did not retire");
+    CHECK(!m->bus_failure.reason && m->clock_gate[0].value==0x500fu &&
+          m->bus.read32(m,S5L8920_CLOCK_GATE_BASE)==0x500fu,"idle control was not retained");
+    CHECK(m->cpu.r[0]==0xbf100000u && m->cpu.r[1]==0x78u && m->cpu.r[2]==0x500fu &&
+          m->cpu.cpsr==flags,"idle store changed operands or flags");
+    const uint32_t patterns[]={0x501fu,0x500fu,0xa5a50000u,0xa5a50010u};
+    for(unsigned p=0;p<sizeof patterns/sizeof patterns[0];p++) {
+        s5l8920_free(m);ready=s5l8920_init(m);
+        CHECK(ready,"idle control pattern initialize");if(!ready)return false;
+        uint32_t initial=patterns[p];
+        CHECK(s5l8920_clock_gate_configure(m,S5L8920_CPU_GATE,initial),"idle control explicit input");
+        for(unsigned field=0;field<32u;field++) {
+            s5l8920_clear_bus_failure(m);before=*m;
+            uint32_t value=(initial&~31u)|field;
+            bool accepted=(field&15u)==0u || (field&15u)==15u;
+            m->bus.write32(m,S5L8920_CLOCK_GATE_BASE,value);after=*m;
+            CHECK(m->bus_failure.reason==(accepted?S5L8920_BUS_OK:S5L8920_BUS_REGISTER_REFUSED),
+                  "idle bit weakened low-nibble validation");
+            if(accepted) {
+                before.clock_gate[0].value=value;
+                CHECK(m->bus.read32(m,S5L8920_CLOCK_GATE_BASE)==value,"idle control readback");
+            } else after.bus_failure=before.bus_failure;
+            CHECK(!memcmp(&before,&after,sizeof before),"idle write changed unrelated board state or partially committed");
+        }
+        s5l8920_clear_bus_failure(m);before=*m;
+        m->bus.write32(m,S5L8920_CLOCK_GATE_BASE,m->clock_gate[0].value^0x30u);
+        CHECK(m->bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED &&
+              m->clock_gate[0].value==before.clock_gate[0].value,"unknown bit partially changed idle control");
+        after=*m;
+        m->bus.write32(m,S5L8920_CLOCK_GATE_BASE,m->clock_gate[0].value^S5L8920_CPU_IDLE_CONTROL);
+        CHECK(!memcmp(m,&after,sizeof after),"latched failure allowed idle control update");
+        s5l8920_clear_bus_failure(m);before=*m;
+        CHECK(s5l8920_clock_gate_configure(m,0,initial) && !memcmp(m,&before,sizeof before),
+              "reapplying idle input erased guest control");
+        CHECK(!s5l8920_clock_gate_configure(m,0,initial^S5L8920_CPU_IDLE_CONTROL) &&
+              !memcmp(m,&before,sizeof before),"idle input replacement changed board");
+        CHECK(s5l8920_reset(m) && m->clock_gate[0].value==initial,"reset did not restore supplied idle control");
+        for(unsigned idle=0;idle<2;idle++) {
+            CHECK(s5l8920_reset(m),"idle WFI reset");
+            uint32_t value=(initial&~S5L8920_CPU_IDLE_CONTROL)|(idle?S5L8920_CPU_IDLE_CONTROL:0u);
+            m->bus.write32(m,S5L8920_CLOCK_GATE_BASE,value);
+            put(m,0x100u,0xbf00bf30u); /* WFI; NOP. Early completion is permitted. */
+            m->cpu.r[15]=S5L8920_RAM_BASE+0x100u;
+            m->cpu.cpsr=ARM_MODE_SVC|ARM_CPSR_T|ARM_CPSR_I|ARM_CPSR_F;
+            CHECK(!m->bus.wait_for_interrupt && arm_step(&m->cpu)==ARM_OK &&
+                  m->cpu.r[15]==S5L8920_RAM_BASE+0x102u && m->cpu.cycles==1u,
+                  "idle programming implicitly suspended functional WFI");
+            CHECK(m->clock_gate[0].value==value && !m->bus_failure.reason && !m->timebase_ticks &&
+                  !m->cpu.irq_line && !m->cpu.fiq_line,"WFI altered idle control or fabricated time/wake state");
+        }
+        s5l8920_free(m);
+        CHECK(!m->clock_gate[0].configured && !m->clock_gate[0].value,"free retained idle control");
+    }
+    s5l8920_free(m);
     return true;
 }
 
@@ -4190,6 +4260,7 @@ int main(void) {
     test_dsim_board();
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
+    if (!test_cpu_idle_gate(&m)) return 1;
     CHECK(s5l8920_init(&m), "initialization");
     if (!m.ram) return 1;
     test_geometry_and_refusals(&m);

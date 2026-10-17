@@ -66,10 +66,23 @@ original `STRH` at `0x28b4`, storing `0xffff` at IOP address `0x0171afc8`.
 All 518 preceding trace lines match. The IOP reaches 268,669 retired
 instructions without a fault, and the AP reaches 326,320,693 before its
 word write `0xbf100078=0x500f` is refused at `PC=0x8078a094`. This is clock
-gate zero: the original caller clears bit 4, which the current model does
-not permit changing. The new boundary is an AP register refusal; the IOP
+gate zero: the original caller clears bit 4, which the earlier model did
+not permit changing. That boundary was an AP register refusal; the IOP
 remains running at `0x80b0`. FMI0 has no pending commands or supplied bytes.
 The same diagnostic hypotheses remain in effect.
+
+With bounded gate-zero idle-control programming implemented, the original
+store succeeds with readback `0x500f`. All 536 preceding trace lines match.
+The AP reaches 326,349,725 retired instructions, an additional 29,032; the
+IOP reaches 269,831 at `0x80c8` without a fault. The next stop leaves an
+I2C0 request pending: address `0x74`, register `0x00`, one-byte read,
+sequence 5. No acknowledgement, data or completion is supplied. This is
+the D1755 address, but the existing bounded PMU endpoints do not serve
+register zero. The captured AP is at `0x80084af4`; the pending device request
+is a service boundary, not a CPU or MMIO fault. The original capture runner
+reported failure because its parser only recognized fault stop labels;
+a separate audit verifies this boundary while retaining that failed result.
+The earlier diagnostic inputs remain required; genuine boot is unproven.
 
 ## Optional polled NAND commands
 
@@ -1798,19 +1811,38 @@ The separate full kernel GPIO stop remains unchanged.
 
 The 52 aligned gate words at `0xbf100078..0xbf100144` require independent
 initial inputs through `s5l8920_clock_gate_configure`. Guest writes can set
-the low nibble to `0xf` or `0`, preserving all upper bits. Unconfigured
-accesses, mixed modes, other widths, misalignment and changes to upper bits
-remain checked failures. Reapplying an identical initial input preserves
-guest programming; replacing it fails. Functional reset restores the supplied
+the low nibble to `0xf` or `0`. Gate zero also retains bit 4 as CPU idle
+control. The attached IOP/FMI gates retain their separately modeled bit-31
+reset behavior. Other upper-bit changes, unconfigured accesses, mixed modes,
+other widths and misalignment remain checked failures. Reapplying an identical
+initial input preserves guest programming; replacing it fails. Functional reset restores the supplied
 initial words, and free/init invalidates them.
+
+The matching kernel method at `0x80789e10` reads offset `0x78`, sets bit 4
+when its third argument is one, clears it otherwise, and writes the resulting
+word through the original accessor at `0x8078a094`. Its AppleARMPlatform
+caller forwards the boolean through a virtual method. The later symbolized
+driver names the equivalent operation `cpuIdleUpdate`; that later name is a
+correspondence lead, not a target hardware specification. A bounded witness
+executes the original target method and both accessors with explicit caller
+objects and gate inputs. The original store regression failed before support.
+
+This is retained control programming, with actual readback and reset to the
+supplied initial value. It does not itself execute WFI, reset the CPU, advance
+time or inject an interrupt. The existing functional WFI implementation remains
+independent: early completion is permitted by
+[ARM DDI0406C.b, B1.8.14](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+Physical clock stopping, power transitions and idle latency are unmodeled.
+Tests cover both control directions, all other gate/upper-bit boundaries,
+invalid low-nibble combinations, atomic rejection, first-fault retention,
+initial-input idempotence, reset/free and functional WFI in both control states.
 
 The matching LLB initializer and iBoot gate helper agree with the pinned
 [S5L8920 clock implementation](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/clock.c)
 on the enable/disable masks. The original iBoot helper's upper address bound
-also establishes the 52-word extent. Its separate bit-31 reset pulse remains
-unsupported. This is bounded programming state: no clock signals, source
-readiness, connected-device reset effects, physical timing or power-on values
-are established by storing these controls.
+also establishes the 52-word extent. Generic bit-31 reset pulses outside the
+attached IOP/FMI models remain unsupported. Retained clock configuration does
+not establish clock signals, source readiness, physical timing or power-on values.
 
 The private witness passes 848 original iBoot helper cases: 832 valid calls
 across all gates, four raw input patterns and four on/off arguments, plus
