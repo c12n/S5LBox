@@ -61,6 +61,11 @@ static bool iop_enabled(const s5l8920_t *m) {
         (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x8000000fu)==15u &&
         (m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].value&15u)==15u;
 }
+static bool iop_vic_address(uint32_t address) {
+    return address>=S5L8920_IOP_VIC_BASE &&
+        (address-S5L8920_IOP_VIC_BASE)/S5L8920_IOP_VIC_STRIDE<S5L8920_IOP_VIC_COUNT &&
+        (address-S5L8920_IOP_VIC_BASE)%S5L8920_IOP_VIC_STRIDE<0x1000u;
+}
 
 static bool dsim_address(uint32_t address) {
     return address>=S5L8920_DSIM_BASE && address-S5L8920_DSIM_BASE<0x1000u;
@@ -364,6 +369,17 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         else return value;
         return 0u;
     }
+    if(iop_vic_address(address)) {
+        uint32_t value;
+        if(!m->iop || !m->iop->vic_configured)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if(!iop_enabled(m) || !s5l8920_iop_vic_read(m->iop,address-S5L8920_IOP_VIC_BASE,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     bool aes;uint32_t cdma_offset;
     if(cdma_address(address,&aes,&cdma_offset)) {
         uint32_t value;
@@ -564,6 +580,15 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         else if(size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
         else if(!iop_enabled(m) || !s5l8920_iop_write(m->iop,offset,value,iop_ram,m))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        return;
+    }
+    if(iop_vic_address(address)) {
+        if(!m->iop || !m->iop->vic_configured)
+            fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if(size!=4u || (address&3u))
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if(!iop_enabled(m) || !s5l8920_iop_vic_write(m->iop,address-S5L8920_IOP_VIC_BASE,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }

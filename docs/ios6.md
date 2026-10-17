@@ -23,6 +23,35 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## IOP interrupt controllers
+
+The optional IOP interrupt configuration provides the three controller windows
+used by the original firmware at `0xbf300000`, `0xbf310000` and `0xbf320000`.
+Software requests, enables, IRQ/FIQ selection, priority masks, vector
+acknowledgement and end-of-interrupt use the existing functional PL192 model.
+An AP write to `+0x18` sets pending bits; a guest write to `+0x1c` clears them.
+Requests survive CPU masking and vector acknowledgement until explicitly
+cleared. The IOP interpreter samples actual IRQ/FIQ inputs between instructions.
+The AP's own interrupt controllers remain separate.
+
+Configuration explicitly selects cold PL192 state and aggregates independent
+controller outputs. It does not establish the physical daisy topology, revision
+or synchronization delay. CPU reset preserves these separately configured
+controllers; reinitializing the component discards them. Physical reset wiring
+is not inferred. Both observed clock gates must be open for AP access. The
+IOP bus has the same aligned-word register semantics. Protection programming
+and identification replies remain unavailable, as do external peripheral
+levels, timers, cache-controller operations and mailbox message completion.
+
+The unmodified IOP IRQ vector, exception wrappers, dispatcher and software-clear
+helper execute with an explicit interrupted context, thread and callback table.
+Six cases in each strict/shipping build cover three banks and two RAM/register fill patterns:
+the source clears, service ends, the nesting counter balances and the original
+registers/CPSR return intact. The callback is the original clear helper, not
+the normal message processor. Six FIQ cases per build instead retain the pending source
+and stop at the partial CPU profile's unsupported `MUL` at `0x7e44`. These are
+bounded interrupt-path results, not a complete IOP boot or message exchange.
+
 ## IOP execution foundation
 
 An optional version1 IOP controller connects the partial ARMv4T core to

@@ -3,6 +3,45 @@
 #include "s5l8920_iop.h"
 #include <string.h>
 
+static void refresh_interrupts(s5l8920_iop_t *i) {
+    if(!i->vic_configured)return;
+    bool irq=false,fiq=false;
+    for(unsigned n=0;n<S5L8920_IOP_VIC_COUNT;++n) {
+        irq=irq || pl192_irq(&i->vic[n]);fiq=fiq || pl192_fiq(&i->vic[n]);
+    }
+    i->cpu.irq_line=irq;i->cpu.fiq_line=fiq;
+}
+static bool vic_address(uint32_t address) {
+    return address>=S5L8920_IOP_VIC_BASE &&
+        (address-S5L8920_IOP_VIC_BASE)/S5L8920_IOP_VIC_STRIDE<S5L8920_IOP_VIC_COUNT &&
+        (address-S5L8920_IOP_VIC_BASE)%S5L8920_IOP_VIC_STRIDE<0x1000u;
+}
+static pl192_t *vic_at(s5l8920_iop_t *i,uint32_t offset) {
+    unsigned bank=offset/S5L8920_IOP_VIC_STRIDE;
+    uint32_t reg=offset%S5L8920_IOP_VIC_STRIDE;
+    if(!i || !i->initialized || !i->vic_configured || !i->reset_seen ||
+       i->reset_asserted || bank>=S5L8920_IOP_VIC_COUNT || (reg&3u) ||
+       reg>=0xfe0u || reg==PL192_PROTECTION || i->vic[bank].protection)return NULL;
+    return &i->vic[bank];
+}
+bool s5l8920_iop_vic_configure(s5l8920_iop_t *i) {
+    if(!i || !i->initialized || i->servicing)return false;
+    if(i->vic_configured)return true;
+    if(i->reset_seen || i->running)return false;
+    for(unsigned n=0;n<S5L8920_IOP_VIC_COUNT;++n)pl192_reset(&i->vic[n]);
+    i->vic_configured=true;refresh_interrupts(i);return true;
+}
+bool s5l8920_iop_vic_read(s5l8920_iop_t *i,uint32_t offset,uint32_t *value) {
+    pl192_t *v=vic_at(i,offset);
+    if(!v || !pl192_read(v,offset%S5L8920_IOP_VIC_STRIDE,false,value))return false;
+    refresh_interrupts(i);return true;
+}
+bool s5l8920_iop_vic_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value) {
+    pl192_t *v=vic_at(i,offset);
+    if(!v || !pl192_write(v,offset%S5L8920_IOP_VIC_STRIDE,false,value))return false;
+    refresh_interrupts(i);return true;
+}
+
 static bool bus_failed(void *ctx) {
     const s5l8920_iop_t *i=ctx;
     return !i->servicing || i->failure.reason!=S5L8920_IOP_NO_FAILURE;
@@ -26,12 +65,25 @@ static uint8_t *memory_at(s5l8920_iop_t *i,uint32_t address,unsigned size,
     return p;
 }
 static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
+    if(bus_failed(i))return 0;
+    if(vic_address(address)) {
+        uint32_t value;
+        if(size==4u && s5l8920_iop_vic_read(i,address-S5L8920_IOP_VIC_BASE,&value))return value;
+        fail(i,i->vic_configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,false,0);return 0;
+    }
     uint8_t *p=memory_at(i,address,size,false,0);if(!p)return 0;
     uint32_t v=0;
     for(unsigned n=0;n<size;++n)v|=(uint32_t)p[n]<<(8u*n);
     return v;
 }
 static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t value) {
+    if(bus_failed(i))return;
+    if(vic_address(address)) {
+        if(size==4u && s5l8920_iop_vic_write(i,address-S5L8920_IOP_VIC_BASE,value))return;
+        fail(i,i->vic_configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,true,value);return;
+    }
     uint8_t *p=memory_at(i,address,size,true,value);if(!p)return;
     for(unsigned n=0;n<size;++n)p[n]=(uint8_t)(value>>(8u*n));
     i->bytes_written+=size;
@@ -64,6 +116,7 @@ bool s5l8920_iop_reset_line(s5l8920_iop_t *i,bool asserted) {
         i->running=false;i->reset_seen=true;i->programmed=0;
         i->firmware_base=i->firmware_mask=i->firmware_size=i->self=0;
         i->bytes_written=0;
+        refresh_interrupts(i);
     }
     i->reset_asserted=asserted;
     return true;

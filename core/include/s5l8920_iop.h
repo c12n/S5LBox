@@ -3,12 +3,16 @@
 #ifndef S5LBOX_S5L8920_IOP_H
 #define S5LBOX_S5L8920_IOP_H
 #include "arm.h"
+#include "pl192.h"
 
 #define S5L8920_IOP_BASE UINT32_C(0x86300000)
 /* The target driver opens both raw gates before reset. Their individual
  * clock roles/rates are not established; only the observed pair is enabled. */
 #define S5L8920_IOP_RESET_GATE 0x2eu
 #define S5L8920_IOP_DEPENDENCY_GATE 0x31u
+#define S5L8920_IOP_VIC_BASE UINT32_C(0xbf300000)
+#define S5L8920_IOP_VIC_STRIDE UINT32_C(0x10000)
+#define S5L8920_IOP_VIC_COUNT 3u
 
 /* RAM only, no MMIO or side effects. A failed lookup returns NULL. The owner
  * keeps views valid during one controller call. Guest aliases refer to the
@@ -17,7 +21,8 @@ typedef uint8_t *(*s5l8920_iop_memory_fn)(void *,uint32_t,uint32_t);
 typedef enum {
     S5L8920_IOP_NO_FAILURE=0,
     S5L8920_IOP_UNMAPPED,
-    S5L8920_IOP_MEMORY_UNAVAILABLE
+    S5L8920_IOP_MEMORY_UNAVAILABLE,
+    S5L8920_IOP_REGISTER_REFUSED
 } s5l8920_iop_failure_reason_t;
 typedef struct {
     s5l8920_iop_failure_reason_t reason;
@@ -37,6 +42,8 @@ typedef struct {
     s5l8920_iop_memory_fn memory;
     void *memory_owner;
     bool servicing;
+    pl192_t vic[S5L8920_IOP_VIC_COUNT];
+    bool vic_configured;
 } s5l8920_iop_t;
 
 /* Explicit partial ARMv4T profile, not a physical CPU/revision identification.
@@ -55,7 +62,7 @@ bool s5l8920_iop_reset_line(s5l8920_iop_t *i,bool asserted);
  * held at reset with no firmware programming. Bit1 reflects requested stop,
  * never an unsupported-instruction or memory failure. Other control bits,
  * live remapping and unknown initial register readbacks are refused.
- * Cache registers and IRQ/mailbox/VIC/timer routing remain unavailable. */
+ * Cache registers, mailbox messages and timers remain unavailable. */
 bool s5l8920_iop_read(const s5l8920_iop_t *i,uint32_t offset,uint32_t *value);
 bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
                      s5l8920_iop_memory_fn memory,void *owner);
@@ -64,7 +71,24 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
  * stopped acknowledgement. No implicit CPU execution on reads/writes, and
  * no inferred ratio to AP clocks. Unsupported memory and instructions stop
  * at the original PC. Earlier successful stores in a multi-store remain.
- * The low firmware window is the only implemented IOP memory mapping. */
+ * The low firmware window and explicitly configured VIC windows are the
+ * only implemented IOP memory mappings. */
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                s5l8920_iop_memory_fn memory,void *owner);
+
+/* Explicit optional cold PL192 configuration for the three observed windows.
+ * Independent controller IRQ/FIQ outputs are aggregated into the IOP CPU's
+ * inputs; physical daisy topology, synchronizer latency and revision are not
+ * inferred. No external peripheral levels or mailbox completion are supplied.
+ * Configure before the first CPU reset. Repeating configuration preserves
+ * state. CPU reset affects only the CPU/window; it does not reset these
+ * separately configured controllers. Reinitialize the component for cold
+ * reset. Call only between instructions; init discards configuration.
+ * Aligned word selectors below ID registers are supported except PROTECTION,
+ * because the bus has no privilege sideband. Offset is relative to VIC_BASE.
+ * Reads of ADDRESS acknowledge real pending requests; writes end service.
+ * Access requires a completed CPU reset and a released reset line. */
+bool s5l8920_iop_vic_configure(s5l8920_iop_t *i);
+bool s5l8920_iop_vic_read(s5l8920_iop_t *i,uint32_t offset,uint32_t *value);
+bool s5l8920_iop_vic_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value);
 #endif
