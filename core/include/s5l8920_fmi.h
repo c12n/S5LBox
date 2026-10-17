@@ -24,14 +24,29 @@
 typedef bool (*s5l8920_fmi_device_fn)(void *owner,unsigned chip,uint8_t command,
                                     uint8_t address,uint8_t id[S5L8920_FMI_ID_SIZE]);
 
+/* Issue 00h, two zero column bytes, three row bytes, then 30h to chip 0..7.
+ * Success means the endpoint accepted and initiated that backed page read;
+ * it does not mean that the NAND array is ready or that data reached guest RAM.
+ * The endpoint owns geometry, capacity checks, read state and page/OOB backing.
+ * False must leave the endpoint unchanged, including for unavailable rows.
+ * No endpoint/owner is retained, and callbacks must not mutate the controller
+ * or board. Controller reset cancels only commands not yet delivered; it does
+ * not reset a separately owned chip. Use the NAND reset command for that. */
+typedef bool (*s5l8920_fmi_page_fn)(void *owner,unsigned chip,uint32_t row);
+typedef struct {
+    s5l8920_fmi_device_fn command;
+    s5l8920_fmi_page_fn read_page;
+} s5l8920_fmi_endpoint_t;
+
 typedef struct {
     uint32_t timing, control, status;
-    uint8_t selected, command, id[S5L8920_FMI_ID_SIZE], cursor, data;
+    uint8_t selected, id[S5L8920_FMI_ID_SIZE], cursor, data;
     uint8_t programmed, pending;
     bool initialized, enabled, reset_asserted, id_valid, data_valid, servicing;
     uint64_t commands, bytes_latched;
     uint32_t ecc_mask;
     uint32_t address, address_high, address_end;
+    uint32_t command;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -49,7 +64,9 @@ typedef struct {
  * ADDR1 accepts the high row byte, and ANUM accepts 0 or 4. Readback requires
  * explicit programming, which reset invalidates. Staging never starts work.
  * READID requires ANUM=0 and an ADDR0 that fits one byte; a staged page address
- * must not be truncated into an ID request. Page commands remain unsupported.
+ * must not be truncated into an ID request. The paired page command 0x3000
+ * queues with control 0xb only for one selected chip, explicitly programmed
+ * timing, zero column, all three address fields and ANUM=4.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
@@ -60,10 +77,15 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
  * one previously supplied ID byte. Reads never service work. The 0x50/0 byte
  * strobe exposes a stable byte at 0x448 until lowered; repeated reads do not
  * consume more data. Register 0x444 reports actual command completion with W1C
- * masks 1/9 (bits 0/3).
- * No IRQ, page/OOB access, DMA, ECC processing, status 0x70 command, multiple-chip selection,
+ * masks 1/9/0xb (bits 0/1/3). Page-command completion requires read_page backing
+ * supplied to service_endpoint. The original service API has no such backing
+ * and leaves a page command pending. Neither service entry samples array-ready
+ * state or transfers page/OOB bytes to the controller or guest.
+ * No IRQ, page/OOB data transfer, DMA, ECC processing, status 0x70 command, multiple-chip selection,
  * physical timing model or default endpoint is provided. Timing 0x408 retains
  * configuration; PIO ID strobes require its value zero and register 0x424=0.
  * Counters are diagnostic effects, not measured physical time or capacity. */
 bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner);
+bool s5l8920_fmi_service_endpoint(s5l8920_fmi_t *f,
+                                 const s5l8920_fmi_endpoint_t *endpoint,void *owner);
 #endif

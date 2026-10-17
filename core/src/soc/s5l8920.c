@@ -1577,14 +1577,19 @@ bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
        (m->clock_gate[S5L8920_FMI_GATE+bank].value&0x80000000u))return false;
     m->fmi[bank]=fmi;return true;
 }
-bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
-                             s5l8920_fmi_device_fn device,void *owner) {
+bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
+                                      const s5l8920_fmi_endpoint_t *endpoint,void *owner) {
     if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !m->fmi[bank] ||
        !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || fmi_servicing(m))return false;
     uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
     if((gate&15u)!=0u && (gate&15u)!=15u)return false;
     if(!(gate&15u) || (gate&0x80000000u))return true;
-    return s5l8920_fmi_service(m->fmi[bank],device,owner);
+    return s5l8920_fmi_service_endpoint(m->fmi[bank],endpoint,owner);
+}
+bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
+                             s5l8920_fmi_device_fn device,void *owner) {
+    const s5l8920_fmi_endpoint_t endpoint={device,NULL};
+    return s5l8920_fmi_board_service_endpoint(m,bank,&endpoint,owner);
 }
 static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
     s5l8920_t *m=owner;

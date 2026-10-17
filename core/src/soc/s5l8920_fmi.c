@@ -4,7 +4,7 @@
 #include <string.h>
 
 enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u, ADDRESS_HIGH=64u };
-enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u };
+enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u, READ_PAGE=4u };
 
 bool s5l8920_fmi_init(s5l8920_fmi_t *f) {
     if(!f || f->servicing)return false;
@@ -59,7 +59,7 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     }
     if(!f->enabled)return false;
     if(offset==0x444u) {
-        if(value&~9u)return false;
+        if(value&~0xbu)return false;
         f->status&=~value;return true;
     }
     if(f->pending)return false;
@@ -74,13 +74,18 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
                f->bytes_latched==UINT64_MAX)return false;
             f->control=value;f->data_valid=false;f->pending=BYTE;return true;
         }
-        if((value!=1u && value!=9u) || !(f->programmed&COMMAND) ||
+        if((value!=1u && value!=9u && value!=0xbu) || !(f->programmed&COMMAND) ||
            f->status || f->commands==UINT64_MAX)return false;
         if(value==1u) {
             if(f->command!=0xffu)return false;
-        }else if(f->command!=0x90u || f->address>0xffu || f->address_end ||
-                 (f->programmed&(ADDRESS|ADDRESS_END))!=(ADDRESS|ADDRESS_END))return false;
-        f->control=value;f->pending=value==1u?RESET:READ_ID;
+        }else if(value==9u) {
+            if(f->command!=0x90u || f->address>0xffu || f->address_end ||
+               (f->programmed&(ADDRESS|ADDRESS_END))!=(ADDRESS|ADDRESS_END))return false;
+        }else if(f->command!=0x3000u || !f->selected || (f->address&0xffffu) ||
+                 f->address_end!=4u ||
+                 (f->programmed&(TIMING|ADDRESS|ADDRESS_HIGH|ADDRESS_END))!=
+                 (TIMING|ADDRESS|ADDRESS_HIGH|ADDRESS_END))return false;
+        f->control=value;f->pending=value==1u?RESET:value==9u?READ_ID:READ_PAGE;
         f->id_valid=f->data_valid=false;f->cursor=0u;
         return true;
     }
@@ -93,8 +98,8 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         }
         return true;
     case 0x414u:
-        if(value!=0x90u && value!=0xffu)return false;
-        f->command=(uint8_t)value;f->programmed|=COMMAND;return true;
+        if(value!=0x90u && value!=0xffu && value!=0x3000u)return false;
+        f->command=value;f->programmed|=COMMAND;return true;
     case 0x418u:
         if(value>0xffu && (value&0xffffu))return false;
         f->address=value;f->programmed|=ADDRESS;return true;
@@ -113,7 +118,8 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     default:return false;
     }
 }
-bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner) {
+bool s5l8920_fmi_service_endpoint(s5l8920_fmi_t *f,
+                                 const s5l8920_fmi_endpoint_t *endpoint,void *owner) {
     if(!f || !f->initialized || f->servicing)return false;
     if(f->reset_asserted || !f->pending)return true;
     if(!f->enabled)return false;
@@ -121,16 +127,23 @@ bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *own
         if(!f->id_valid || f->cursor>=S5L8920_FMI_ID_SIZE || f->bytes_latched==UINT64_MAX)return false;
         f->data=f->id[f->cursor++];f->data_valid=true;f->bytes_latched++;f->pending=IDLE;return true;
     }
-    if(!device || f->commands==UINT64_MAX)return false;
+    if(!endpoint || f->commands==UINT64_MAX)return false;
+    if(f->pending==READ_PAGE ? !endpoint->read_page : !endpoint->command)return false;
     unsigned chip=S5L8920_FMI_NO_CHIP;
     if(f->selected) { chip=0u;while(!(f->selected&(1u<<chip)))chip++; }
     uint8_t id[S5L8920_FMI_ID_SIZE]={0};
     f->servicing=true;
-    bool okay=device(owner,chip,f->command,f->command==0x90u?(uint8_t)f->address:0u,id);
+    bool okay=f->pending==READ_PAGE?
+        endpoint->read_page(owner,chip,(f->address_high<<16)|(f->address>>16)):
+        endpoint->command(owner,chip,(uint8_t)f->command,f->command==0x90u?(uint8_t)f->address:0u,id);
     f->servicing=false;
     if(!okay)return false;
     if(f->pending==READ_ID) {
         memcpy(f->id,id,sizeof id);f->id_valid=true;f->status|=9u;
-    }else f->status|=1u;
+    }else f->status|=f->pending==READ_PAGE?0xbu:1u;
     f->commands++;f->pending=IDLE;return true;
+}
+bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner) {
+    const s5l8920_fmi_endpoint_t endpoint={device,NULL};
+    return s5l8920_fmi_service_endpoint(f,&endpoint,owner);
 }

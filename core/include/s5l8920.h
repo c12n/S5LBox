@@ -751,6 +751,9 @@ bool s5l8920_cdma_board_service(s5l8920_t *m);
 bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi);
 bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
                              s5l8920_fmi_device_fn device,void *owner);
+/* Same gate/lifetime rules, with explicit optional page-command backing. */
+bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
+                                      const s5l8920_fmi_endpoint_t *endpoint,void *owner);
 
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.

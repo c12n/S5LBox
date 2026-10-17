@@ -23,7 +23,7 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
-## Optional polled NAND reset and identification
+## Optional polled NAND commands
 
 A separate optional controller now supports the matching iBoot's polled NAND
 reset and READID paths on `0x81200000` and `0x81300000`. Original routines
@@ -78,7 +78,26 @@ Readback requires explicit programming, which reset invalidates. Existing mode,
 gate, pending-work, active-byte and callback restrictions apply. Staging these
 fields does not start a transfer. READID additionally requires ANUM zero and an
 ADDR0 fitting one byte, so a staged page cannot be truncated into an ID request.
-Page commands, other address forms and additional ANUM values remain unsupported.
+Other address forms and additional ANUM values remain unsupported.
+
+The paired page-read command word `0x3000` now queues with control `0x0b`.
+It requires one selected chip, explicitly programmed timing, zero column,
+all three address fields and ANUM four. The extended transient endpoint receives
+the complete 24-bit row and must initiate the backed read before command
+completion bits `0x0b` are set. It owns capacity checks and page/OOB state;
+missing or rejecting backing leaves the transaction pending. The original
+reset/READID service API cannot complete a page command. Completion and its W1C
+acknowledgement represent command delivery, not NAND array readiness or bytes
+transferred into guest RAM. No page image or default ready response is installed.
+
+Original `0x4ff03e68` supplies the command/control/poll/ack sequence. The standard
+`00h`/`30h` page-read interpretation is corroborated by the vendor's
+[SecureNAND data sheet, section 3.2](https://www.skyhighmemory.com/download/ONFI_S34SL01G2_02_04_Page_2KB_002_99252.pdf).
+That different device family does not establish the target's geometry, timing
+or controller registers. Tests use explicit sparse backing and verify data/spare
+bytes in the endpoint cache, refusal without backing, full-width rows, reset
+cancellation, reentry and both board gates. Status command `0x70`, predicate
+register `0x44c` and page DMA remain unavailable.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
@@ -156,11 +175,16 @@ and buffers allocated and zeroed by original firmware. It reaches the address
 helper at `0x4ff03628`. Before address staging was implemented, it stopped at
 `0x4ff0362e`, writing the page's high byte to unsupported register `0x41c`.
 The original helper now completes all three writes, including the remaining
-page bits in `0x418` and value `4` in `0x420`, and returns. The callback then
-stops at `0x4ff03e78` attempting unsupported command word `0x3000` at `0x414`.
-No page command starts and the page/spare buffers remain unchanged. The original chip
-selector checks the bus encoded in the global chip number before selecting its
-low-three-bit chip line.
+page bits in `0x418` and value `4` in `0x420`, and returns. With explicit sparse
+diagnostic page backing, the callback now issues `0x3000`/`0x0b`, polls completion
+and acknowledges it. The endpoint copies all 4,096 data and 218 spare bytes into
+its own cache. The next refusal is at `0x4ff03816`, writing `0x4040` to status
+predicate register `0x44c`; guest page/spare buffers remain unchanged.
+The original chip selector checks the bus encoded in the global chip number
+before selecting its low-three-bit chip line. The fixture's backed rows are
+zero, `0xffff`, `0x10000` and `0xfffff`, within its diagnostic geometry;
+unlisted rows have no implicit backing. Earlier `0x123456` testing established
+address packing only and exceeded that fixture's capacity.
 
 The kernel's guarded `#ce` read remains the conditional frontier, and the
 genuine audio-control write remains unresolved. Page/OOB storage, ECC processing,
