@@ -18,6 +18,10 @@
  * keeps views valid during one controller call. Guest aliases refer to the
  * same allocation; no firmware copy, patch or mailbox implementation occurs. */
 typedef uint8_t *(*s5l8920_iop_memory_fn)(void *,uint32_t,uint32_t);
+/* Write-one-to-set on one of the three AP software-interrupt banks. A false
+ * return must leave the receiver unchanged. This does not acknowledge a
+ * message or advance the AP CPU. The owner is shared with the RAM provider. */
+typedef bool (*s5l8920_iop_signal_fn)(void *,unsigned,uint32_t);
 typedef enum {
     S5L8920_IOP_NO_FAILURE=0,
     S5L8920_IOP_UNMAPPED,
@@ -40,6 +44,7 @@ typedef struct {
     bool initialized,reset_seen,reset_asserted,running;
     /* Transient execution binding: never retained after service returns. */
     s5l8920_iop_memory_fn memory;
+    s5l8920_iop_signal_fn signal_ap;
     void *memory_owner;
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
@@ -71,10 +76,16 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
  * stopped acknowledgement. No implicit CPU execution on reads/writes, and
  * no inferred ratio to AP clocks. Unsupported memory and instructions stop
  * at the original PC. Earlier successful stores in a multi-store remain.
- * The low firmware window and explicitly configured VIC windows are the
- * only implemented IOP memory mappings. */
+ * This standalone form maps only the low firmware window and explicitly
+ * configured IOP VIC windows. */
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                s5l8920_iop_memory_fn memory,void *owner);
+/* As above, with a borrowed AP signal capability for this instruction only.
+ * Only aligned word writes to BF200018/BF210018/BF220018 are routed. Reads
+ * and other AP selectors remain refused; NULL keeps this mapping unavailable.
+ * Neither capability nor owner survives the call, including failure. */
+arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,void *owner);
 
 /* Explicit optional cold PL192 configuration for the three observed windows.
  * Independent controller IRQ/FIQ outputs are aggregated into the IOP CPU's

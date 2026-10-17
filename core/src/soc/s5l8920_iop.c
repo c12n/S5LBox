@@ -3,6 +3,13 @@
 #include "s5l8920_iop.h"
 #include <string.h>
 
+#define AP_VIC_BASE UINT32_C(0xbf200000)
+static bool ap_vic_address(uint32_t address) {
+    return address>=AP_VIC_BASE &&
+        (address-AP_VIC_BASE)/S5L8920_IOP_VIC_STRIDE<S5L8920_IOP_VIC_COUNT &&
+        (address-AP_VIC_BASE)%S5L8920_IOP_VIC_STRIDE<0x1000u;
+}
+
 static void refresh_interrupts(s5l8920_iop_t *i) {
     if(!i->vic_configured)return;
     bool irq=false,fiq=false;
@@ -66,6 +73,10 @@ static uint8_t *memory_at(s5l8920_iop_t *i,uint32_t address,unsigned size,
 }
 static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
     if(bus_failed(i))return 0;
+    if(ap_vic_address(address)) {
+        fail(i,i->signal_ap?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,false,0);return 0;
+    }
     if(vic_address(address)) {
         uint32_t value;
         if(size==4u && s5l8920_iop_vic_read(i,address-S5L8920_IOP_VIC_BASE,&value))return value;
@@ -79,6 +90,13 @@ static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
 }
 static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t value) {
     if(bus_failed(i))return;
+    if(ap_vic_address(address)) {
+        uint32_t relative=address-AP_VIC_BASE;
+        if(i->signal_ap && size==4u && relative%S5L8920_IOP_VIC_STRIDE==PL192_SOFTINT &&
+           i->signal_ap(i->memory_owner,relative/S5L8920_IOP_VIC_STRIDE,value))return;
+        fail(i,i->signal_ap?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,true,value);return;
+    }
     if(vic_address(address)) {
         if(size==4u && s5l8920_iop_vic_write(i,address-S5L8920_IOP_VIC_BASE,value))return;
         fail(i,i->vic_configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
@@ -168,11 +186,15 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
 }
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                  s5l8920_iop_memory_fn memory,void *owner) {
+    return s5l8920_iop_service_with_signal(i,memory,NULL,owner);
+}
+arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,void *owner) {
     if(!i || !i->initialized || !i->reset_seen || i->servicing)return ARM_HALT;
     if(!i->running || i->reset_asserted)return ARM_OK;
     if(i->failure.reason || !memory)return ARM_HALT;
-    i->memory=memory;i->memory_owner=owner;i->servicing=true;
+    i->memory=memory;i->signal_ap=signal_ap;i->memory_owner=owner;i->servicing=true;
     arm_status_t result=arm_step(&i->cpu);
-    i->servicing=false;i->memory=NULL;i->memory_owner=NULL;
+    i->servicing=false;i->memory=NULL;i->signal_ap=NULL;i->memory_owner=NULL;
     return result;
 }

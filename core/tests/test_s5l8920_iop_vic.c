@@ -118,7 +118,80 @@ static void test_reset_and_refusal(void) {
     CHECK(s5l8920_reset(&board) && !board.iop);
     s5l8920_iop_init(&iop);CHECK(!iop.vic_configured && !iop.cpu.irq_line && !iop.cpu.fiq_line);
 }
+static uint32_t ap_vic(unsigned bank,unsigned reg) {
+    return S5L8920_VIC_BASE+bank*S5L8920_VIC_STRIDE+reg;
+}
+static void test_outgoing_signal(void) {
+    for(unsigned b=0;b<3;b++)for(unsigned fiq=0;fiq<2;fiq++) {
+        init(false);wr(RAM,0xe5801000u);run(); /* STR r1,[r0]. */
+        iop.cpu.r[0]=ap_vic(b,PL192_SOFTINT);iop.cpu.r[1]=8;
+        wr(ap_vic(b,PL192_SOFTINT),1); /* Preserve a different pending source. */
+        board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;arm_cpu_t ap=board.cpu;
+        step(1);
+        CHECK(board.vic[b].soft==9 && !board.vic[b].in_service);
+        CHECK(!memcmp(&ap,&board.cpu,sizeof ap) && !iop.bytes_written);
+        CHECK(!iop.signal_ap && !iop.memory && !iop.memory_owner && !iop.servicing);
+        wr(ap_vic(b,PL192_INTSELECT),fiq?8:0);wr(ap_vic(b,PL192_INTENABLE),8);
+        CHECK(board.cpu.irq_line==!fiq && board.cpu.fiq_line==(bool)fiq);
+        iop.cpu.r[15]=0;iop.cpu.r[1]=0;ap=board.cpu;step(1);
+        CHECK(board.vic[b].soft==9 && !memcmp(&ap,&board.cpu,sizeof ap));
+        iop.cpu.r[15]=0;iop.cpu.r[1]=8;step(1);CHECK(board.vic[b].soft==9);
+        /* The IOP request only raises an input. AP exception entry is a
+         * separately executed architectural step, with no message reply. */
+        board.cpu.cpsr=ARM_MODE_SVC;board.cpu.r[15]=RAM+0x200;
+        CHECK(arm_step(&board.cpu)==ARM_OK);
+        CHECK(board.cpu.r[15]==(fiq?0x1cu:0x18u) && board.cpu.r[14]==RAM+0x204);
+        CHECK((board.cpu.cpsr&31u)==(fiq?ARM_MODE_FIQ:ARM_MODE_IRQ));
+        CHECK(board.vic[b].soft==9 && !board.vic[b].in_service);
+        wr(ap_vic(b,PL192_SOFTINTCLEAR),8);
+        CHECK(board.vic[b].soft==1 && !board.cpu.irq_line && !board.cpu.fiq_line);
+        CHECK(!board.bus_failure.reason && !iop.failure.reason && !iop.bytes_written);
+    }
+}
+static uint8_t *standalone_ram(void *owner,uint32_t address,uint32_t size) {
+    s5l8920_t *m=owner;
+    if(address<RAM || size>0x1000u || address-RAM>0x1000u-size)return NULL;
+    return m->ram+address-S5L8920_RAM_BASE;
+}
+static void test_outgoing_boundaries(void) {
+    const struct {uint32_t instruction,address;bool protection;} cases[]={
+        {0xe5901000u,S5L8920_VIC_BASE+PL192_SOFTINT,false}, /* Read. */
+        {0xe5c01000u,S5L8920_VIC_BASE+PL192_SOFTINT,false}, /* Byte. */
+        {0xe5c01000u,S5L8920_VIC_BASE+PL192_SOFTINT+1,false},
+        {0xe5801000u,S5L8920_VIC_BASE+PL192_SOFTINTCLEAR,false},
+        {0xe5801000u,S5L8920_VIC_BASE+PL192_INTENABLE,false},
+        {0xe5801000u,S5L8920_VIC_BASE+PL192_ADDRESS,false},
+        {0xe5801000u,S5L8920_VIC_BASE+PL192_SOFTINT,true}
+    };
+    for(unsigned n=0;n<sizeof cases/sizeof cases[0];n++) {
+        init(false);wr(RAM,cases[n].instruction);run();
+        iop.cpu.r[0]=cases[n].address;iop.cpu.r[1]=8;
+        /* No privilege sideband exists for this connection. */
+        board.vic[0].protection=cases[n].protection;
+        pl192_t vics[3];memcpy(vics,board.vic,sizeof vics);arm_cpu_t ap=board.cpu;
+        CHECK(s5l8920_iop_board_service(&board)==ARM_HALT);
+        CHECK(iop.failure.reason==S5L8920_IOP_REGISTER_REFUSED && iop.failure.address==cases[n].address);
+        CHECK(iop.cpu.r[15]==0 && iop.cpu.cycles==0 && iop.running);
+        CHECK(!board.bus_failure.reason && !memcmp(&ap,&board.cpu,sizeof ap));
+        CHECK(!memcmp(vics,board.vic,sizeof vics) && !iop.bytes_written);
+        CHECK(!iop.signal_ap && !iop.memory && !iop.memory_owner && !iop.servicing);
+    }
+    init(false);wr(RAM,0xe5801000u);run();
+    iop.cpu.r[0]=ap_vic(0,PL192_SOFTINT);iop.cpu.r[1]=8;
+    CHECK(s5l8920_iop_service(&iop,standalone_ram,&board)==ARM_HALT);
+    CHECK(iop.failure.reason==S5L8920_IOP_UNMAPPED && !board.vic[0].soft);
+    CHECK(!iop.signal_ap && !iop.memory && !iop.memory_owner);
+    init(false);wr(RAM,0xe5801000u);run();
+    iop.cpu.r[0]=ap_vic(0,PL192_SOFTINT);iop.cpu.r[1]=8;
+    wr(CLOCK,0);s5l8920_iop_t before=iop;step(1);
+    CHECK(!memcmp(&before,&iop,sizeof iop) && !board.vic[0].soft);
+    wr(CLOCK,15);step(1);CHECK(board.vic[0].soft==8);
+    wr(RESET,0x8000000fu);CHECK(board.vic[0].soft==8 && !iop.signal_ap);
+    CHECK(s5l8920_reset(&board) && !board.iop && !board.vic[0].soft);
+    CHECK(s5l8920_iop_board_service(&board)==ARM_HALT && !iop.signal_ap);
+}
 int main(void) {
     test_pending_and_banks();test_actual_exception_delivery();test_reset_and_refusal();
+    test_outgoing_signal();test_outgoing_boundaries();
     s5l8920_free(&board);printf("s5l8920_iop_vic: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

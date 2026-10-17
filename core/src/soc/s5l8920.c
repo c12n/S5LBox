@@ -1519,6 +1519,12 @@ bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
        (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x80000000u))return false;
     m->iop=iop;return true;
 }
+static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
+    s5l8920_t *m=owner;
+    if(bank>=S5L8920_VIC_COUNT || !vic_access_supported(&m->vic[bank],PL192_SOFTINT) ||
+       !pl192_write(&m->vic[bank],PL192_SOFTINT,false,sources))return false;
+    refresh_interrupts(m);return true;
+}
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if(!m || !m->ram || !m->iop || access_failed(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
@@ -1528,7 +1534,7 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
     uint64_t before=m->iop->bytes_written;
-    arm_status_t result=s5l8920_iop_service(m->iop,iop_ram,m);
+    arm_status_t result=s5l8920_iop_service_with_signal(m->iop,iop_ram,iop_signal_ap,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }

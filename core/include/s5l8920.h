@@ -746,6 +746,9 @@ bool s5l8920_cdma_board_service(s5l8920_t *m);
  * One explicit service call retires at most one IOP instruction, independent
  * of AP time. Actual IOP stores invalidate the AP exclusive monitor even if
  * a later access in that instruction fails. AP and IOP faults stay separate.
+ * Original IOP word writes to the three AP SOFTINT selectors set real pending
+ * sources through the existing PL192 masks and IRQ/FIQ routing. Such signals
+ * do not count as RAM stores, acknowledge messages or execute the AP CPU.
  * Reset/free detach the peer; no RAM/owner pointer survives service. The
  * owner must reset and reattach explicitly. No component or image by default. */
 bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop);

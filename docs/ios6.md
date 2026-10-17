@@ -32,7 +32,15 @@ acknowledgement and end-of-interrupt use the existing functional PL192 model.
 An AP write to `+0x18` sets pending bits; a guest write to `+0x1c` clears them.
 Requests survive CPU masking and vector acknowledgement until explicitly
 cleared. The IOP interpreter samples actual IRQ/FIQ inputs between instructions.
-The AP's own interrupt controllers remain separate.
+The AP's own interrupt controllers retain separate state. IOP word writes to
+`0xbf200018`, `0xbf210018` and `0xbf220018` set pending software sources in
+those controllers. The original outgoing helper at `0x7e84` computes these
+selectors; the `0x8ae8` wrapper requests source3. Delivery uses the existing
+AP enable, priority and IRQ/FIQ routing, and the AP takes an exception only
+when separately stepped. A signal does not acknowledge a message, count as a
+RAM store or invalidate the AP exclusive monitor. Board service lends this
+write capability for one IOP instruction; standalone service has no AP link.
+Reads, other AP selectors and unsupported widths remain unavailable.
 
 Configuration explicitly selects cold PL192 state and aggregates independent
 controller outputs. It does not establish the physical daisy topology, revision
@@ -52,6 +60,13 @@ registers/CPSR return intact. The callback is the original clear helper, not
 the normal message processor. The FIQ dispatcher executes its original `MUL`
 at `0x7e44` to select the callback. These are
 bounded interrupt-path results, not a complete IOP boot or message exchange.
+
+The original outgoing signal helper also returns in sixteen cases per build,
+covering the three AP banks, IRQ/FIQ selection, two fill patterns and the
+source3 wrapper. It sets actual AP pending bits without changing the payload
+or advancing the AP CPU. Before this connection, the same cases stopped on
+the unmapped store at `0x7ea0`. Cache maintenance and normal queue processing
+remain outside this witness.
 
 ## IOP execution foundation
 
