@@ -52,6 +52,13 @@ not measured electrical timing. Reset assertion cancels pending work and
 invalidates controller programming; endpoint reset remains a separate NAND
 command. Closed gates pause service and refuse MMIO.
 
+Timing writes are also accepted before controller mode is enabled. Original
+initialization at `0x4ff026f8` enables the clock gate and writes `0xffff` to
+`0x408` before pulsing reset and writing mode `1`. The earlier model rejected
+that first timing write. This change preserves the programmed value without
+enabling commands or readback. Reset still invalidates it; reset assertion,
+pending work, an active byte strobe and callback reentry still refuse writes.
+
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
 byte transfers, timing restoration and deselection. Reset returns after 95
@@ -63,6 +70,18 @@ match-table records. They also retain an explicit all-`ff` response case.
 Those inputs do not select or establish the target's physical NAND geometry.
 Unavailable backing/address cases leave the output unchanged, including
 unselected chip lines without an explicit bus response.
+
+Further bounded execution runs original banked-stack, BSS, MMU, scheduler and
+timer initialization fragments. Original `0x4ff03aac` then completes 16 resets,
+cooperative sleep, a real timer interrupt and acknowledgement, context resume,
+and 16 READID probes. With source ticks withheld after deadline programming,
+it stays asleep without issuing READID. Strict and shipping traces agree.
+These remain explicit routine entries with diagnostic endpoints and supplied
+physical RAM, not a connected boot sequence or measured timing. Extending into
+the original `0x4ff0219c` caller executes its actual heap allocation and
+zeroing, then controller initialization. With the timing-order fix it reaches
+the unsupported `0x81200814` write at `0x4ff037f4`; neither that write nor
+the remaining initialization is bypassed.
 
 Independent original-firmware fixtures establish that the `#ce` handoff
 property is a count derived from 16 eight-byte ID records, accompanied by a

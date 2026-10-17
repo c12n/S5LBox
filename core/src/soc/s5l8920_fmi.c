@@ -41,6 +41,10 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         if(value!=1u || f->pending || f->control==0x50u)return false;
         f->enabled=true;return true;
     }
+    if(offset==0x408u) {
+        if(f->pending || f->control==0x50u)return false;
+        f->timing=value;f->programmed|=TIMING;return true;
+    }
     if(!f->enabled)return false;
     if(offset==0x444u) {
         if(value&~9u)return false;
@@ -70,7 +74,6 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     }
     if(f->control==0x50u)return false;
     switch(offset) {
-    case 0x408u:f->timing=value;f->programmed|=TIMING;return true;
     case 0x40cu:
         if(value>0xffu || (value && (value&(value-1u))))return false;
         if(f->selected!=value) {

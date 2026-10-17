@@ -35,6 +35,9 @@ typedef struct {
 /* First use requires a zero-initialized object. Init discards all programming.
  * Functional reset assertion cancels pending work/data and invalidates mode,
  * timing/address programming; deassertion alone does not enable the controller.
+ * Timing writes at 0x408 are accepted before mode enable, as required by the
+ * bootloader's initialization order. They do not enable commands or readback;
+ * reset, pending work and an active byte strobe still refuse timing writes.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
