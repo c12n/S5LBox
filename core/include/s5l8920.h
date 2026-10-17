@@ -754,6 +754,9 @@ bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
 /* Same gate/lifetime rules, with explicit optional page-command backing. */
 bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
                                       const s5l8920_fmi_endpoint_t *endpoint,void *owner);
+bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
+                                const s5l8920_fmi_endpoint_t *endpoint,
+                                const s5l8920_fmi_status_device_t *status,void *owner);
 
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.

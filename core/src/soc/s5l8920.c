@@ -78,7 +78,7 @@ static bool fmi_enabled(const s5l8920_t *m,unsigned bank) {
     return m->fmi[bank] && g->configured && (g->value&0x8000000fu)==15u;
 }
 static bool fmi_register_window(uint32_t offset) {
-    return (offset>=0x400u && offset<0x450u) ||
+    return (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
            (offset>=0x814u && offset<0x818u);
 }
 static bool fmi_servicing(const s5l8920_t *m) {
@@ -1577,14 +1577,19 @@ bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
        (m->clock_gate[S5L8920_FMI_GATE+bank].value&0x80000000u))return false;
     m->fmi[bank]=fmi;return true;
 }
-bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
-                                      const s5l8920_fmi_endpoint_t *endpoint,void *owner) {
+bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
+                                const s5l8920_fmi_endpoint_t *endpoint,
+                                const s5l8920_fmi_status_device_t *status,void *owner) {
     if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !m->fmi[bank] ||
        !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || fmi_servicing(m))return false;
     uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
     if((gate&15u)!=0u && (gate&15u)!=15u)return false;
     if(!(gate&15u) || (gate&0x80000000u))return true;
-    return s5l8920_fmi_service_endpoint(m->fmi[bank],endpoint,owner);
+    return s5l8920_fmi_service_io(m->fmi[bank],endpoint,status,owner);
+}
+bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
+                                      const s5l8920_fmi_endpoint_t *endpoint,void *owner) {
+    return s5l8920_fmi_board_service_io(m,bank,endpoint,NULL,owner);
 }
 bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
                              s5l8920_fmi_device_fn device,void *owner) {

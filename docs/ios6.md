@@ -96,8 +96,32 @@ Original `0x4ff03e68` supplies the command/control/poll/ack sequence. The standa
 That different device family does not establish the target's geometry, timing
 or controller registers. Tests use explicit sparse backing and verify data/spare
 bytes in the endpoint cache, refusal without backing, full-width rows, reset
-cancellation, reentry and both board gates. Status command `0x70`, predicate
-register `0x44c` and page DMA remain unavailable.
+cancellation, reentry and both board gates.
+
+The polled status path now has a separate transient capability for command
+`0x70`, status-byte sampling and command `0x00` to return to an issued page read.
+No ready byte is supplied by default. Original `0x4ff03800` programs
+`RBB_CFG=0x4040`, then original `0x4ff038d0` waits for `FSTATUS` bit 5.
+With an active status strobe, each explicit service quantum samples the selected
+endpoint once. Busy samples keep the poll pending; a sample with bit 6 set
+latches completion and stops sampling. Register reads preserve the latest byte
+and never advance the endpoint. Lowering the strobe cancels an unfinished poll.
+The subsequent `0x00` command requires an already serviced page request and an
+endpoint mode switch; it does not initiate another array read. The vendor's
+[status description, section 3.9](https://www.skyhighmemory.com/download/ONFI_S34SL01G2_02_04_Page_2KB_002_99252.pdf)
+corroborates this separation between status mode and page-data mode.
+
+This path requires explicit zero masks at `0x440` and `INT_EN` (`0x10`),
+PIO programming and IFCTRL bit 20 clear. The observed low-four-bit INTPND
+acknowledgement at `0x0c` is accepted after those mask writes. Its DMA/ECC
+interrupt producers remain unsupported and quiescent; INTPND readback, nonzero
+interrupt enables and interrupt delivery remain unavailable. FSTATUS supports
+W1C for the implemented flags and the firmware's broad `0x0031ffff` clear.
+The sampled-status flag does not block subsequent command delivery.
+Unit tests copy explicit backing into an endpoint cache in separate work steps,
+prove that readiness follows completion, and cover refused/missing callbacks,
+poll cancellation, reset, selection, counter limits and both board gates.
+Page DMA and transfer into guest buffers remain unavailable.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
@@ -176,10 +200,18 @@ helper at `0x4ff03628`. Before address staging was implemented, it stopped at
 `0x4ff0362e`, writing the page's high byte to unsupported register `0x41c`.
 The original helper now completes all three writes, including the remaining
 page bits in `0x418` and value `4` in `0x420`, and returns. With explicit sparse
-diagnostic page backing, the callback now issues `0x3000`/`0x0b`, polls completion
-and acknowledges it. The endpoint copies all 4,096 data and 218 spare bytes into
-its own cache. The next refusal is at `0x4ff03816`, writing `0x4040` to status
-predicate register `0x44c`; guest page/spare buffers remain unchanged.
+diagnostic page backing, the callback issues `0x3000`/`0x0b`, polls completion
+and acknowledges it. The extended fixture copies the 4,096 data and 218 spare
+bytes into the endpoint cache in independent 16-byte work quanta. Original
+status polling observes 205 busy samples and one ready sample, acknowledges
+FSTATUS bit 5, then sends `0x00` and acknowledges that command's completion.
+Those counts describe the explicit functional schedule, not physical timing.
+Execution reaches original DMA setup `0x4ff01344` through `0x4ff048cc`.
+The next refusal is at `0x4ff01522`, writing value 2 to `0x87006000` or
+`0x87008000` for spare-data channel 6 or 8. The board reports that address
+unmapped because no CDMA component is attached in this fixture. The existing
+optional RAM/AES component supports channels 1/2; it does not provide these
+NAND channels. Guest page/spare buffers remain unchanged.
 The original chip selector checks the bus encoded in the global chip number
 before selecting its low-three-bit chip line. The fixture's backed rows are
 zero, `0xffff`, `0x10000` and `0xfffff`, within its diagnostic geometry;

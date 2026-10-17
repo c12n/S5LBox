@@ -38,15 +38,30 @@ typedef struct {
     s5l8920_fmi_page_fn read_page;
 } s5l8920_fmi_endpoint_t;
 
+/* Additional transient NAND status capability. command performs 70h (enter
+ * status mode) or 00h (return to an already issued page read). sample supplies
+ * the selected chip's current status byte, including actual busy/ready state.
+ * Missing/refusing callbacks leave pending work unchanged; false must not
+ * mutate endpoint state. Neither callback may change the controller or board.
+ * No mode switch or ready byte is supplied by the controller itself. */
+typedef struct {
+    bool (*command)(void *owner,unsigned chip,uint8_t command);
+    bool (*sample)(void *owner,unsigned chip,uint8_t *status);
+} s5l8920_fmi_status_device_t;
+
 typedef struct {
     uint32_t timing, control, status;
     uint8_t selected, id[S5L8920_FMI_ID_SIZE], cursor, data;
-    uint8_t programmed, pending;
+    uint8_t pending;
+    uint16_t programmed;
     bool initialized, enabled, reset_asserted, id_valid, data_valid, servicing;
     uint64_t commands, bytes_latched;
     uint32_t ecc_mask;
     uint32_t address, address_high, address_end;
     uint32_t command;
+    uint32_t rbb_config, status_interrupt_mask, interrupt_enable, interrupt_pending;
+    uint64_t status_samples;
+    bool status_mode, page_issued;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -67,6 +82,11 @@ typedef struct {
  * must not be truncated into an ID request. The paired page command 0x3000
  * queues with control 0xb only for one selected chip, explicitly programmed
  * timing, zero column, all three address fields and ANUM=4.
+ * RBB_CFG 0x44c supports the observed 0x4040 status-bit6 predicate. Explicit
+ * zero interrupt-mask writes at0x440/0x10 select the supported polled path;
+ * nonzero interrupt enables remain unavailable. INTPND0x0c accepts the observed
+ * low-four-bit W1C acknowledgement. DMA/ECC interrupt producers and INTPND
+ * readback are unavailable; supported polled commands leave those sources idle.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
@@ -77,15 +97,24 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
  * one previously supplied ID byte. Reads never service work. The 0x50/0 byte
  * strobe exposes a stable byte at 0x448 until lowered; repeated reads do not
  * consume more data. Register 0x444 reports actual command completion with W1C
- * masks 1/9/0xb (bits 0/1/3). Page-command completion requires read_page backing
+ * masks 1/9/0xb/0x20 (bits 0/1/3/5), plus the observed broad clear0x31ffff.
+ * Page-command completion requires read_page backing
  * supplied to service_endpoint. The original service API has no such backing
- * and leaves a page command pending. Neither service entry samples array-ready
- * state or transfers page/OOB bytes to the controller or guest.
- * No IRQ, page/OOB data transfer, DMA, ECC processing, status 0x70 command, multiple-chip selection,
+ * and leaves a page command pending. service_io additionally delivers70/00
+ * through explicit status backing. In status mode a0x50 strobe samples once
+ * per service quantum until the configured bit6 predicate matches, then latches
+ * FSTATUSbit5 and stops sampling. Reads never sample or advance NAND work.
+ * The latest supplied byte is readable while the strobe is high; lowering it
+ * cancels an unfinished poll, invalidates the byte, and leaves W1C flags alone.
+ * Returning to page data requires a serviced page request on the selected chip.
+ * Status polling requires explicit zero masks/PIO and IFCTRLbit20 clear.
+ * No IRQ delivery, page/OOB data transfer, DMA, ECC processing, multiple-chip selection,
  * physical timing model or default endpoint is provided. Timing 0x408 retains
  * configuration; PIO ID strobes require its value zero and register 0x424=0.
  * Counters are diagnostic effects, not measured physical time or capacity. */
 bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner);
 bool s5l8920_fmi_service_endpoint(s5l8920_fmi_t *f,
                                  const s5l8920_fmi_endpoint_t *endpoint,void *owner);
+bool s5l8920_fmi_service_io(s5l8920_fmi_t *f,const s5l8920_fmi_endpoint_t *endpoint,
+                           const s5l8920_fmi_status_device_t *status,void *owner);
 #endif

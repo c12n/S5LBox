@@ -77,10 +77,10 @@ static void test_configuration(void) {
     reject(0x40c,1);reject_read(0x444);reject(0x400,0);reject(0x400,2);wr(0x400,1);
     CHECK(rd(0x40c)==0 && rd(0x444)==0);reject_read(0x408);reject_read(0x448);
     CHECK(!s5l8920_fmi_read(&fmi,0x444,NULL));
-    const uint32_t unknown[]={0,0x404,0x40d,0x41d,0x428,0x440,0x44c,0x808,0x810,0x818,UINT32_MAX};
+    const uint32_t unknown[]={0,0x404,0x40d,0x41d,0x428,0x441,0x44d,0x808,0x810,0x818,UINT32_MAX};
     for(unsigned n=0;n<sizeof unknown/sizeof unknown[0];n++) { reject(unknown[n],0);reject_read(unknown[n]); }
     reject_read(0x400);reject_read(0x410);reject_read(0x414);reject_read(0x418);reject_read(0x420);reject_read(0x424);
-    reject(0x40c,3);reject(0x40c,256);reject(0x414,0x70);reject(0x414,0);reject(0x418,256);
+    reject(0x40c,3);reject(0x40c,256);reject(0x414,0x71);reject(0x414,0x30);reject(0x418,256);
     reject(0x420,1);reject(0x424,1);reject(0x444,4);reject(0x410,0xb);reject(0x410,9);
     wr(0x414,0x90);wr(0x40c,1);reject(0x410,9);wr(0x418,0);reject(0x410,9);
     wr(0x420,0);reject(0x410,1);wr(0x40c,0);
@@ -239,7 +239,7 @@ static void test_page_commands(void) {
         before=fmi;CHECK(s5l8920_fmi_service_endpoint(&fmi,&capability,&page_device));
         CHECK(page_attempts==2 && !memcmp(&before,&fmi,sizeof before));reject(0x410,0xb);
         wr(0x444,2);CHECK(rd(0x444)==9);wr(0x444,1);CHECK(rd(0x444)==8);wr(0x444,8);CHECK(rd(0x444)==0);
-        wr(0x408,0);wr(0x424,0);reject(0x410,0x50);reject(0x414,0x70);reject(0x44c,0x4040);
+        wr(0x408,0);wr(0x424,0);reject(0x410,0x50);wr(0x414,0x70);wr(0x44c,0x4040);reject(0x410,0x50);
         CHECK(s5l8920_fmi_reset_line(&fmi,true));CHECK(page_device.reads==1 && page_device.busy);
     }
     init();init_pages();page_configure(&fmi,0,1);wr(0x410,0xb);s5l8920_fmi_t before=fmi;
@@ -273,6 +273,175 @@ static void test_page_commands(void) {
     CHECK(s5l8920_fmi_service_endpoint(&fmi,&capability,&page_device) && !page_attempts);
     CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);reject(0x410,0xb);
     reject_read(0x418);reject_read(0x41c);reject_read(0x420);
+}
+static void test_status_setup_queue(void) {
+    init();wr(0x400,1);wr(0x408,0x11111);wr(0x40c,1);
+    wr(0x44c,0x4040);wr(0x414,0x70);wr(0x410,1);
+    CHECK(fmi.pending && !fmi.commands && !fmi.status);
+    s5l8920_fmi_t before=fmi;
+    CHECK(!s5l8920_fmi_service(&fmi,NULL,NULL));
+    CHECK(!memcmp(&before,&fmi,sizeof before));
+    CHECK(s5l8920_fmi_reset_line(&fmi,true));
+}
+typedef struct {
+    s5l8920_fmi_t *controller;
+    s5l8920_t *board;
+    uint8_t backing[68],cache[68];
+    unsigned chip,copied,commands,samples;
+    bool page,mode,refuse_command,refuse_sample,reenter;
+} status_fixture_t;
+static status_fixture_t status_fixture;
+static bool status_command(void *owner,unsigned chip,uint8_t command);
+static bool status_sample(void *owner,unsigned chip,uint8_t *value);
+static const s5l8920_fmi_status_device_t status_ops={status_command,status_sample};
+static void status_reentry(void) {
+    if(!status_fixture.reenter)return;
+    s5l8920_fmi_t *f=status_fixture.controller,before=*f;uint32_t v=0x12345678;
+    CHECK(!s5l8920_fmi_init(f));CHECK(!s5l8920_fmi_reset_line(f,true));
+    CHECK(!s5l8920_fmi_write(f,0x410,0));CHECK(!s5l8920_fmi_write(f,0x444,0x31ffff));
+    CHECK(!s5l8920_fmi_write(f,0x44c,0x4040));CHECK(!s5l8920_fmi_write(f,0x440,0));
+    CHECK(!s5l8920_fmi_write(f,0x10,0));CHECK(!s5l8920_fmi_write(f,0xc,0xf));
+    CHECK(!s5l8920_fmi_read(f,0x448,&v) && v==0x12345678);
+    CHECK(!s5l8920_fmi_read(f,0x44c,&v) && v==0x12345678);
+    CHECK(!s5l8920_fmi_service_io(f,NULL,&status_ops,&status_fixture));
+    CHECK(!memcmp(&before,f,sizeof before));
+    if(status_fixture.board) {
+        s5l8920_t *m=status_fixture.board;uint8_t *ram=m->ram;
+        CHECK(!s5l8920_reset(m));s5l8920_free(m);CHECK(m->ram==ram);
+        CHECK(!s5l8920_fmi_attach(m,0,f));
+        CHECK(!s5l8920_fmi_board_service_io(m,0,NULL,&status_ops,&status_fixture));
+        CHECK(!s5l8920_fmi_board_service_io(m,1,NULL,&status_ops,&status_fixture));
+    }
+}
+static bool status_page(void *owner,unsigned chip,uint32_t row) {
+    CHECK(owner==&status_fixture);
+    if(chip!=status_fixture.chip || row!=0x10203)return false;
+    status_fixture.page=true;status_fixture.mode=false;status_fixture.copied=0;
+    memset(status_fixture.cache,0xa5,sizeof status_fixture.cache);return true;
+}
+static bool status_command(void *owner,unsigned chip,uint8_t command) {
+    CHECK(owner==&status_fixture);status_reentry();
+    if(status_fixture.refuse_command || chip!=status_fixture.chip)return false;
+    if(command==0) {
+        if(!status_fixture.mode || !status_fixture.page || status_fixture.copied!=sizeof status_fixture.cache)return false;
+        status_fixture.mode=false;
+    }else if(command==0x70)status_fixture.mode=true;
+    else { CHECK(false);return false; }
+    status_fixture.commands++;return true;
+}
+static bool status_sample(void *owner,unsigned chip,uint8_t *value) {
+    CHECK(owner==&status_fixture);status_reentry();
+    if(status_fixture.refuse_sample || chip!=status_fixture.chip || !status_fixture.mode) {
+        *value=0xff;return false; /* A refused sample cannot leak an output byte. */
+    }
+    *value=(uint8_t)(0x80u|(status_fixture.page && status_fixture.copied==sizeof status_fixture.cache?0x40u:0));
+    status_fixture.samples++;return true;
+}
+static void status_progress(void) {
+    CHECK(status_fixture.page && status_fixture.copied<sizeof status_fixture.cache);
+    unsigned count=17;
+    memcpy(status_fixture.cache+status_fixture.copied,status_fixture.backing+status_fixture.copied,count);
+    status_fixture.copied+=count;
+}
+static void status_init(unsigned chip) {
+    memset(&status_fixture,0,sizeof status_fixture);status_fixture.controller=&fmi;
+    status_fixture.chip=chip;status_fixture.reenter=true;
+    for(unsigned n=0;n<sizeof status_fixture.backing;n++)status_fixture.backing[n]=(uint8_t)(chip*19+n*37);
+}
+static void status_setup(s5l8920_fmi_t *f) {
+    CHECK(s5l8920_fmi_write(f,0x44c,0x4040));CHECK(s5l8920_fmi_write(f,0x414,0x70));
+    CHECK(s5l8920_fmi_write(f,0x410,1));
+    CHECK(s5l8920_fmi_service_io(f,NULL,&status_ops,&status_fixture));
+    CHECK(s5l8920_fmi_write(f,0x444,1));CHECK(s5l8920_fmi_write(f,0x440,0));
+    CHECK(s5l8920_fmi_write(f,0x10,0));CHECK(s5l8920_fmi_write(f,0x444,0x31ffff));
+    CHECK(s5l8920_fmi_write(f,0xc,0xf));CHECK(s5l8920_fmi_write(f,0x424,0));
+}
+static void test_status_polling(void) {
+    const s5l8920_fmi_endpoint_t pages_cap={NULL,status_page};
+    const s5l8920_fmi_status_device_t no_command={NULL,status_sample},no_sample={status_command,NULL};
+    CHECK(!s5l8920_fmi_service_io(NULL,NULL,NULL,NULL));
+    for(unsigned c=0;c<8;c++) {
+        init();status_init(c);page_configure(&fmi,c,0x10203);wr(0x410,0xb);
+        CHECK(s5l8920_fmi_service_endpoint(&fmi,&pages_cap,&status_fixture));wr(0x444,0xb);
+        CHECK(fmi.page_issued && !fmi.status_mode && !status_fixture.copied);
+        wr(0x44c,0x4040);CHECK(rd(0x44c)==0x4040);wr(0x414,0x70);wr(0x410,1);
+        s5l8920_fmi_t before=fmi;
+        CHECK(!s5l8920_fmi_service_endpoint(&fmi,&pages_cap,&status_fixture));
+        CHECK(!s5l8920_fmi_service_io(&fmi,NULL,&no_command,&status_fixture));
+        status_fixture.refuse_command=true;status_fixture_t device_before=status_fixture;
+        CHECK(!s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(!memcmp(&device_before,&status_fixture,sizeof device_before) && !memcmp(&before,&fmi,sizeof before));
+        status_fixture.refuse_command=false;
+        CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(fmi.status_mode && status_fixture.mode && fmi.page_issued && rd(0x444)==1 && fmi.commands==2);
+        wr(0x444,1);wr(0x440,0);wr(0x10,0);wr(0x444,0x31ffff);wr(0xc,0xf);wr(0x424,0);
+        CHECK(rd(0x440)==0 && rd(0x10)==0);reject_read(0xc);wr(0x410,0x50);reject_read(0x448);
+        CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(fmi.pending && fmi.status_samples==1 && rd(0x448)==0x80 && rd(0x444)==0);
+        before=fmi;status_fixture.refuse_sample=true;device_before=status_fixture;
+        CHECK(!s5l8920_fmi_service_io(&fmi,NULL,&no_sample,&status_fixture));
+        CHECK(!s5l8920_fmi_service_endpoint(&fmi,&pages_cap,&status_fixture));
+        CHECK(!s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(!memcmp(&device_before,&status_fixture,sizeof device_before) && !memcmp(&before,&fmi,sizeof before));
+        CHECK(rd(0x448)==0x80 && rd(0x444)==0);status_fixture.refuse_sample=false;
+        reject(0x40c,0);reject(0x414,0);reject(0x408,0);reject(0x44c,0x4040);
+        reject(0x440,0);reject(0x10,0);reject(0xc,0xf);reject(0x410,0x50);
+        for(unsigned block=0;block<4;block++) {
+            before=fmi;status_progress();
+            for(unsigned n=0;n<3;n++)CHECK(rd(0x444)==0 && rd(0x448)==0x80);
+            CHECK(!memcmp(&before,&fmi,sizeof before));
+            CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+            CHECK(rd(0x444)==(block==3?0x20u:0u) && rd(0x448)==(block==3?0xc0u:0x80u));
+        }
+        CHECK(!memcmp(status_fixture.cache,status_fixture.backing,sizeof status_fixture.cache));
+        CHECK(!fmi.pending && fmi.status_samples==5 && !fmi.bytes_latched && status_fixture.samples==5);
+        before=fmi;CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(!memcmp(&before,&fmi,sizeof before) && status_fixture.samples==5);reject(0x414,0);
+        wr(0x410,0);reject_read(0x448);CHECK(rd(0x444)==0x20);
+        wr(0x414,0);wr(0x410,0);wr(0x410,1);
+        CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+        CHECK(!status_fixture.mode && !fmi.status_mode && fmi.page_issued && rd(0x444)==0x21 && fmi.commands==3);
+        wr(0x444,1);CHECK(rd(0x444)==0x20);wr(0x444,0x31ffff);CHECK(rd(0x444)==0);
+        CHECK(status_fixture.commands==2);reject(0x410,0x50);
+        CHECK(s5l8920_fmi_reset_line(&fmi,true));CHECK(fmi.status_samples==5 && !fmi.page_issued && !fmi.status_mode);
+        CHECK(status_fixture.copied==68 && status_fixture.page); /* Controller reset is not a chip reset. */
+    }
+}
+static void test_status_guards(void) {
+    init();status_init(0);reject(0x44c,0x4040);reject(0x440,0);reject(0x10,0);reject(0xc,0xf);
+    wr(0x400,1);reject_read(0x44c);reject_read(0x440);reject_read(0x10);reject_read(0xc);
+    reject(0x44c,0);reject(0x44c,0x40);reject(0x44c,0x8080);reject(0x44c,0x14040);
+    reject(0x440,0x20);reject(0x10,0x100);reject(0xc,0);reject(0xc,0xf);
+    wr(0x440,0);reject(0xc,0xf);wr(0x10,0);wr(0xc,0xf);reject(0xc,0x100);
+    wr(0x444,0x31ffff);reject(0x444,0x32ffff);CHECK(!fmi.commands && !fmi.status_samples);
+    wr(0x408,0x11111);wr(0x40c,1);status_setup(&fmi);wr(0x410,0x50);
+    CHECK(fmi.pending && !fmi.data_valid);wr(0x410,0);CHECK(!fmi.pending && !fmi.data_valid);
+    CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture) && !status_fixture.samples);
+    wr(0x410,0x50);CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+    CHECK(fmi.pending && rd(0x448)==0x80);wr(0x410,0);reject_read(0x448);
+    wr(0x414,0);reject(0x410,1); /* No prior page read to resume. */
+    wr(0x408,0x111111);reject(0x410,0x50);wr(0x408,0x11111);
+    fmi.status_samples=UINT64_MAX;reject(0x410,0x50);fmi.status_samples=UINT64_MAX-1;
+    wr(0x410,0x50);CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+    s5l8920_fmi_t before=fmi;unsigned samples=status_fixture.samples;
+    CHECK(!s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
+    CHECK(!memcmp(&before,&fmi,sizeof before) && status_fixture.samples==samples);wr(0x410,0);
+    CHECK(s5l8920_fmi_reset_line(&fmi,true));reject(0x44c,0x4040);reject(0x10,0);reject(0x440,0);reject(0xc,0xf);
+    CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture) && status_fixture.samples==samples);
+    CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);
+    reject_read(0x44c);reject_read(0x440);reject_read(0x10);CHECK(fmi.status_samples==UINT64_MAX);
+    CHECK(s5l8920_fmi_init(&fmi) && !fmi.status_samples);
+    for(unsigned omit=0;omit<4;omit++) {
+        init();status_init(0);wr(0x400,1);wr(0x408,0x11111);wr(0x40c,1);
+        wr(0x414,0x70);wr(0x410,1);CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));wr(0x444,1);
+        if(omit!=0)wr(0x44c,0x4040);
+        if(omit!=1)wr(0x440,0);
+        if(omit!=2)wr(0x10,0);
+        if(omit!=3)wr(0x424,0);
+        reject(0x410,0x50);
+    }
+    init();status_init(0);wr(0x400,1);wr(0x408,0x11111);wr(0x414,0x70);reject(0x410,1);
+    wr(0x40c,1);status_setup(&fmi);wr(0x40c,2);CHECK(!fmi.status_mode);reject(0x410,0x50);
 }
 static void test_data(void) {
     for(unsigned chip=0;chip<8;chip++) {
@@ -368,7 +537,7 @@ static void test_board(void) {
     CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&before,&fmi,sizeof before));
     s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x40d),0);
     CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&before,&fmi,sizeof before));
-    s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x440),0);
+    s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x440),0x20);
     CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&fmi,sizeof before));
     s5l8920_clear_bus_failure(&board);board.bus.write32(&board,gate(0),31);
     CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&fmi,sizeof before));
@@ -417,7 +586,45 @@ static void test_board_pages(void) {
         CHECK(!s5l8920_fmi_board_service_endpoint(&board,2,&capability,&page_device));
     }
 }
+static void test_board_status(void) {
+    const s5l8920_fmi_endpoint_t pages_cap={NULL,status_page};
+    CHECK(!s5l8920_fmi_board_service_io(NULL,0,NULL,&status_ops,NULL));
+    for(unsigned b=0;b<2;b++) {
+        init();status_init(2);CHECK(s5l8920_init(&board));if(!board.ram)return;
+        for(unsigned n=0;n<2;n++) {
+            CHECK(s5l8920_clock_gate_configure(&board,S5L8920_FMI_GATE+n,15));
+            CHECK(s5l8920_fmi_attach(&board,n,n?&other:&fmi));
+        }
+        s5l8920_fmi_t *f=b?&other:&fmi,*peer=b?&fmi:&other,peer_before=*peer;
+        status_fixture.controller=f;status_fixture.board=&board;
+        page_configure(f,2,0x10203);bw(b,0x410,0xb);
+        CHECK(s5l8920_fmi_board_service_endpoint(&board,b,&pages_cap,&status_fixture));bw(b,0x444,0xb);
+        status_setup(f);bw(b,0x410,0x50);s5l8920_fmi_t before=*f;
+        board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;board.timebase_ticks=127;
+        arm_cpu_t cpu=board.cpu;board.ram[0x100]=0x96;
+        board.bus.write32(&board,gate(b),0);
+        CHECK(s5l8920_fmi_board_service_io(&board,b,NULL,&status_ops,&status_fixture));
+        CHECK(!memcmp(&before,f,sizeof before) && !status_fixture.samples);
+        board.bus.write32(&board,reg(b,0x10),0);CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED);
+        CHECK(!s5l8920_fmi_board_service_io(&board,b,NULL,&status_ops,&status_fixture));
+        s5l8920_clear_bus_failure(&board);board.bus.write32(&board,gate(b),15);
+        CHECK(!s5l8920_fmi_board_service_endpoint(&board,b,&pages_cap,&status_fixture));
+        CHECK(s5l8920_fmi_board_service_io(&board,b,NULL,&status_ops,&status_fixture));
+        CHECK(f->pending && f->data==0x80 && f->status==0 && f->status_samples==1);
+        for(unsigned n=0;n<4;n++)status_progress();
+        CHECK(s5l8920_fmi_board_service_io(&board,b,NULL,&status_ops,&status_fixture));
+        CHECK(!f->pending && f->data==0xc0 && f->status==0x20 && f->status_samples==2);
+        CHECK(!memcmp(&cpu,&board.cpu,sizeof cpu) && board.timebase_ticks==127 && board.ram[0x100]==0x96);
+        CHECK(!memcmp(&peer_before,peer,sizeof peer_before) && !board.bus_failure.reason);
+        bw(b,0x410,0);bw(b,0x444,0x20);bw(b,0x410,0x50);
+        board.bus.write32(&board,gate(b),0x8000000f);
+        CHECK(!f->pending && !f->status_mode && !f->page_issued && f->status_samples==2);
+        CHECK(s5l8920_fmi_board_service_io(&board,b,NULL,&status_ops,&status_fixture));
+        CHECK(status_fixture.mode && status_fixture.samples==2);
+        CHECK(!s5l8920_fmi_board_service_io(&board,2,NULL,&status_ops,&status_fixture));
+    }
+}
 int main(void) {
-    test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_ecc_mask();test_page_address_staging();test_page_command_queue();test_page_commands();test_reset();test_board();test_board_pages();s5l8920_free(&board);
+    test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_ecc_mask();test_page_address_staging();test_page_command_queue();test_page_commands();test_status_setup_queue();test_status_polling();test_status_guards();test_reset();test_board();test_board_pages();test_board_status();s5l8920_free(&board);
     printf("s5l8920_fmi: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }
