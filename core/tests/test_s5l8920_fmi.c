@@ -375,7 +375,7 @@ static void test_status_polling(void) {
         CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
         CHECK(fmi.status_mode && status_fixture.mode && fmi.page_issued && rd(0x444)==1 && fmi.commands==2);
         wr(0x444,1);wr(0x440,0);wr(0x10,0);wr(0x444,0x31ffff);wr(0xc,0xf);wr(0x424,0);
-        CHECK(rd(0x440)==0 && rd(0x10)==0);reject_read(0xc);wr(0x410,0x50);reject_read(0x448);
+        CHECK(rd(0x440)==0 && rd(0x10)==0 && rd(0xc)==0);wr(0x410,0x50);reject_read(0x448);
         CHECK(s5l8920_fmi_service_io(&fmi,NULL,&status_ops,&status_fixture));
         CHECK(fmi.pending && fmi.status_samples==1 && rd(0x448)==0x80 && rd(0x444)==0);
         before=fmi;status_fixture.refuse_sample=true;device_before=status_fixture;
@@ -624,7 +624,205 @@ static void test_board_status(void) {
         CHECK(!s5l8920_fmi_board_service_io(&board,2,NULL,&status_ops,&status_fixture));
     }
 }
+static void test_sector_registers(void) {
+    init();wr(0x400,1);wr(0x440,0);wr(0x10,0);
+    CHECK(rd(0xc)==0);wr(0xc,2);
+    const unsigned spare[]={0,26,32};
+    for(unsigned n=0;n<3;n++) {
+        wr(0,0xa8003u|(spare[n]<<8)|(spare[n]<<2));
+        CHECK(rd(0xc)==0 && !fmi.commands && !fmi.status);
+    }
+    reject(0,0xaa087);reject(0,0xa8000);reject(0,0xaa187);
+    reject(4,3); /* A configuration alone supplies neither a page nor bytes. */
+}
+static struct {
+    s5l8920_fmi_t *f;
+    s5l8920_t *m;
+    unsigned chip,cursor,available,calls,mode;
+    uint8_t raw[4314];
+    bool reenter;
+} stream;
+static s5l8920_cdma_t sector_dma;
+static bool stream_page(void *owner,unsigned chip,uint32_t row) {
+    CHECK(owner==&stream);
+    if(chip!=stream.chip || row!=0x10203)return false;
+    stream.cursor=0;return true;
+}
+static s5l8920_fmi_data_result_t stream_read(void *owner,unsigned chip,uint8_t *bytes,unsigned count) {
+    CHECK(owner==&stream && chip==stream.chip && count && count<=16);stream.calls++;
+    if(stream.reenter) {
+        s5l8920_fmi_t before=*stream.f;uint8_t byte=0x96;
+        CHECK(!s5l8920_fmi_init(stream.f));CHECK(!s5l8920_fmi_reset_line(stream.f,true));
+        CHECK(!s5l8920_fmi_data_configure(stream.f,64,32));
+        CHECK(!s5l8920_fmi_data_service(stream.f,stream_read,&stream));
+        CHECK(!s5l8920_fmi_write(stream.f,4,3));CHECK(!s5l8920_fmi_write(stream.f,0xc,2));
+        CHECK(s5l8920_fmi_data_receive(stream.f,0,&byte,1)==S5L8920_FMI_DATA_UNAVAILABLE && byte==0x96);
+        CHECK(!memcmp(&before,stream.f,sizeof before));
+        if(stream.m) {
+            uint8_t *ram=stream.m->ram;
+            CHECK(!s5l8920_reset(stream.m));s5l8920_free(stream.m);CHECK(stream.m->ram==ram);
+            CHECK(!s5l8920_fmi_data_board_service(stream.m,0,stream_read,&stream));
+            CHECK(!s5l8920_fmi_data_board_service(stream.m,1,stream_read,&stream));
+            CHECK(!s5l8920_fmi_dma_board_service(stream.m,5));
+            CHECK(!s5l8920_cdma_attach(stream.m,&sector_dma));
+        }
+    }
+    memset(bytes,0xff,count);
+    if(stream.mode==2)return S5L8920_FMI_DATA_UNAVAILABLE;
+    if(stream.mode==3)return (s5l8920_fmi_data_result_t)99;
+    if(stream.mode==1 || count>stream.available-stream.cursor)return S5L8920_FMI_DATA_WAIT;
+    memcpy(bytes,stream.raw+stream.cursor,count);stream.cursor+=count;return S5L8920_FMI_DATA_READY;
+}
+static void stream_setup(s5l8920_fmi_t *f,unsigned chip,unsigned depth,unsigned spare_depth) {
+    memset(&stream,0,sizeof stream);stream.f=f;stream.chip=chip;stream.reenter=true;
+    for(unsigned n=0;n<sizeof stream.raw;n++)stream.raw[n]=(uint8_t)(n*37+(n>>8)+chip*19);
+    CHECK(s5l8920_fmi_data_configure(f,depth,spare_depth));
+    page_configure(f,chip,0x10203);CHECK(s5l8920_fmi_write(f,0x410,0xb));
+    const s5l8920_fmi_endpoint_t endpoint_cap={NULL,stream_page};
+    CHECK(s5l8920_fmi_service_endpoint(f,&endpoint_cap,&stream));
+    CHECK(s5l8920_fmi_write(f,0x444,0xb));CHECK(s5l8920_fmi_write(f,0x814,0));
+    CHECK(s5l8920_fmi_write(f,0x440,0));CHECK(s5l8920_fmi_write(f,0x10,0));
+}
+static void sector_start(s5l8920_fmi_t *f,unsigned spare) {
+    CHECK(s5l8920_fmi_write(f,0,0xa8003u|(spare<<8)|(spare<<2)));
+    CHECK(s5l8920_fmi_write(f,4,3));
+}
+static void test_sector_producer(void) {
+    init();stream_setup(&fmi,3,512,32);sector_start(&fmi,32);
+    s5l8920_fmi_t before=fmi;uint8_t output[16];memset(output,0x69,sizeof output);
+    CHECK(!s5l8920_fmi_data_service(&fmi,NULL,NULL));
+    CHECK(s5l8920_fmi_service(&fmi,NULL,NULL));
+    CHECK(s5l8920_fmi_service_endpoint(&fmi,NULL,NULL));
+    CHECK(s5l8920_fmi_service_io(&fmi,NULL,NULL,NULL));
+    for(unsigned n=0;n<8;n++)CHECK(rd(0xc)==0);
+    CHECK(!memcmp(&before,&fmi,sizeof before) && !stream.calls && !stream.cursor);
+    for(unsigned mode=1;mode<=3;mode++) {
+        stream.mode=mode;CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream)==(mode==1));
+        CHECK(!memcmp(&before,&fmi,sizeof before) && !stream.cursor);
+    }
+    stream.mode=0;
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,output,16)==S5L8920_FMI_DATA_WAIT);
+    for(unsigned n=0;n<16;n++)CHECK(output[n]==0x69);
+    reject(0,0xaa083);reject(4,3);reject(4,0);reject(0x40c,0);reject(0x410,0);reject(0x408,0);
+    CHECK(!s5l8920_fmi_data_configure(&fmi,32,16));
+    stream.available=sizeof stream.raw;
+    for(unsigned n=0;n<34;n++) {
+        CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+        CHECK(fmi.stream_bytes==(n+1)*16 && rd(0xc)==(n==33?2u:0u));
+    }
+    CHECK(!fmi.sector_pending && fmi.sectors_completed==1 && stream.cursor==544);
+    CHECK(fmi.fifo_count[0]==512 && fmi.fifo_count[1]==32); /* FMI completion before any DMA store. */
+    reject(4,3);wr(0xc,2);CHECK(rd(0xc)==0 && fmi.fifo_count[0]==512 && fmi.fifo_count[1]==32);
+    sector_start(&fmi,0);before=fmi;unsigned calls=stream.calls;
+    CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(!memcmp(&before,&fmi,sizeof before) && calls==stream.calls); /* Full data FIFO. */
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,output,5)==S5L8920_FMI_DATA_READY && !memcmp(output,stream.raw,5));
+    CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(stream.cursor==549 && fmi.sector_remaining[0]==507 && fmi.fifo_count[0]==512);
+    CHECK(s5l8920_fmi_data_receive(&fmi,1,output,16)==S5L8920_FMI_DATA_READY && !memcmp(output,stream.raw+512,16));
+    CHECK(s5l8920_fmi_reset_line(&fmi,true));
+    CHECK(!fmi.sector_pending && !fmi.fifo_count[0] && !fmi.fifo_count[1] && !fmi.fifo_capacity[0]);
+    CHECK(fmi.stream_bytes==549 && fmi.sectors_completed==1 && stream.cursor==549);
+    CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream) && stream.cursor==549);
+    CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);reject_read(0xc);reject(4,3);
+    CHECK(s5l8920_fmi_init(&fmi) && !fmi.stream_bytes && !fmi.sectors_completed);
+}
+static void test_sector_guards(void) {
+    CHECK(!s5l8920_fmi_data_configure(NULL,64,32));CHECK(!s5l8920_fmi_data_service(NULL,NULL,NULL));
+    init();CHECK(!s5l8920_fmi_data_configure(&fmi,15,32));CHECK(!s5l8920_fmi_data_configure(&fmi,513,32));
+    CHECK(!s5l8920_fmi_data_configure(&fmi,64,15));CHECK(!s5l8920_fmi_data_configure(&fmi,64,33));
+    stream_setup(&fmi,0,16,16);
+    for(unsigned spare=0;spare<=32;spare++)wr(0,0xa8003u|(spare<<8)|(spare<<2));
+    fmi.sectors_completed=UINT64_MAX;reject(4,3);fmi.sectors_completed=0;
+    sector_start(&fmi,32);stream.available=sizeof stream.raw;
+    fmi.stream_bytes=UINT64_MAX-7;s5l8920_fmi_t before=fmi;unsigned calls=stream.calls;
+    CHECK(!s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(!memcmp(&before,&fmi,sizeof before) && calls==stream.calls);fmi.stream_bytes=0;
+    CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    uint8_t bytes[17];memset(bytes,0x96,sizeof bytes);before=fmi;
+    CHECK(s5l8920_fmi_data_receive(NULL,0,bytes,1)==S5L8920_FMI_DATA_UNAVAILABLE);
+    CHECK(s5l8920_fmi_data_receive(&fmi,2,bytes,1)==S5L8920_FMI_DATA_UNAVAILABLE);
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,bytes,0)==S5L8920_FMI_DATA_UNAVAILABLE);
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,bytes,17)==S5L8920_FMI_DATA_UNAVAILABLE);
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,NULL,1)==S5L8920_FMI_DATA_UNAVAILABLE);
+    CHECK(!memcmp(&before,&fmi,sizeof before));for(unsigned n=0;n<17;n++)CHECK(bytes[n]==0x96);
+}
+#define SECTOR_DATA 0x41000000u
+#define SECTOR_SPARE 0x41002000u
+#define SECTOR_DESC 0x41003000u
+static void setup_sector_dma(unsigned channel,unsigned lane) {
+    uint32_t desc=SECTOR_DESC+lane*64u,address=lane?SECTOR_SPARE:SECTOR_DATA,size=lane?218u:4096u;
+    board.bus.write32(&board,desc,desc+32);board.bus.write32(&board,desc+4,0x103);
+    board.bus.write32(&board,desc+8,address);board.bus.write32(&board,desc+12,size);
+    uint32_t r=S5L8920_CDMA_BASE+channel*0x1000u;
+    board.bus.write32(&board,r,2);board.bus.write32(&board,r+4,lane?0:0x58);
+    board.bus.write32(&board,r+8,reg((channel-5)/2,lane?0x18:0x14));
+    board.bus.write32(&board,r+12,size);board.bus.write32(&board,r+20,desc);
+    board.bus.write32(&board,r,0x1c0009);CHECK(!board.bus_failure.reason);
+}
+static void test_sector_board_dma(void) {
+    CHECK(!s5l8920_fmi_data_board_service(NULL,0,NULL,NULL));CHECK(!s5l8920_fmi_dma_board_service(NULL,5));
+    const unsigned depths[3][2]={{16,16},{31,19},{512,32}};
+    for(unsigned b=0;b<2;b++)for(unsigned variant=0;variant<3;variant++) {
+        init();CHECK(s5l8920_init(&board));if(!board.ram)return;
+        CHECK(s5l8920_clock_gate_configure(&board,S5L8920_FMI_GATE+b,15));
+        CHECK(s5l8920_fmi_attach(&board,b,&fmi));
+        CHECK(s5l8920_clock_gate_configure(&board,S5L8920_CDMA_GATE,15));
+        s5l8920_cdma_init(&sector_dma);CHECK(s5l8920_cdma_attach(&board,&sector_dma));
+        stream_setup(&fmi,b?7:0,depths[variant][0],depths[variant][1]);stream.m=&board;
+        uint8_t *data=board.ram+SECTOR_DATA-S5L8920_RAM_BASE,*spare=board.ram+SECTOR_SPARE-S5L8920_RAM_BASE;
+        memset(data-1,0xa5,4098);memset(spare-1,0xa5,220);
+        setup_sector_dma(5+b*2,0);setup_sector_dma(6+b*2,1);sector_start(&fmi,32);
+        s5l8920_fmi_t before=fmi;s5l8920_cdma_t dma_before=sector_dma;
+        board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;board.timebase_ticks=721;
+        arm_cpu_t cpu=board.cpu;
+        CHECK(s5l8920_fmi_dma_board_service(&board,5+b*2));
+        CHECK(!memcmp(&before,&fmi,sizeof before) && !memcmp(&dma_before,&sector_dma,sizeof dma_before));
+        CHECK(!memcmp(&cpu,&board.cpu,sizeof cpu));stream.available=sizeof stream.raw;
+        board.bus.write32(&board,gate(b),0);
+        CHECK(s5l8920_fmi_data_board_service(&board,b,stream_read,&stream));
+        CHECK(s5l8920_fmi_dma_board_service(&board,5+b*2));
+        CHECK(!stream.calls && !memcmp(&before,&fmi,sizeof before));board.bus.write32(&board,gate(b),15);
+        CHECK(s5l8920_fmi_data_board_service(&board,b,stream_read,&stream));
+        CHECK(board.cpu.excl_valid && board.cpu.a8_excl_size==4 && !memcmp(&cpu,&board.cpu,sizeof cpu));
+        uint32_t dma_gate=S5L8920_CLOCK_GATE_BASE+4*S5L8920_CDMA_GATE;
+        board.bus.write32(&board,dma_gate,0);before=fmi;
+        CHECK(s5l8920_fmi_dma_board_service(&board,5+b*2) && !memcmp(&before,&fmi,sizeof before));
+        board.bus.write32(&board,dma_gate,15);
+        CHECK(s5l8920_fmi_dma_board_service(&board,5+b*2));
+        CHECK(!board.cpu.excl_valid && !board.cpu.a8_excl_size && !memcmp(data,stream.raw,16));
+        unsigned started=1,acks=0;
+        for(unsigned tick=0;tick<20000 && (sector_dma.nand[b*2].state.remaining || sector_dma.nand[b*2+1].state.remaining);tick++) {
+            if(tick%3==0)CHECK(s5l8920_fmi_data_board_service(&board,b,stream_read,&stream));
+            if(tick%2==0)CHECK(s5l8920_fmi_dma_board_service(&board,5+b*2));
+            if(tick%5==0)CHECK(s5l8920_fmi_dma_board_service(&board,6+b*2));
+            uint32_t status=board.bus.read32(&board,reg(b,0xc));
+            if(status&2) {
+                bw(b,0xc,2);acks++;
+                if(started<8) { unsigned left=started*32<218?218-started*32:0;sector_start(&fmi,left>32?32:left);started++; }
+            }
+        }
+        CHECK(!board.bus_failure.reason && board.timebase_ticks==721);
+        CHECK(stream.cursor==4314 && fmi.stream_bytes==4314 && fmi.sectors_completed==8 && acks==8 && started==8);
+        CHECK(!fmi.sector_pending && !fmi.fifo_count[0] && !fmi.fifo_count[1]);
+        CHECK(!sector_dma.nand[b*2].state.remaining && !sector_dma.nand[b*2+1].state.remaining);
+        CHECK(s5l8920_cdma_nand_irq(&sector_dma,5+b*2) && s5l8920_cdma_nand_irq(&sector_dma,6+b*2));
+        unsigned offset=0,meta=0;
+        for(unsigned sector=0;sector<8;sector++) {
+            CHECK(!memcmp(data+sector*512,stream.raw+offset,512));offset+=512;
+            unsigned amount=218-meta;if(amount>32)amount=32;
+            CHECK(!memcmp(spare+meta,stream.raw+offset,amount));offset+=amount;meta+=amount;
+        }
+        CHECK(data[-1]==0xa5 && data[4096]==0xa5 && spare[-1]==0xa5 && spare[218]==0xa5);
+        CHECK(!s5l8920_fmi_dma_board_service(&board,4));CHECK(!s5l8920_fmi_dma_board_service(&board,9));
+        CHECK(!s5l8920_fmi_data_board_service(&board,2,NULL,NULL));
+        bw(b,0x40c,0);bw(b,0x440,0);bw(b,0x10,0);bw(b,0x444,0x31ffff);bw(b,0xc,0xf);
+        CHECK(!fmi.selected && !fmi.interrupt_pending && !fmi.page_issued);
+    }
+    s5l8920_free(&board);
+}
 int main(void) {
     test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_ecc_mask();test_page_address_staging();test_page_command_queue();test_page_commands();test_status_setup_queue();test_status_polling();test_status_guards();test_reset();test_board();test_board_pages();test_board_status();s5l8920_free(&board);
+    test_sector_registers();test_sector_producer();test_sector_guards();test_sector_board_dma();
     printf("s5l8920_fmi: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

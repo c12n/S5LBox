@@ -32,8 +32,9 @@ typedef struct {
 
 /* A transient peripheral supplies exactly the requested bytes on READY.
  * WAIT preserves its FIFO and all DMA state; UNAVAILABLE refuses the service.
- * WAIT/refusal output bytes are discarded. Neither callback nor RAM provider
- * may mutate the controller/board or invalidate RAM views during the call. */
+ * WAIT/refusal output bytes are discarded. A callback may consume its endpoint
+ * FIFO, but neither it nor the RAM provider may reconfigure/reset the controller
+ * or board, reenter service, or invalidate RAM views during the call. */
 typedef enum {
     S5L8920_CDMA_UNAVAILABLE=0, S5L8920_CDMA_WAIT=1, S5L8920_CDMA_READY=2
 } s5l8920_cdma_input_t;

@@ -4,7 +4,7 @@
 #include <string.h>
 
 enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u, ADDRESS_HIGH=64u,
-       RBB=128u, STATUS_MASK=256u, INTERRUPT_ENABLE=512u };
+       RBB=128u, STATUS_MASK=256u, INTERRUPT_ENABLE=512u, SECTOR_CONFIG=1024u };
 enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u, READ_PAGE=4u,
        STATUS_COMMAND=5u, STATUS_POLL=6u, READ_MODE=7u };
 
@@ -16,8 +16,10 @@ bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted) {
     if(!f || !f->initialized || f->servicing)return false;
     if(asserted && !f->reset_asserted) {
         uint64_t commands=f->commands,bytes=f->bytes_latched,samples=f->status_samples;
+        uint64_t stream=f->stream_bytes,sectors=f->sectors_completed;
         (void)s5l8920_fmi_init(f);f->commands=commands;f->bytes_latched=bytes;
         f->status_samples=samples;
+        f->stream_bytes=stream;f->sectors_completed=sectors;
     }
     f->reset_asserted=asserted;return true;
 }
@@ -29,9 +31,15 @@ static unsigned selected_chip(const s5l8920_fmi_t *f) {
     unsigned chip=0u;while(!(f->selected&(1u<<chip)))chip++;
     return chip;
 }
+static bool data_busy(const s5l8920_fmi_t *f) {
+    return f->sector_pending || f->fifo_count[0] || f->fifo_count[1];
+}
 bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     if(!usable(f) || !f->enabled || !value)return false;
     switch(offset) {
+    case 0xcu:
+        if((f->programmed&(STATUS_MASK|INTERRUPT_ENABLE))!=(STATUS_MASK|INTERRUPT_ENABLE))return false;
+        *value=f->interrupt_pending;return true;
     case 0x10u:
         if(!(f->programmed&INTERRUPT_ENABLE))return false;
         *value=f->interrupt_enable;return true;
@@ -67,11 +75,11 @@ bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
 bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     if(!usable(f))return false;
     if(offset==0x400u) {
-        if(value!=1u || f->pending || f->control==0x50u)return false;
+        if(value!=1u || f->pending || data_busy(f) || f->control==0x50u)return false;
         f->enabled=true;return true;
     }
     if(offset==0x408u) {
-        if(f->pending || f->control==0x50u)return false;
+        if(f->pending || data_busy(f) || f->control==0x50u)return false;
         f->timing=value;f->programmed|=TIMING;return true;
     }
     if(!f->enabled)return false;
@@ -80,6 +88,27 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         f->status&=~value;return true;
     }
     if(f->pending && !(f->pending==STATUS_POLL && offset==0x410u && !value))return false;
+    if(offset==0xcu && f->control!=0x50u) {
+        if((value!=2u && value!=0xfu) ||
+           (f->programmed&(STATUS_MASK|INTERRUPT_ENABLE))!=(STATUS_MASK|INTERRUPT_ENABLE))return false;
+        f->interrupt_pending&=~value;return true;
+    }
+    if(offset==0u) {
+        unsigned spare=(value>>8)&63u;
+        if(f->sector_pending || f->control==0x50u || spare>32u ||
+           value!=(0xa8003u|(spare<<8)|(spare<<2)))return false;
+        f->sector_configuration=value;f->programmed|=SECTOR_CONFIG;return true;
+    }
+    if(offset==4u) {
+        const unsigned required=TIMING|ECC_MASK|STATUS_MASK|INTERRUPT_ENABLE|SECTOR_CONFIG;
+        if(value!=3u || f->sector_pending || f->control==0x50u || !f->selected ||
+           !f->page_issued || f->status_mode || (f->status&0xbu) || f->interrupt_pending ||
+           (f->programmed&required)!=required || !f->fifo_capacity[0] || !f->fifo_capacity[1] ||
+           f->sectors_completed==UINT64_MAX)return false;
+        f->sector_remaining[0]=512u;f->sector_remaining[1]=(uint16_t)((f->sector_configuration>>8)&63u);
+        f->sector_pending=true;return true;
+    }
+    if(data_busy(f))return false;
     if(offset==0x410u) {
         if(!value) {
             f->control=0u;f->data_valid=false;f->pending=IDLE;return true;
@@ -118,9 +147,6 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     }
     if(f->control==0x50u)return false;
     switch(offset) {
-    case 0xcu:
-        if(value!=0xfu || (f->programmed&(STATUS_MASK|INTERRUPT_ENABLE))!=(STATUS_MASK|INTERRUPT_ENABLE))return false;
-        f->interrupt_pending&=~value;return true;
     case 0x10u:
         if(value)return false;
         f->interrupt_enable=value;f->programmed|=INTERRUPT_ENABLE;return true;
@@ -208,4 +234,48 @@ bool s5l8920_fmi_service_endpoint(s5l8920_fmi_t *f,
 bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner) {
     const s5l8920_fmi_endpoint_t endpoint={device,NULL};
     return s5l8920_fmi_service_endpoint(f,&endpoint,owner);
+}
+
+bool s5l8920_fmi_data_configure(s5l8920_fmi_t *f,unsigned data_depth,unsigned spare_depth) {
+    if(!usable(f) || f->pending || data_busy(f) || f->control==0x50u ||
+       data_depth<16u || data_depth>S5L8920_FMI_DATA_STAGING_MAX ||
+       spare_depth<16u || spare_depth>S5L8920_FMI_SPARE_STAGING_MAX)return false;
+    f->fifo_capacity[0]=(uint16_t)data_depth;f->fifo_capacity[1]=(uint16_t)spare_depth;
+    f->fifo_head[0]=f->fifo_head[1]=0u;return true;
+}
+bool s5l8920_fmi_data_service(s5l8920_fmi_t *f,s5l8920_fmi_data_fn receive,void *owner) {
+    if(!f || !f->initialized || f->servicing)return false;
+    if(f->reset_asserted || !f->sector_pending)return true;
+    if(!f->enabled || !receive || !f->selected || !f->page_issued || f->status_mode)return false;
+    unsigned lane=f->sector_remaining[0]?0u:1u;
+    unsigned depth=f->fifo_capacity[lane],count=f->sector_remaining[lane];
+    if(!count || !depth || f->fifo_count[lane]>depth)return false;
+    if(count>16u)count=16u;
+    unsigned free=depth-f->fifo_count[lane];if(count>free)count=free;
+    if(!count)return true;
+    if(f->stream_bytes>UINT64_MAX-count || f->sectors_completed==UINT64_MAX)return false;
+    uint8_t bytes[16];f->servicing=true;
+    s5l8920_fmi_data_result_t result=receive(owner,selected_chip(f),bytes,count);
+    f->servicing=false;
+    if(result==S5L8920_FMI_DATA_WAIT)return true;
+    if(result!=S5L8920_FMI_DATA_READY)return false;
+    uint8_t *fifo=lane?f->spare_fifo:f->data_fifo;
+    for(unsigned n=0;n<count;n++)fifo[(f->fifo_head[lane]+f->fifo_count[lane]+n)%depth]=bytes[n];
+    f->fifo_count[lane]+=(uint16_t)count;f->sector_remaining[lane]-=(uint16_t)count;
+    f->stream_bytes+=count;
+    if(!f->sector_remaining[0] && !f->sector_remaining[1]) {
+        f->sector_pending=false;f->sectors_completed++;f->interrupt_pending|=2u;
+    }
+    return true;
+}
+s5l8920_fmi_data_result_t s5l8920_fmi_data_receive(s5l8920_fmi_t *f,unsigned lane,
+                                                 uint8_t *bytes,unsigned count) {
+    if(!usable(f) || !f->enabled || lane>1u || !bytes || !count || count>16u ||
+       !f->fifo_capacity[lane])return S5L8920_FMI_DATA_UNAVAILABLE;
+    if(count>f->fifo_count[lane])return S5L8920_FMI_DATA_WAIT;
+    const uint8_t *fifo=lane?f->spare_fifo:f->data_fifo;
+    unsigned depth=f->fifo_capacity[lane];
+    for(unsigned n=0;n<count;n++)bytes[n]=fifo[(f->fifo_head[lane]+n)%depth];
+    f->fifo_head[lane]=(uint16_t)((f->fifo_head[lane]+count)%depth);
+    f->fifo_count[lane]-=(uint16_t)count;return S5L8920_FMI_DATA_READY;
 }

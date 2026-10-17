@@ -49,6 +49,18 @@ typedef struct {
     bool (*sample)(void *owner,unsigned chip,uint8_t *status);
 } s5l8920_fmi_status_device_t;
 
+/* Sequential bytes from the selected NAND's current page-data stream.
+ * READY supplies exactly count (1..16) bytes and advances that stream; WAIT
+ * and UNAVAILABLE leave it unchanged. Their output bytes are discarded.
+ * The callback must not mutate the controller/board or its FIFO storage. */
+typedef enum {
+    S5L8920_FMI_DATA_UNAVAILABLE=0, S5L8920_FMI_DATA_WAIT=1, S5L8920_FMI_DATA_READY=2
+} s5l8920_fmi_data_result_t;
+typedef s5l8920_fmi_data_result_t (*s5l8920_fmi_data_fn)(void *owner,unsigned chip,
+                                                      uint8_t *bytes,unsigned count);
+#define S5L8920_FMI_DATA_STAGING_MAX 512u
+#define S5L8920_FMI_SPARE_STAGING_MAX 32u
+
 typedef struct {
     uint32_t timing, control, status;
     uint8_t selected, id[S5L8920_FMI_ID_SIZE], cursor, data;
@@ -62,6 +74,11 @@ typedef struct {
     uint32_t rbb_config, status_interrupt_mask, interrupt_enable, interrupt_pending;
     uint64_t status_samples;
     bool status_mode, page_issued;
+    uint32_t sector_configuration;
+    uint16_t fifo_capacity[2],fifo_head[2],fifo_count[2],sector_remaining[2];
+    uint8_t data_fifo[S5L8920_FMI_DATA_STAGING_MAX],spare_fifo[S5L8920_FMI_SPARE_STAGING_MAX];
+    bool sector_pending;
+    uint64_t stream_bytes,sectors_completed;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -85,8 +102,9 @@ typedef struct {
  * RBB_CFG 0x44c supports the observed 0x4040 status-bit6 predicate. Explicit
  * zero interrupt-mask writes at0x440/0x10 select the supported polled path;
  * nonzero interrupt enables remain unavailable. INTPND0x0c accepts the observed
- * low-four-bit W1C acknowledgement. DMA/ECC interrupt producers and INTPND
- * readback are unavailable; supported polled commands leave those sources idle.
+ * low-four-bit W1C acknowledgement and sector bit1 W1C. INTPND readback
+ * requires explicit zero masks; only backed sector work produces bit1.
+ * Nonzero interrupt enables, ECC sources and other INTPND bits are unavailable.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
@@ -108,8 +126,9 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
  * cancels an unfinished poll, invalidates the byte, and leaves W1C flags alone.
  * Returning to page data requires a serviced page request on the selected chip.
  * Status polling requires explicit zero masks/PIO and IFCTRLbit20 clear.
- * No IRQ delivery, page/OOB data transfer, DMA, ECC processing, multiple-chip selection,
- * physical timing model or default endpoint is provided. Timing 0x408 retains
+ * These command services do not clock sector data or perform DMA. No IRQ
+ * delivery, ECC processing, multiple-chip selection, physical timing model
+ * or default endpoint is provided. Timing 0x408 retains
  * configuration; PIO ID strobes require its value zero and register 0x424=0.
  * Counters are diagnostic effects, not measured physical time or capacity. */
 bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *owner);
@@ -117,4 +136,23 @@ bool s5l8920_fmi_service_endpoint(s5l8920_fmi_t *f,
                                  const s5l8920_fmi_endpoint_t *endpoint,void *owner);
 bool s5l8920_fmi_service_io(s5l8920_fmi_t *f,const s5l8920_fmi_endpoint_t *endpoint,
                            const s5l8920_fmi_status_device_t *status,void *owner);
+
+/* Explicit functional staging depths, 16..512 data and16..32 spare bytes.
+ * There is no default; these bounds describe host storage, not measured silicon
+ * FIFO capacity. Configure only while idle/empty; reset invalidates the depths.
+ * CFG0 supports the original raw512-byte sector mode A8003 with the same spare
+ * count (0..32) in bits8..13 and2..7. CTRL4=3 queues one sector after a backed
+ * page command in data mode. Modes using ECC, writes or other fields refuse.
+ * Service clocks at most16 actual bytes into the data lane, then spare lane;
+ * full FIFOs apply backpressure. INTPNDbit1 latches when all sector bytes have
+ * arrived, independently of DMA stores. After W1C, another sector may queue
+ * while old bytes remain buffered. No reads or old command service do this work.
+ * Receive consumes only previously clocked FIFO bytes, preserving output/state
+ * on WAIT/refusal. Reprogramming commands/chip/timing while pending/buffered
+ * refuses. Reset discards staged bytes but does not reset the NAND endpoint.
+ * No physical transfer latency, NAND geometry, ECC or IRQ delivery is inferred. */
+bool s5l8920_fmi_data_configure(s5l8920_fmi_t *f,unsigned data_depth,unsigned spare_depth);
+bool s5l8920_fmi_data_service(s5l8920_fmi_t *f,s5l8920_fmi_data_fn receive,void *owner);
+s5l8920_fmi_data_result_t s5l8920_fmi_data_receive(s5l8920_fmi_t *f,unsigned lane,
+                                                 uint8_t *bytes,unsigned count);
 #endif

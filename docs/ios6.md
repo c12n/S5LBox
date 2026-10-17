@@ -20,7 +20,8 @@ The AES key-disable latch accepts explicit initial state and sticky disables.
 An optional CDMA component executes the bootloader's polled RAM-to-RAM
 AES-CBC path with a supplied software key; hardware keys remain unavailable.
 Its NAND receive channels also move explicitly supplied peripheral bytes through
-validated descriptor chains. The FMI sector-data producer is still missing.
+validated descriptor chains. A separate FMI producer clocks backed sector bytes
+into explicitly configured staging FIFOs for those channels.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
@@ -115,16 +116,17 @@ corroborates this separation between status mode and page-data mode.
 
 This path requires explicit zero masks at `0x440` and `INT_EN` (`0x10`),
 PIO programming and IFCTRL bit 20 clear. The observed low-four-bit INTPND
-acknowledgement at `0x0c` is accepted after those mask writes. Its DMA/ECC
-interrupt producers remain unsupported and quiescent; INTPND readback, nonzero
-interrupt enables and interrupt delivery remain unavailable. FSTATUS supports
+acknowledgement at `0x0c` is accepted after those mask writes. INTPND readback
+then reports actual sector-completion bit 1, with a separate W1C of value 2.
+Other INTPND sources, nonzero interrupt enables and controller interrupt
+delivery remain unavailable. FSTATUS supports
 W1C for the implemented flags and the firmware's broad `0x0031ffff` clear.
 The sampled-status flag does not block subsequent command delivery.
 Unit tests copy explicit backing into an endpoint cache in separate work steps,
 prove that readiness follows completion, and cover refused/missing callbacks,
 poll cancellation, reset, selection, counter limits and both board gates.
-The separate CDMA receiver can transfer supplied bytes into guest buffers;
-this controller does not yet produce the FMI sector data for it.
+Separate FMI sector and CDMA services transfer supplied bytes into guest buffers.
+The command/status services above do not advance those transfers.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
@@ -214,10 +216,14 @@ The earlier fixture stopped at `0x4ff01522`, writing value 2 to an unattached
 spare-data DMA channel. With CDMA attached and original `0x4ff01328` opening
 its configured clock gate, the firmware now builds and queues both chains.
 The fixture's CPU heap and DMA use the same board RAM, including original
-descriptor pools at `0x4ff32a00` and `0x4ff32e80`. The next refusal is at
-`0x4ff041c0`, writing `0x000aa083` to FMI CFG at `0x81200000` or `0x81300000`.
-Both DMA channels remain running with their full byte counts; guest buffers
-remain unchanged because no FMI data producer is supplied.
+descriptor pools at `0x4ff32a00` and `0x4ff32e80`. The earlier CFG refusal at
+`0x4ff041c0` is now passed with the backed sector producer. All eight original
+sector requests transfer 4,314 bytes into the original caller allocations in
+the expected order. Two original IRQ entries execute the DMA handler at
+`0x4ff018bc`, acknowledge completion, and mark both software records complete.
+The next refusal is a read of `0xbf210014` at `0x4ff08d7c`, in the interrupt
+disable helper called by the final DMA wait. The raw-read callback has not
+returned, and final chip deselection and cleanup have not executed.
 The original chip selector checks the bus encoded in the global chip number
 before selecting its low-three-bit chip line. The fixture's backed rows are
 zero, `0xffff`, `0x10000` and `0xfffff`, within its diagnostic geometry;
@@ -225,8 +231,9 @@ unlisted rows have no implicit backing. Earlier `0x123456` testing established
 address packing only and exceeded that fixture's capacity.
 
 The kernel's guarded `#ce` read remains the conditional frontier, and the
-genuine audio-control write remains unresolved. Page/OOB storage, ECC processing,
-end-to-end NAND DMA, NAND-controller interrupts, FTL, alternate initialization modes, the connected
+genuine audio-control write remains unresolved. Full NAND read completion,
+physical page/OOB geometry, ECC processing, NAND-controller interrupts, FTL,
+alternate initialization modes, the connected
 bootloader chain, SpringBoard and physical behavior are unverified.
 
 ## NAND DMA receive chains
@@ -270,8 +277,44 @@ first allocation. The controller lane names do not imply a direct main/OOB
 buffer mapping. Tests use explicit byte streams to reconstruct both complete
 outputs and check waiting/refusal, canaries, descriptor limits and mutation,
 RAM aliases, clock/reset behavior, reentry and both banks' interrupt sources.
-This validates the DMA receiver. Original firmware currently queues it and
-stops before the FMI CFG/CTRL sector handshake; no full NAND read is claimed.
+Original firmware now consumes the FMI sector stream through these chains;
+the remaining interrupt-disable read prevents a completed raw-read return.
+
+## Backed FMI sector data
+
+The supported raw mode writes CFG with `0xa8003` and the same spare count
+(0..32) in bits 8..13 and 2..7, then writes 3 to CTRL at offset 4. It queues
+512 data-lane bytes followed by that many spare-lane bytes from the selected
+NAND's page stream. A backed page command, data mode, explicit zero interrupt
+and ECC masks, and configured staging depths are required. Other CFG/CTRL
+modes, ECC processing and outbound transfers remain unavailable.
+
+`s5l8920_fmi_data_configure` supplies functional staging depths: 16..512 data
+bytes and 16..32 spare bytes. There is no default. These are bounded host
+storage parameters, not a measurement of silicon FIFO sizes. The separate
+`s5l8920_fmi_data_board_service` clocks at most 16 actual endpoint bytes per
+call. WAIT preserves the stream and controller; refusal discards any returned
+bytes. A full FIFO applies backpressure. Once all requested sector bytes have
+arrived, INTPND bit 1 latches independently of DMA stores. After acknowledgement,
+another sector can queue while earlier bytes remain buffered.
+
+`s5l8920_fmi_dma_board_service` consumes the selected lane through CDMA's
+validated RAM chain. It never creates FIFO data or executes the producer.
+Both controller gates are respected; only actual RAM stores invalidate the
+exclusive monitor. Neither service advances guest time or instructions.
+Reset cancels pending sectors and discards staging without resetting the
+separately owned NAND endpoint. Reads never progress work, and live command,
+chip or timing changes with pending/buffered data refuse.
+
+Component tests cover both banks, varying FIFO depths and service schedules,
+ring wrap, cross-sector buffering, byte ordering, refusal, reset, gates and
+callback reentry. Original firmware executes its CFG/CTRL sequence, eight
+INTPND polls and acknowledgements, and both DMA IRQ handlers. Its next
+interrupt-disable read uses a register documented as write-only by the
+[PL192 manual, section 3.3.6](https://documentation-service.arm.com/static/5e8e218b88295d1e18d37489).
+That description does not establish the target's read value, so the read
+remains refused. Correct transferred bytes do not establish a returned NAND
+operation, ECC/FTL behavior, connected boot or physical-device success.
 
 ## Optional IOP shared RAM aperture
 

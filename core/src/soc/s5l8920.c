@@ -79,7 +79,7 @@ static bool fmi_enabled(const s5l8920_t *m,unsigned bank) {
     return m->fmi[bank] && g->configured && (g->value&0x8000000fu)==15u;
 }
 static bool fmi_register_window(uint32_t offset) {
-    return (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
+    return offset<8u || (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
            (offset>=0x814u && offset<0x818u);
 }
 static bool endpoint_servicing(const s5l8920_t *m) {
@@ -1622,6 +1622,35 @@ bool s5l8920_fmi_board_service(s5l8920_t *m,unsigned bank,
                              s5l8920_fmi_device_fn device,void *owner) {
     const s5l8920_fmi_endpoint_t endpoint={device,NULL};
     return s5l8920_fmi_board_service_endpoint(m,bank,&endpoint,owner);
+}
+bool s5l8920_fmi_data_board_service(s5l8920_t *m,unsigned bank,
+                                   s5l8920_fmi_data_fn receive,void *owner) {
+    if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !m->fmi[bank] ||
+       !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || endpoint_servicing(m))return false;
+    uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
+    if((gate&15u)!=0u && (gate&15u)!=15u)return false;
+    if(!(gate&15u) || (gate&0x80000000u))return true;
+    return s5l8920_fmi_data_service(m->fmi[bank],receive,owner);
+}
+typedef struct { s5l8920_t *board;unsigned bank,lane; } fmi_dma_input_t;
+static s5l8920_cdma_input_t fmi_dma_receive(void *owner,uint32_t peripheral,uint8_t *bytes,unsigned count) {
+    fmi_dma_input_t *input=owner;s5l8920_t *m=input->board;
+    if(peripheral!=S5L8920_FMI_BASE+input->bank*S5L8920_FMI_STRIDE+(input->lane?0x18u:0x14u))
+        return S5L8920_CDMA_UNAVAILABLE;
+    uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+input->bank].value;
+    if((gate&15u)!=0u && (gate&15u)!=15u)return S5L8920_CDMA_UNAVAILABLE;
+    if(!(gate&15u) || (gate&0x80000000u))return S5L8920_CDMA_WAIT;
+    s5l8920_fmi_data_result_t result=s5l8920_fmi_data_receive(m->fmi[input->bank],input->lane,bytes,count);
+    return result==S5L8920_FMI_DATA_READY?S5L8920_CDMA_READY:
+        result==S5L8920_FMI_DATA_WAIT?S5L8920_CDMA_WAIT:S5L8920_CDMA_UNAVAILABLE;
+}
+bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel) {
+    if(!m || channel<S5L8920_CDMA_NAND_FIRST ||
+       channel-S5L8920_CDMA_NAND_FIRST>=S5L8920_CDMA_NAND_COUNT)return false;
+    unsigned bank=(channel-S5L8920_CDMA_NAND_FIRST)/2u,lane=(channel-S5L8920_CDMA_NAND_FIRST)%2u;
+    if(!m->fmi[bank] || !m->clock_gate[S5L8920_FMI_GATE+bank].configured)return false;
+    fmi_dma_input_t input={m,bank,lane};
+    return s5l8920_cdma_nand_board_service(m,channel,fmi_dma_receive,&input);
 }
 static bool iop_signal_ap(void *owner,unsigned bank,uint32_t sources) {
     s5l8920_t *m=owner;

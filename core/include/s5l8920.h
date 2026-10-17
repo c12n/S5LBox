@@ -762,6 +762,13 @@ bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
 bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
                                 const s5l8920_fmi_endpoint_t *endpoint,
                                 const s5l8920_fmi_status_device_t *status,void *owner);
+/* Separate backed sector producer and FIFO-to-DMA consumer. Each call performs
+ * at most16 bytes of its own work; neither advances CPU/time. Both controller
+ * gates are respected; no callback/backing is retained. The consumer alone
+ * invalidates the CPU exclusive monitor when DMA actually stores to RAM. */
+bool s5l8920_fmi_data_board_service(s5l8920_t *m,unsigned bank,
+                                   s5l8920_fmi_data_fn receive,void *owner);
+bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
 
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.
