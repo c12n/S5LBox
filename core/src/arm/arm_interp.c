@@ -3463,7 +3463,8 @@ static arm_status_t exec_multiply(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     if (S) {
         set_flag(c, ARM_CPSR_N, (res >> 31) & 1u);
         set_flag(c, ARM_CPSR_Z, res == 0);
-        /* C is unpredictable after MUL on ARMv6; leave as-is. V preserved. */
+        /* ARMv4 C is UNKNOWN: this functional model retains it. ARMv5+
+         * requires C unchanged. V is unchanged in every supported profile. */
     }
     return ARM_OK;
 }
@@ -4738,6 +4739,14 @@ static bool v4t_a32_supported(const arm_cpu_t *c, uint32_t insn) {
         return (insn & 15u) != 15u && (insn & 0x000f0000u) != 0u;
     if ((insn & 0x0fb0f000u) == 0x0320f000u)             /* MSR imm */
         return (insn & 0x000f0000u) != 0u;
+    if ((insn & 0x0fc000f0u) == 0x00000090u) {          /* MUL / MLA */
+        unsigned d=(insn>>16)&15u, a=(insn>>12)&15u;
+        unsigned s=(insn>>8)&15u, m=insn&15u;
+        /* ARMv4 forbids PC operands and destination == first source.
+         * MUL's unused addend field must have its defined zero encoding. */
+        return d!=15u && s!=15u && m!=15u && d!=m &&
+            ((insn&0x00200000u) ? a!=15u : a==0u);
+    }
     if (group == 0u && (insn & 0x90u) == 0x90u) return false;
     unsigned opcode = (insn >> 21) & 15u, rd = (insn >> 12) & 15u;
     if (opcode >= 8u && opcode <= 11u)                  /* TST..CMN */

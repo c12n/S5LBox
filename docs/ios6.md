@@ -45,11 +45,12 @@ levels, timers, cache-controller operations and mailbox message completion.
 
 The unmodified IOP IRQ vector, exception wrappers, dispatcher and software-clear
 helper execute with an explicit interrupted context, thread and callback table.
-Six cases in each strict/shipping build cover three banks and two RAM/register fill patterns:
+Twelve cases in each strict/shipping build cover IRQ/FIQ, three banks and two
+RAM/register fill patterns:
 the source clears, service ends, the nesting counter balances and the original
 registers/CPSR return intact. The callback is the original clear helper, not
-the normal message processor. Six FIQ cases per build instead retain the pending source
-and stop at the partial CPU profile's unsupported `MUL` at `0x7e44`. These are
+the normal message processor. The FIQ dispatcher executes its original `MUL`
+at `0x7e44` to select the callback. These are
 bounded interrupt-path results, not a complete IOP boot or message exchange.
 
 ## IOP execution foundation
@@ -120,7 +121,15 @@ retain ARM state; BX and exception returns select state architecturally.
 CPSR has NZCV, I/F/T and mode fields, without ARMv6 A/Q/GE/endianness bits.
 Writes changing reserved PSR bits or CPSR.T through MSR are refused.
 
-Thumb execution, multiply, swap, halfword/signed transfers, SWI and
+The profile also supports A32 `MUL`/`MLA`, following
+[ARM DDI0406C.b, A8.8.100 and A8.8.114](https://documentation-service.arm.com/static/5f8dc043f86e16515cdbbc92).
+It refuses PC operands, a destination equal to the first encoded source, and
+nonzero reserved addend bits in `MUL`. The result is the low 32 bits of the
+product plus the optional addend. The S forms update N/Z and preserve V;
+this functional model retains C for ARMv4's architecturally unknown carry
+result. Instruction retirement counts do not model multiplier cycle timing.
+
+Thumb execution, long multiply, swap, halfword/signed transfers, SWI and
 coprocessors remain unavailable in this profile. Later ARM extensions stop
 before side effects; failed conditions still skip instructions. Unsupported
 instructions return `ARM_UNDEFINED` to the host without retirement. No CPU

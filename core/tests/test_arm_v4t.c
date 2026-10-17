@@ -110,7 +110,6 @@ static void test_boundaries(void) {
         0xf5d0f000u, /* PLD */ 0xe320f003u, /* WFI */
         0xee100f10u, /* MRC CP15 */ 0xee010f10u, /* MCR CP15 */
         0xeeb00a40u, /* VFP */ 0xf2000840u, /* NEON */
-        0xe0000291u, /* MUL, not yet implemented in this profile */
         0xe0810392u, /* UMULL */ 0xe1012090u, /* SWP */
         0xe1d010b0u, /* LDRH */ 0xef000000u, /* SWI */
         0xe10ff000u, /* MRS pc */ 0xe128f00fu /* MSR flags,pc */
@@ -163,6 +162,50 @@ static void test_psr_and_irq(void) {
     init(0xe1b0f00eu); c.r[14]=256; c.spsr[ARM_BANK_SVC]=ARM_MODE_SVC|ARM_CPSR_Q;
     CHECK(arm_step(&c)==ARM_UNDEFINED && c.cpsr==0xd3u && c.r[15]==0 && c.cycles==0);
 }
+static void test_multiply(void) {
+    static const uint32_t values[]={0,1,2,0xffffffffu,0x80000000u,0x7fffffffu,0x13579bdfu};
+    for(unsigned a=0;a<7;a++)for(unsigned b=0;b<7;b++)
+    for(unsigned acc=0;acc<2;acc++)for(unsigned set=0;set<2;set++)for(unsigned cv=0;cv<4;cv++) {
+        /* MUL{S} r2,r1,r3 or MLA{S} r2,r1,r3,r4. */
+        init(0xe0020391u|(acc<<21)|(set<<20)|(acc?0x4000u:0));
+        c.r[1]=values[a];c.r[3]=values[b];c.r[4]=0x12345678u;
+        c.cpsr|=ARM_CPSR_N|ARM_CPSR_Z|(cv<<28);
+        uint32_t before=c.cpsr;
+        uint32_t result=(uint32_t)((uint64_t)values[a]*values[b]+(acc?0x12345678u:0));
+        uint32_t flags=set?(before&~(ARM_CPSR_N|ARM_CPSR_Z))|
+            (result&ARM_CPSR_N)|(result?0:ARM_CPSR_Z):before;
+        CHECK(arm_step(&c)==ARM_OK && c.r[2]==result && c.r[15]==4 && c.cycles==1);
+        CHECK(c.cpsr==flags && c.r[1]==values[a] && c.r[3]==values[b] && c.r[4]==0x12345678u);
+        CHECK(reads==1 && writes==0);
+    }
+    const uint32_t aliases[]={0xe0030391u,0xe0222391u,0xe0233391u};
+    const uint32_t results[]={35,46,42};
+    for(unsigned n=0;n<3;n++) {
+        init(aliases[n]);c.r[1]=5;c.r[2]=11;c.r[3]=7;
+        CHECK(arm_step(&c)==ARM_OK && c.r[(aliases[n]>>16)&15u]==results[n]);
+    }
+    const uint32_t invalid[]={
+        0xe00f0391u,0xe0020f91u,0xe002039fu, /* PC in each MUL role */
+        0xe0021391u,0xe0010391u,             /* reserved addend / d == first source */
+        0xe02f4391u,0xe0224f91u,0xe022439fu,0xe022f391u,0xe0214391u
+    };
+    for(unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++) {
+        init(invalid[n]);c.r[1]=5;c.r[2]=11;c.r[3]=7;
+        arm_cpu_t before=c;
+        CHECK(arm_step(&c)==ARM_UNDEFINED && !memcmp(&before,&c,sizeof c) && writes==0);
+        /* A failed condition also skips invalid operand combinations. */
+        init(invalid[n]&0x0fffffffu);c.r[1]=5;
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4 && c.cycles==1 && c.r[1]==5 && writes==0);
+    }
+    const arm_arch_t later[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for(unsigned n=0;n<3;n++) {
+        init(0xe0110391u);CHECK(arm_reset_profile(&c,&bus,later[n]));
+        c.r[1]=0xffffffffu;c.r[3]=2;c.cpsr|=ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_Z;
+        uint32_t before=c.cpsr;
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==0xfffffffeu && c.r[15]==4);
+        CHECK(c.cpsr==((before&~ARM_CPSR_Z)|ARM_CPSR_N));
+    }
+}
 static void test_bus_failure(void) {
     const uint32_t insns[] = {0xe5901000u,0xe5801000u,0xe8b00006u};
     for (unsigned i=0;i<3;++i) {
@@ -179,7 +222,7 @@ int main(void) {
         puts("FAIL: explicit ARMv4T profile is unavailable"); return 1;
     }
     test_reset(); test_bootstrap(); test_pc_loads(); test_boundaries();
-    test_psr_and_irq(); test_bus_failure();
+    test_psr_and_irq(); test_multiply(); test_bus_failure();
     printf("arm_v4t: %u passed, %u failed\n",passed,failed);
     return failed ? 1 : 0;
 }
