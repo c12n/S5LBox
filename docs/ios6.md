@@ -94,11 +94,25 @@ the ECC-mask write at `0x4ff037f4`. With explicit zero-mask programming it now
 completes initialization and reset/sleep/wake/READID on both controllers,
 then the original logging, filtering, merge and geometry matching. All 256
 scanner bytes and the merged table match the diagnostic endpoint inputs.
-The caller stops in its original divide-by-zero fatal path: its timing
-calculation consumes clock state that this fragment fixture has not yet
-initialized. Neither the clock result nor fatal path is substituted. The
-next dependency is executing the original clock-state producer before this
-caller; complete initialization remains unverified.
+The first extended fixture stopped in its original divide-by-zero fatal path
+because its timing calculation consumed uninitialized clock state. That capture
+is retained. Executing original clock-state producer `0x4ff13b40` first resolves
+this dependency: it reads the explicitly configured PLLs and selectors and
+produces all 28 frequency slots checked against an independent integer oracle.
+The inputs use matching iBSS-selected configuration, a 24 MHz reference and
+32 logical reference cycles; the NAND getter returns 81 MHz. No output frequency
+or fatal-path result is substituted, and these inputs do not measure physical
+clock timing.
+
+With that prerequisite, original `0x4ff0219c` returns zero after 3,107,602
+instructions. Both controllers finish their backed discovery work and retain
+timing `0x11111` written by original code. The complete cold wrapper at
+`0x4ff02134` returns after 3,107,621 instructions and sets its initialized flag.
+A second call takes the original reporting path, returns after 71,112
+instructions, and preserves controller objects and discovery state without
+issuing additional NAND commands. This repeated-call path establishes reporting
+behavior, not sleep/wake or resume support. Strict and shipping traces agree
+under two initial register/stack poison patterns.
 
 Independent original-firmware fixtures establish that the `#ce` handoff
 property is a count derived from 16 eight-byte ID records, accompanied by a
@@ -106,15 +120,40 @@ bitmap. An isolated sparse-memory fixture also executes the original 16-slot
 scanner, transferring 128 backed bytes in 9,584 instructions. Its output goes
 through the original geometry matcher, which checks IDs, chip layout and a
 caller-supplied bus count. One tested diagnostic layout matches original tables;
-the other tested layouts take the original rejection paths. The publisher
-then writes count, bitmap and a bounded geometry prefix before refusing an
-unprepared state read at `0x4ff16a74`. Its property lookup requires existing
-fields of the expected size. This does not establish a complete NAND handoff
-or the target's physical geometry. No resulting diagnostic
-property value is supplied to the kernel. Its guarded `#ce` read remains the
-conditional frontier, and the genuine audio-control write remains unresolved.
-Page/OOB storage, ECC processing, DMA, interrupts, FTL, complete controller initialization,
-the connected bootloader chain, SpringBoard and physical behavior are unverified.
+the other tested layouts take the original rejection paths. Earlier publication
+stopped at an unprepared state read; the clock/discovery fixture now supplies
+the original producers. Full root registration at `0x4ff0cb08`, node lookup at
+`0x4ff0cba4` using the original path literal, and publication at `0x4ff16974`
+complete. Without root registration, lookup returns zero and leaves its output
+and tree untouched. With it, all 57,856 tree bytes match an independent expected
+copy containing exactly 24 derived property updates from 25 word stores.
+Property names distinguish `#ce-blocks=8192` from `#page-bytes=4096`; other
+fixture results include `#block-pages=128`, `#spare-bytes=218`, four chip lines,
+bitmap `0x0505`, two buses, ECC correctable count 16 and threshold 12.
+
+An unestablished word at discovery-state offset `0x74` is guarded against reads
+before publication. Its value depends on the caller's previous stack contents;
+it is not established as a geometry pointer. The original alternate-mode flags
+remain zero from BSS initialization. Successful publication therefore does not
+establish those alternate modes or the target's physical geometry. The fixtures
+still enter complete routines separately, and no resulting tree or diagnostic
+property value is supplied to the kernel.
+
+Following discovery, the original table getter at `0x4ff02180` exposes the raw
+page callback at `0x4ff02e38`. A guarded invocation uses explicit chip/page inputs
+and buffers allocated and zeroed by original firmware. It reaches the address
+helper at `0x4ff03628` and stops at `0x4ff0362e`, writing the page's high byte to
+unsupported register `0x41c` on the selected controller. No page command starts
+and the page/spare buffers remain unchanged. Static inspection shows the next
+writes pack the remaining page bits into `0x418` and write `4` to `0x420`;
+their execution and page transfer effects remain unverified. The original chip
+selector checks the bus encoded in the global chip number before selecting its
+low-three-bit chip line.
+
+The kernel's guarded `#ce` read remains the conditional frontier, and the
+genuine audio-control write remains unresolved. Page/OOB storage, ECC processing,
+DMA, NAND interrupts, FTL, alternate initialization modes, the connected
+bootloader chain, SpringBoard and physical behavior are unverified.
 
 ## Optional IOP shared RAM aperture
 
