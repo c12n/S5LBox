@@ -23,6 +23,45 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional IOP shared RAM aperture
+
+The original version1 AppleARM7M address conversion at `0x8065f9bc` subtracts
+`0x40000000` from an AP physical address. A conditional kernel trace observes
+this conversion for the allocated heap at `0x41718000`, followed by original
+stores of `0x01718000` and `0xa000` to the firmware's heap descriptor. The
+observer leaves the previous execution trace unchanged apart from its added
+records. This establishes the guest software's mapping, not physical testing.
+
+An explicitly selected RAM aperture now implements that conversion. Its
+page-aligned size is bounded by the caller; it neither allocates memory nor
+infers physical capacity. The programmed low firmware window takes precedence.
+Each access requires real backing from the borrowed RAM capability, with
+separate diagnostics for unmapped addresses and unavailable backing. AP
+physical-address aliases and unknown MMIO remain unavailable. Reset/hold
+preserves the aperture selection; component initialization discards it.
+
+The optional cache uses IOP address tags. Firmware and direct-RAM aliases share
+backing, while their private cached lines remain independent until maintenance.
+This is an explicit functional policy, not a measured cache-coherency contract.
+Actual backing stores and writebacks retain the existing AP exclusive-monitor
+effects. No shared RAM aperture is configured by default.
+
+Isolated unchanged firmware routines now initialize the observed 40 KiB heap
+and allocate a 32-byte block at `0x01718020`. They reproduce the original
+unmapped store without the aperture. Uncached execution and an explicit cache
+budget of 4,096 entries complete; the 1,024-entry budget stops visibly during
+zero-fill. The larger budget is an execution allowance, not physical geometry.
+These fixtures supply thread, BSS and stack context and do not establish
+complete startup or a later whole-kernel boot stage.
+
+In the separate conditional kernel run, the 1,024-entry budget stops during
+heap clearing. With an explicit 4,096-entry budget, the IOP executes 51,583
+instructions without an IOP fault or panic. The AP proceeds to the flash
+interface driver and stops at `0x809e35ba` while reading the unprepared `#ce`
+property under `/device-tree/arm-io/flash-controller0/disk`. No replacement
+property value is supplied. This retains the earlier audio-write exception
+and explicit board/clock/cache inputs; genuine connected boot is still unproven.
+
 ## Optional IOP deadline timer
 
 An explicitly configured IOP timer implements the original timer1 count and
@@ -65,16 +104,15 @@ including cache cleaning and disable, without patching instructions.
 In the separate conditional kernel run, the original AP driver supplies heap
 address `0x01718000` and length `0xa000`. With the timer selected, the IOP
 retires 3,354 instructions and stops at `0xd448` on its first word store to
-that heap. The controller currently maps only the low firmware window, so
-translation of this additional RAM range remains unavailable. This run retains
+that heap when only the low firmware window is selected. This run retains
 the earlier audio-write exception and explicit clock, cache and board inputs;
 it does not establish a genuine connected boot. The genuine audio-control
 stop and the previous cache-only kernel trace remain unchanged.
 
 ## Optional functional IOP cache
 
-The IOP can explicitly select a generic unified write-back cache for its low
-shared-RAM window. This is a functional policy, not an identification of the
+The IOP can explicitly select a generic unified write-back cache for its
+selected shared RAM. This is a functional policy, not an identification of the
 physical cache. Its 16-byte granules follow the original maintenance loop's
 stride; physical geometry, instruction/data topology, replacement and timing
 remain unmeasured. The caller lends a finite array of resident entries. A full
@@ -89,7 +127,7 @@ IOP writes remain invisible to the AP until cleaning. The clean/invalidate
 interpretation is inferred from original queue dataflow: the sender uses flag1
 after writing a slot, while the receiver uses flag2 before reading one.
 
-An aligned low-RAM address written to `+0x18` selects a granule. Zero-valued
+An aligned mapped RAM address written to `+0x18` selects a granule. Zero-valued
 commands at `+0x1c`/`+0x24` clean/invalidate that entry; `+0x0c`/`+0x20` operate
 on all entries. Clean writes actual dirty bytes to RAM and retains the entry.
 Invalidation discards even dirty data. `+0x00=0` disables without flushing.

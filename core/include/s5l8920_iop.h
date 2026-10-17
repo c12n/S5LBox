@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #define S5L8920_IOP_BASE UINT32_C(0x86300000)
+#define S5L8920_IOP_RAM_BASE UINT32_C(0x40000000)
 /* The target driver opens both raw gates before reset. Their individual
  * clock roles/rates are not established; only the observed pair is enabled. */
 #define S5L8920_IOP_RESET_GATE 0x2eu
@@ -70,6 +71,7 @@ typedef struct {
     uint32_t cache_address;
     bool cache_ready,cache_enabled,cache_address_valid;
     s5l8920_iop_timer_t timer;
+    uint32_t ram_size;
 } s5l8920_iop_t;
 
 /* Explicit partial ARMv4T profile, not a physical CPU/revision identification.
@@ -77,6 +79,15 @@ typedef struct {
  * pulse is required before register access or execution. No default image.
  * Calls must be serialized between AP and IOP instructions. */
 void s5l8920_iop_init(s5l8920_iop_t *i);
+/* Select the version1 shared RAM aperture: IOP address A maps to physical
+ * 40000000+A, except the lower programmed firmware window takes precedence.
+ * Size is an explicit page-aligned owner bound, at most one GiB; this does
+ * not allocate RAM or infer its physical capacity. Each backing lookup still
+ * requires the transient RAM-only capability. Configure before first CPU
+ * reset; identical repetition preserves state. CPU reset/hold preserves this
+ * selection, init discards it. No AP physical-address or MMIO aliases.
+ * Transfers crossing the firmware-window boundary are refused. */
+bool s5l8920_iop_ram_configure(s5l8920_iop_t *i,uint32_t size);
 /* Assert resets/holds the CPU and invalidates firmware-window programming.
  * Release leaves it held until RUN. Repeated levels preserve state. RAM is
  * untouched. This is a functional reset signal, without physical latency.
@@ -100,8 +111,8 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
  * stopped acknowledgement. No implicit CPU execution on reads/writes, and
  * no inferred ratio to AP clocks. Unsupported memory and instructions stop
  * at the original PC. Earlier successful stores in a multi-store remain.
- * This standalone form maps the low firmware window and explicitly
- * configured IOP VIC/cache/timer windows; shared timebase reads require the
+ * This standalone form maps the low firmware window, selected shared RAM and
+ * explicitly configured IOP VIC/cache/timer windows; timebase reads require the
  * separately borrowed capability below. */
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                s5l8920_iop_memory_fn memory,void *owner);
@@ -133,7 +144,7 @@ arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
 bool s5l8920_iop_timer_configure(s5l8920_iop_t *i);
 bool s5l8920_iop_timer_clock(s5l8920_iop_t *i,uint64_t ticks);
 
-/* Explicit generic unified write-back policy for low shared RAM. This is
+/* Explicit generic unified write-back policy for selected shared RAM. This is
  * not a measured cache identity/geometry/replacement policy. The owner lends
  * disjoint storage, valid for the component's lifetime. Capacity bounds the
  * resident working set: a full miss stops visibly instead of guessing an
@@ -142,7 +153,10 @@ bool s5l8920_iop_timer_clock(s5l8920_iop_t *i,uint64_t ticks);
  * Original IOP +20=1 initializes invalid tags once, then +00=4 enables.
  * Cached stores remain private until actual clean writes backing RAM;
  * invalidation discards even dirty data. +00=0 disables without cleaning.
- * Only observed zero-valued clean/invalidate commands and aligned low-RAM
+ * Tags use IOP addresses: aliases share backing but have independent private
+ * lines until maintenance. This is an explicit functional alias policy, not
+ * a measured physical cache/coherency contract.
+ * Only observed zero-valued clean/invalidate commands and aligned mapped-RAM
  * address selection are implemented. Unknown reads/values/widths, +08 wait,
  * warm init/reset and remapping after initialization remain refused. All
  * RAM writeback counts in bytes_written; private stores/invalidation do not.

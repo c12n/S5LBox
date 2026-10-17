@@ -93,8 +93,9 @@ static void fail(s5l8920_iop_t *i,s5l8920_iop_failure_reason_t reason,
 }
 static bool ram_range(s5l8920_iop_t *i,uint32_t address,unsigned size,
                       bool write,uint32_t value) {
+    uint32_t limit=address<i->firmware_size?i->firmware_size:i->ram_size;
     if(!i->running || i->reset_asserted || i->programmed!=7u ||
-       size>i->firmware_size || address>i->firmware_size-size) {
+       !size || size>limit || address>limit-size) {
         fail(i,S5L8920_IOP_UNMAPPED,address,size,write,value);return false;
     }
     return true;
@@ -103,11 +104,19 @@ static uint8_t *memory_at(s5l8920_iop_t *i,uint32_t address,unsigned size,
                           bool write,uint32_t value) {
     if(bus_failed(i))return NULL;
     if(!ram_range(i,address,size,write,value))return NULL;
-    /* The complete physical range was checked at RUN, and base+size cannot
-     * wrap. Revalidate each access: the supplied RAM capability may change. */
-    uint8_t *p=i->memory(i->memory_owner,i->firmware_base+address,size);
+    /* Firmware bounds were checked at RUN; the optional aperture is bounded
+     * by configuration. Revalidate backing on every access, including aliases. */
+    uint32_t base=address<i->firmware_size?i->firmware_base:S5L8920_IOP_RAM_BASE;
+    uint8_t *p=i->memory(i->memory_owner,base+address,size);
     if(!p)fail(i,S5L8920_IOP_MEMORY_UNAVAILABLE,address,size,write,value);
     return p;
+}
+bool s5l8920_iop_ram_configure(s5l8920_iop_t *i,uint32_t size) {
+    if(!i || !i->initialized || i->servicing || !size || (size&0xfffu) ||
+       size>UINT32_C(0x40000000))return false;
+    if(i->ram_size)return i->ram_size==size;
+    if(i->reset_seen || i->running)return false;
+    i->ram_size=size;return true;
 }
 bool s5l8920_iop_cache_configure(s5l8920_iop_t *i,
     s5l8920_iop_cache_line_t *lines,size_t capacity) {
@@ -165,7 +174,8 @@ static bool cache_command(s5l8920_iop_t *i,uint32_t offset,uint32_t value) {
         i->cache_enabled=value==4u;return true;
     }
     if(offset==0x18u) {
-        if((value&15u) || i->firmware_size<16u || value>i->firmware_size-16u)return false;
+        uint32_t limit=value<i->firmware_size?i->firmware_size:i->ram_size;
+        if((value&15u) || limit<16u || value>limit-16u)return false;
         i->cache_address=value;i->cache_address_valid=true;return true;
     }
     bool all=offset==0x0cu || offset==0x20u;
