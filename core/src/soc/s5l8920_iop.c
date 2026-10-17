@@ -58,21 +58,101 @@ static void fail(s5l8920_iop_t *i,s5l8920_iop_failure_reason_t reason,
     if(i->failure.reason)return;
     i->failure=(s5l8920_iop_failure_t){reason,address,i->cpu.r[15],value,size,write};
 }
+static bool ram_range(s5l8920_iop_t *i,uint32_t address,unsigned size,
+                      bool write,uint32_t value) {
+    if(!i->running || i->reset_asserted || i->programmed!=7u ||
+       size>i->firmware_size || address>i->firmware_size-size) {
+        fail(i,S5L8920_IOP_UNMAPPED,address,size,write,value);return false;
+    }
+    return true;
+}
 static uint8_t *memory_at(s5l8920_iop_t *i,uint32_t address,unsigned size,
                           bool write,uint32_t value) {
     if(bus_failed(i))return NULL;
-    if(!i->running || i->reset_asserted || i->programmed!=7u ||
-       size>i->firmware_size || address>i->firmware_size-size) {
-        fail(i,S5L8920_IOP_UNMAPPED,address,size,write,value);return NULL;
-    }
+    if(!ram_range(i,address,size,write,value))return NULL;
     /* The complete physical range was checked at RUN, and base+size cannot
      * wrap. Revalidate each access: the supplied RAM capability may change. */
     uint8_t *p=i->memory(i->memory_owner,i->firmware_base+address,size);
     if(!p)fail(i,S5L8920_IOP_MEMORY_UNAVAILABLE,address,size,write,value);
     return p;
 }
+bool s5l8920_iop_cache_configure(s5l8920_iop_t *i,
+    s5l8920_iop_cache_line_t *lines,size_t capacity) {
+    if(!i || !i->initialized || i->servicing || !lines || !capacity ||
+       capacity>SIZE_MAX/sizeof *lines)return false;
+    if(i->cache_lines)return i->cache_lines==lines && i->cache_capacity==capacity;
+    if(i->reset_seen || i->running)return false;
+    /* Tags remain unavailable until the original initialization command. */
+    i->cache_lines=lines;i->cache_capacity=capacity;return true;
+}
+static bool cache_address(uint32_t address) {
+    return address>=S5L8920_IOP_BASE && address-S5L8920_IOP_BASE<0x100u;
+}
+static s5l8920_iop_cache_line_t *cache_line(s5l8920_iop_t *i,uint32_t address) {
+    uint32_t tag=address&~15u;
+    s5l8920_iop_cache_line_t *empty=NULL;
+    for(size_t n=0;n<i->cache_capacity;++n) {
+        s5l8920_iop_cache_line_t *line=&i->cache_lines[n];
+        if(line->valid && line->address==tag)return line;
+        if(!line->valid && !empty)empty=line;
+    }
+    if(!empty) {fail(i,S5L8920_IOP_CACHE_LIMIT,tag,16,false,0);return NULL;}
+    uint8_t *p=memory_at(i,tag,16,false,0);if(!p)return NULL;
+    memcpy(empty->data,p,16);empty->address=tag;empty->dirty=false;empty->valid=true;
+    return empty;
+}
+static bool cache_parts(s5l8920_iop_t *i,uint32_t address,unsigned size,
+                         bool write,uint32_t value,uint8_t *parts[4],
+                         s5l8920_iop_cache_line_t *lines[4]) {
+    if(!ram_range(i,address,size,write,value))return false;
+    s5l8920_iop_cache_line_t *line=NULL;
+    for(unsigned n=0;n<size;++n) {
+        uint32_t a=address+n;
+        if(!line || line->address!=(a&~15u))line=cache_line(i,a);
+        if(!line)return false;
+        parts[n]=line->data+(a&15u);lines[n]=line;
+    }
+    return true;
+}
+static bool clean_line(s5l8920_iop_t *i,s5l8920_iop_cache_line_t *line) {
+    if(!line->valid || !line->dirty)return true;
+    uint8_t *p=memory_at(i,line->address,16,true,0);if(!p)return false;
+    memcpy(p,line->data,16);line->dirty=false;i->bytes_written+=16;return true;
+}
+static bool cache_command(s5l8920_iop_t *i,uint32_t offset,uint32_t value) {
+    if(!i->cache_lines)return false;
+    if(offset==0x20u && value==1u) {
+        if(i->cache_ready || i->cache_enabled)return false;
+        memset(i->cache_lines,0,i->cache_capacity*sizeof *i->cache_lines);
+        i->cache_ready=true;return true;
+    }
+    if(!i->cache_ready)return false;
+    if(offset==0u) {
+        if(value!=0u && value!=4u)return false;
+        i->cache_enabled=value==4u;return true;
+    }
+    if(offset==0x18u) {
+        if((value&15u) || i->firmware_size<16u || value>i->firmware_size-16u)return false;
+        i->cache_address=value;i->cache_address_valid=true;return true;
+    }
+    bool all=offset==0x0cu || offset==0x20u;
+    bool clean=offset==0x0cu || offset==0x1cu;
+    if(value || (!all && offset!=0x1cu && offset!=0x24u) ||
+       (!all && !i->cache_address_valid))return false;
+    for(size_t n=0;n<i->cache_capacity;++n) {
+        s5l8920_iop_cache_line_t *line=&i->cache_lines[n];
+        if(!line->valid || (!all && line->address!=i->cache_address))continue;
+        if(clean) {if(!clean_line(i,line))return false;}
+        else {line->valid=false;line->dirty=false;}
+    }
+    return true;
+}
 static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
     if(bus_failed(i))return 0;
+    if(cache_address(address)) {
+        fail(i,i->cache_lines?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,false,0);return 0;
+    }
     if(ap_vic_address(address)) {
         fail(i,i->signal_ap?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
              address,size,false,0);return 0;
@@ -83,13 +163,24 @@ static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
         fail(i,i->vic_configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
              address,size,false,0);return 0;
     }
-    uint8_t *p=memory_at(i,address,size,false,0);if(!p)return 0;
     uint32_t v=0;
-    for(unsigned n=0;n<size;++n)v|=(uint32_t)p[n]<<(8u*n);
+    if(i->cache_enabled) {
+        uint8_t *parts[4];s5l8920_iop_cache_line_t *lines[4];
+        if(!cache_parts(i,address,size,false,0,parts,lines))return 0;
+        for(unsigned n=0;n<size;++n)v|=(uint32_t)*parts[n]<<(8u*n);
+    } else {
+        uint8_t *p=memory_at(i,address,size,false,0);if(!p)return 0;
+        for(unsigned n=0;n<size;++n)v|=(uint32_t)p[n]<<(8u*n);
+    }
     return v;
 }
 static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t value) {
     if(bus_failed(i))return;
+    if(cache_address(address)) {
+        if(size==4u && !(address&3u) && cache_command(i,address-S5L8920_IOP_BASE,value))return;
+        fail(i,i->cache_lines?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,true,value);return;
+    }
     if(ap_vic_address(address)) {
         uint32_t relative=address-AP_VIC_BASE;
         if(i->signal_ap && size==4u && relative%S5L8920_IOP_VIC_STRIDE==PL192_SOFTINT &&
@@ -102,9 +193,17 @@ static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t
         fail(i,i->vic_configured?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
              address,size,true,value);return;
     }
-    uint8_t *p=memory_at(i,address,size,true,value);if(!p)return;
-    for(unsigned n=0;n<size;++n)p[n]=(uint8_t)(value>>(8u*n));
-    i->bytes_written+=size;
+    if(i->cache_enabled) {
+        uint8_t *parts[4];s5l8920_iop_cache_line_t *lines[4];
+        if(!cache_parts(i,address,size,true,value,parts,lines))return;
+        /* Resolve both granules before modifying a split access. Fills may
+         * survive a failed access, but an incomplete store writes no bytes. */
+        for(unsigned n=0;n<size;++n) {*parts[n]=(uint8_t)(value>>(8u*n));lines[n]->dirty=true;}
+    } else {
+        uint8_t *p=memory_at(i,address,size,true,value);if(!p)return;
+        for(unsigned n=0;n<size;++n)p[n]=(uint8_t)(value>>(8u*n));
+        i->bytes_written+=size;
+    }
 }
 #define ACCESSORS(bits) \
 static uint##bits##_t read##bits(void *ctx,uint32_t a) { \
@@ -129,6 +228,7 @@ bool s5l8920_iop_reset_line(s5l8920_iop_t *i,bool asserted) {
     if(!i || !i->initialized || i->servicing)return false;
     if(i->reset_asserted==asserted)return true;
     if(asserted) {
+        if(i->cache_ready)return false;
         if(!arm_reset_profile(&i->cpu,&i->bus,ARM_ARCH_V4T))return false;
         i->failure=(s5l8920_iop_failure_t){0};
         i->running=false;i->reset_seen=true;i->programmed=0;
@@ -167,7 +267,7 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
            !memory(owner,i->firmware_base,i->firmware_size))return false;
         i->running=true;return true;
     }
-    if(i->running || i->failure.reason)return false;
+    if(i->running || i->failure.reason || i->cache_ready)return false;
     switch(offset) {
     case 0x110:
         if(value&0xfffu)return false;

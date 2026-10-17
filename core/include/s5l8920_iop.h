@@ -4,6 +4,7 @@
 #define S5LBOX_S5L8920_IOP_H
 #include "arm.h"
 #include "pl192.h"
+#include <stddef.h>
 
 #define S5L8920_IOP_BASE UINT32_C(0x86300000)
 /* The target driver opens both raw gates before reset. Their individual
@@ -22,11 +23,19 @@ typedef uint8_t *(*s5l8920_iop_memory_fn)(void *,uint32_t,uint32_t);
  * return must leave the receiver unchanged. This does not acknowledge a
  * message or advance the AP CPU. The owner is shared with the RAM provider. */
 typedef bool (*s5l8920_iop_signal_fn)(void *,unsigned,uint32_t);
+/* Resident storage for the optional functional cache policy. Sixteen-byte
+ * granules follow the firmware's maintenance stride, not measured geometry. */
+typedef struct {
+    uint32_t address;
+    uint8_t data[16];
+    bool valid,dirty;
+} s5l8920_iop_cache_line_t;
 typedef enum {
     S5L8920_IOP_NO_FAILURE=0,
     S5L8920_IOP_UNMAPPED,
     S5L8920_IOP_MEMORY_UNAVAILABLE,
-    S5L8920_IOP_REGISTER_REFUSED
+    S5L8920_IOP_REGISTER_REFUSED,
+    S5L8920_IOP_CACHE_LIMIT
 } s5l8920_iop_failure_reason_t;
 typedef struct {
     s5l8920_iop_failure_reason_t reason;
@@ -49,6 +58,10 @@ typedef struct {
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
     bool vic_configured;
+    s5l8920_iop_cache_line_t *cache_lines;
+    size_t cache_capacity;
+    uint32_t cache_address;
+    bool cache_ready,cache_enabled,cache_address_valid;
 } s5l8920_iop_t;
 
 /* Explicit partial ARMv4T profile, not a physical CPU/revision identification.
@@ -58,7 +71,10 @@ typedef struct {
 void s5l8920_iop_init(s5l8920_iop_t *i);
 /* Assert resets/holds the CPU and invalidates firmware-window programming.
  * Release leaves it held until RUN. Repeated levels preserve state. RAM is
- * untouched. This is a functional reset signal, without physical latency. */
+ * untouched. This is a functional reset signal, without physical latency.
+ * After optional cache initialization, warm CPU reset is refused because
+ * the physical reset coupling is unknown; reinitialize the component for a
+ * separately requested cold reset. */
 bool s5l8920_iop_reset_line(s5l8920_iop_t *i,bool asserted);
 /* Version1 protocol only: +100 control/stop status, +110 physical base,
  * +114 inverse power-of-two length mask, +118 self address. Control0 stops
@@ -67,7 +83,7 @@ bool s5l8920_iop_reset_line(s5l8920_iop_t *i,bool asserted);
  * held at reset with no firmware programming. Bit1 reflects requested stop,
  * never an unsupported-instruction or memory failure. Other control bits,
  * live remapping and unknown initial register readbacks are refused.
- * Cache registers, mailbox messages and timers remain unavailable. */
+ * AP access to cache registers, mailbox messages and timers is unavailable. */
 bool s5l8920_iop_read(const s5l8920_iop_t *i,uint32_t offset,uint32_t *value);
 bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
                      s5l8920_iop_memory_fn memory,void *owner);
@@ -76,8 +92,8 @@ bool s5l8920_iop_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value,
  * stopped acknowledgement. No implicit CPU execution on reads/writes, and
  * no inferred ratio to AP clocks. Unsupported memory and instructions stop
  * at the original PC. Earlier successful stores in a multi-store remain.
- * This standalone form maps only the low firmware window and explicitly
- * configured IOP VIC windows. */
+ * This standalone form maps the low firmware window and explicitly
+ * configured IOP VIC/cache windows. */
 arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
                                s5l8920_iop_memory_fn memory,void *owner);
 /* As above, with a borrowed AP signal capability for this instruction only.
@@ -86,6 +102,24 @@ arm_status_t s5l8920_iop_service(s5l8920_iop_t *i,
  * Neither capability nor owner survives the call, including failure. */
 arm_status_t s5l8920_iop_service_with_signal(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,void *owner);
+
+/* Explicit generic unified write-back policy for low shared RAM. This is
+ * not a measured cache identity/geometry/replacement policy. The owner lends
+ * disjoint storage, valid for the component's lifetime. Capacity bounds the
+ * resident working set: a full miss stops visibly instead of guessing an
+ * eviction. No default cache, background activity or timing is supplied.
+ * Configure before first CPU reset; identical repetition preserves state.
+ * Original IOP +20=1 initializes invalid tags once, then +00=4 enables.
+ * Cached stores remain private until actual clean writes backing RAM;
+ * invalidation discards even dirty data. +00=0 disables without cleaning.
+ * Only observed zero-valued clean/invalidate commands and aligned low-RAM
+ * address selection are implemented. Unknown reads/values/widths, +08 wait,
+ * warm init/reset and remapping after initialization remain refused. All
+ * RAM writeback counts in bytes_written; private stores/invalidation do not.
+ * A backing-transfer failure reports that transfer's address/size and keeps
+ * earlier completed writebacks. Init detaches storage without freeing it. */
+bool s5l8920_iop_cache_configure(s5l8920_iop_t *i,
+    s5l8920_iop_cache_line_t *lines,size_t capacity);
 
 /* Explicit optional cold PL192 configuration for the three observed windows.
  * Independent controller IRQ/FIQ outputs are aggregated into the IOP CPU's

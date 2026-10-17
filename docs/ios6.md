@@ -23,6 +23,52 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional functional IOP cache
+
+The IOP can explicitly select a generic unified write-back cache for its low
+shared-RAM window. This is a functional policy, not an identification of the
+physical cache. Its 16-byte granules follow the original maintenance loop's
+stride; physical geometry, instruction/data topology, replacement and timing
+remain unmeasured. The caller lends a finite array of resident entries. A full
+miss stops with `S5L8920_IOP_CACHE_LIMIT` instead of inventing eviction behavior.
+No cache is configured by default.
+
+The original initialization writes `1` to `0x86300020`, then `4` to
+`0x86300000`. These initialize invalid tags and enable the selected policy.
+Fetches and loads retain real backing bytes; stores change private dirty data.
+AP writes remain invisible to populated IOP entries until invalidation, and
+IOP writes remain invisible to the AP until cleaning. The clean/invalidate
+interpretation is inferred from original queue dataflow: the sender uses flag1
+after writing a slot, while the receiver uses flag2 before reading one.
+
+An aligned low-RAM address written to `+0x18` selects a granule. Zero-valued
+commands at `+0x1c`/`+0x24` clean/invalidate that entry; `+0x0c`/`+0x20` operate
+on all entries. Clean writes actual dirty bytes to RAM and retains the entry.
+Invalidation discards even dirty data. `+0x00=0` disables without flushing.
+Only actual backing stores/writebacks count in `bytes_written` and invalidate
+AP exclusives. Signaling an interrupt does not implicitly publish cache data.
+A failed backing transfer preserves earlier completed writes and records the
+transfer address, size and original instruction PC separately from AP faults.
+
+Unknown readbacks, command values, unaligned selections, the `+0x08` wait
+command and AP access to this register window remain unavailable. Warm
+initialization, CPU reset and window remapping after cache initialization are
+refused because their physical coupling is unknown. Hold/resume retains state;
+component reinitialization detaches the caller's storage.
+
+Bounded fixtures execute the unchanged original initialization and maintenance
+helpers plus queue send/receive routines. They verify stale reads, dirty
+publication, whole/range maintenance and the sender's real AP software
+interrupt, with explicit queue/thread context and two RAM fill patterns.
+The original startup with this policy and cold IOP interrupt controllers
+retires 3,170 instructions before refusing `PC=0x6d60`, a write of `2` to
+`0xbf100224`. This is a later isolated boundary, not a completed IOP boot.
+Whole-cache flag2 and flag8 challenge calls enter the firmware's assertion
+path at `0x6dc8` after losing uncleaned critical-context data. Those failures
+remain unresolved; the observed direct zero-length callers use clean-first
+flags1/9, but the static caller audit is not exhaustive. These results do not
+establish a physical cache contract, a connected kernel boot or SpringBoard.
+
 ## IOP interrupt controllers
 
 The optional IOP interrupt configuration provides the three controller windows
@@ -49,7 +95,8 @@ controllers; reinitializing the component discards them. Physical reset wiring
 is not inferred. Both observed clock gates must be open for AP access. The
 IOP bus has the same aligned-word register semantics. Protection programming
 and identification replies remain unavailable, as do external peripheral
-levels, timers, cache-controller operations and mailbox message completion.
+levels, timers and mailbox message completion. Cache operations require the
+separately selected functional policy above.
 
 The unmodified IOP IRQ vector, exception wrappers, dispatcher and software-clear
 helper execute with an explicit interrupted context, thread and callback table.
@@ -89,15 +136,17 @@ no window programmed; its additional live effects are not implemented.
 
 Each explicit board service call executes at most one IOP instruction.
 Reads and AP execution do not implicitly advance it. Hold preserves CPU
-state; reset invalidates the window without erasing shared RAM. STOP reflects
+state; a permitted reset invalidates the window without erasing shared RAM.
+Reset after optional cache initialization is refused as described above. STOP reflects
 an actual hold request, never an unsupported instruction or missing register.
 IOP failures preserve their own PC/access diagnostics separately from the AP.
-Successful stores invalidate the AP exclusive monitor, including the prefix
+Successful backing stores invalidate the AP exclusive monitor, including the prefix
 of a multi-store that later fails. Board reset/free detach the borrowed
 component; service retains no RAM or owner pointer. No controller is attached
 by default, and no AP/IOP clock ratio is inferred.
 
-The bounded original kernel segment `0x8065f7d0..0x8065f840` executes 32
+With no optional cache selected, the bounded original kernel segment
+`0x8065f7d0..0x8065f840` executes 32
 instructions with an explicit version1 caller object, image buffer and absent
 optional callback. Its five controller writes and one status read configure
 and start the real IOP core. The subsequent unmodified firmware entry passes
