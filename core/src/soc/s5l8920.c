@@ -41,7 +41,8 @@ static bool cdma_address(uint32_t address,bool *aes,uint32_t *offset) {
     *aes=address>=S5L8920_AES_CONTEXT1 && address-S5L8920_AES_CONTEXT1<0x1000u;
     if(*aes) { *offset=address-S5L8920_AES_CONTEXT1;return true; }
     *offset=address-S5L8920_CDMA_BASE;
-    return address>=S5L8920_CDMA_BASE+0x1000u && *offset<0x3000u;
+    return (address>=S5L8920_CDMA_BASE+0x1000u && *offset<0x3000u) ||
+        (address>=S5L8920_CDMA_BASE+0x5000u && *offset<0x9000u);
 }
 static bool cdma_enabled(const s5l8920_t *m) {
     return m->cdma && m->clock_gate[S5L8920_CDMA_GATE].configured &&
@@ -81,7 +82,8 @@ static bool fmi_register_window(uint32_t offset) {
     return (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
            (offset>=0x814u && offset<0x818u);
 }
-static bool fmi_servicing(const s5l8920_t *m) {
+static bool endpoint_servicing(const s5l8920_t *m) {
+    if(m->cdma && m->cdma->servicing)return true;
     for(unsigned bank=0;bank<S5L8920_FMI_COUNT;bank++)
         if(m->fmi[bank] && m->fmi[bank]->servicing)return true;
     return false;
@@ -201,6 +203,13 @@ static bool decode_uart(uint32_t address,unsigned *bank,uint32_t *offset) {
  * DDI0273A 2.3.2 blocking wiring: no acknowledgement is forwarded downstream.
  * Logical levels are propagated without asserting physical timing accuracy. */
 static void refresh_interrupts(s5l8920_t *m) {
+    for(unsigned channel=S5L8920_CDMA_NAND_FIRST;
+        m->cdma && channel<S5L8920_CDMA_NAND_FIRST+S5L8920_CDMA_NAND_COUNT;channel++) {
+        unsigned source=S5L8920_CDMA_NAND_IRQ_BASE+channel;
+        (void)pl192_set_line(&m->vic[source/32u],source%32u,
+            (m->input_levels[source/32u]&(1u<<(source%32u)))!=0u ||
+            s5l8920_cdma_nand_irq(m->cdma,channel));
+    }
     for (unsigned bank=0;bank<S5L8920_SPI_COUNT;bank++) {
         unsigned source=S5L8920_SPI0_IRQ-bank;
         (void)pl192_set_line(&m->vic[0],source,
@@ -1538,13 +1547,14 @@ bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial) {
 
 bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma) {
     if(!m || !m->ram || !cdma || !cdma->initialized ||
+       cdma->servicing || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_CDMA_GATE].configured || access_failed(m))return false;
     if(m->cdma)return m->cdma==cdma;
     m->cdma=cdma;refresh_interrupts(m);return true;
 }
 bool s5l8920_cdma_board_service(s5l8920_t *m) {
     if(!m || !m->ram || !m->cdma || !m->clock_gate[S5L8920_CDMA_GATE].configured ||
-       access_failed(m))return false;
+       access_failed(m) || endpoint_servicing(m))return false;
     unsigned gate=m->clock_gate[S5L8920_CDMA_GATE].value&15u;
     if(!gate)return true;
     if(gate!=15u)return false;
@@ -1552,6 +1562,23 @@ bool s5l8920_cdma_board_service(s5l8920_t *m) {
     if(!s5l8920_cdma_service(m->cdma,cdma_ram,m))return false;
     if(remaining!=m->cdma->channel[1].remaining) {
         /* A DMA store can invalidate the local exclusive monitor. */
+        m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
+    }
+    refresh_interrupts(m);return true;
+}
+
+bool s5l8920_cdma_nand_board_service(s5l8920_t *m,unsigned channel,
+                                    s5l8920_cdma_receive_fn receive,void *owner) {
+    if(!m || !m->ram || !m->cdma || endpoint_servicing(m) || access_failed(m) ||
+       !m->clock_gate[S5L8920_CDMA_GATE].configured || channel<S5L8920_CDMA_NAND_FIRST ||
+       channel-S5L8920_CDMA_NAND_FIRST>=S5L8920_CDMA_NAND_COUNT)return false;
+    unsigned gate=m->clock_gate[S5L8920_CDMA_GATE].value&15u;
+    if(!gate)return true;
+    if(gate!=15u)return false;
+    unsigned index=channel-S5L8920_CDMA_NAND_FIRST;
+    uint32_t remaining=m->cdma->nand[index].state.remaining;
+    if(!s5l8920_cdma_nand_service(m->cdma,channel,cdma_ram,m,receive,owner))return false;
+    if(remaining!=m->cdma->nand[index].state.remaining) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }
     refresh_interrupts(m);return true;
@@ -1569,7 +1596,7 @@ bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
 
 bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
     if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !fmi || !fmi->initialized ||
-       access_failed(m) || fmi->servicing || fmi_servicing(m) ||
+       access_failed(m) || fmi->servicing || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_FMI_GATE+bank].configured)return false;
     if(m->fmi[bank])return m->fmi[bank]==fmi;
     for(unsigned n=0;n<S5L8920_FMI_COUNT;n++)if(m->fmi[n]==fmi)return false;
@@ -1581,7 +1608,7 @@ bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
                                 const s5l8920_fmi_endpoint_t *endpoint,
                                 const s5l8920_fmi_status_device_t *status,void *owner) {
     if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !m->fmi[bank] ||
-       !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || fmi_servicing(m))return false;
+       !m->clock_gate[S5L8920_FMI_GATE+bank].configured || access_failed(m) || endpoint_servicing(m))return false;
     uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
     if((gate&15u)!=0u && (gate&15u)!=15u)return false;
     if(!(gate&15u) || (gate&0x80000000u))return true;
@@ -1684,7 +1711,7 @@ bool s5l8920_swi_board_source_clock(s5l8920_t *m,uint64_t cycles) {
 }
 
 bool s5l8920_reset(s5l8920_t *m) {
-    if (!m || !m->ram || fmi_servicing(m)) return false;
+    if (!m || !m->ram || endpoint_servicing(m)) return false;
     if (!arm_reset_profile(&m->cpu,&m->bus,ARM_ARCH_V7_CORTEX_A8)) return false;
     m->miu.value=m->miu.initial;
     m->ram_boot_window=m->miu.configured && (m->miu.value&3u)==2u;
@@ -1763,7 +1790,7 @@ bool s5l8920_init(s5l8920_t *m) {
 }
 
 void s5l8920_free(s5l8920_t *m) {
-    if (!m || fmi_servicing(m)) return;
+    if (!m || endpoint_servicing(m)) return;
     free(m->ram);
     memset(m,0,sizeof *m);
 }

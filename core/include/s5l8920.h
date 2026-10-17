@@ -736,9 +736,14 @@ bool s5l8920_aes_key_disable_configure(s5l8920_t *m, uint32_t initial);
  * and reattach explicitly. MMIO/service require configured raw gate25=F.
  * Closed gate pauses service. Unknown/intermediate gates or latched faults
  * refuse. A service call moves at most16 bytes without advancing CPU/time.
- * No component is attached by default; other channels/contexts stay unmapped. */
+ * No component is attached by default. Channels1/2 provide the AES path;
+ * channels5..8 provide explicitly backed NAND receive chains. Others stay
+ * unmapped. NAND DONE/event-enable drives VIC source2A+channel. Reset/free
+ * and nested service refuse during a transient endpoint callback. */
 bool s5l8920_cdma_attach(s5l8920_t *m,s5l8920_cdma_t *cdma);
 bool s5l8920_cdma_board_service(s5l8920_t *m);
+bool s5l8920_cdma_nand_board_service(s5l8920_t *m,unsigned channel,
+                                    s5l8920_cdma_receive_fn receive,void *owner);
 
 /* Optional cold, caller-owned polled NAND controller on81200000/81300000
  * and raw gate26/27. Bit31 asserts the functional controller reset. Gate0

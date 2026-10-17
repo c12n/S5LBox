@@ -1,4 +1,4 @@
-/* Partial S5L8920 CDMA memory-to-memory AES path.
+/* Partial S5L8920 CDMA AES and backed NAND receive paths.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_CDMA_H
 #define S5LBOX_S5L8920_CDMA_H
@@ -14,15 +14,43 @@ typedef struct {
     uint32_t control, remaining, descriptor, address, terminal;
     bool reset, size_programmed, descriptor_programmed, started;
 } s5l8920_cdma_channel_t;
+
+#define S5L8920_CDMA_NAND_FIRST 5u
+#define S5L8920_CDMA_NAND_COUNT 4u
+#define S5L8920_CDMA_NAND_IRQ_BASE 0x2au
+#define S5L8920_CDMA_MAX_SEGMENTS 31u
+typedef struct {
+    uint32_t descriptor,next,flags,address,length;
+} s5l8920_cdma_segment_t;
+typedef struct {
+    s5l8920_cdma_channel_t state;
+    uint32_t configuration,peripheral,offset;
+    unsigned count,index;
+    bool configuration_programmed,peripheral_programmed;
+    s5l8920_cdma_segment_t segments[S5L8920_CDMA_MAX_SEGMENTS];
+} s5l8920_cdma_nand_t;
+
+/* A transient peripheral supplies exactly the requested bytes on READY.
+ * WAIT preserves its FIFO and all DMA state; UNAVAILABLE refuses the service.
+ * WAIT/refusal output bytes are discarded. Neither callback nor RAM provider
+ * may mutate the controller/board or invalidate RAM views during the call. */
+typedef enum {
+    S5L8920_CDMA_UNAVAILABLE=0, S5L8920_CDMA_WAIT=1, S5L8920_CDMA_READY=2
+} s5l8920_cdma_input_t;
+typedef s5l8920_cdma_input_t (*s5l8920_cdma_receive_fn)(void *owner,uint32_t peripheral,
+                                                    uint8_t *bytes,unsigned count);
 typedef struct {
     s5l8920_cdma_channel_t channel[2]; /* Channels 1 (feed) and 2 (drain). */
     uint32_t setup;
     uint8_t key[32], iv[16], chain[16], key_programmed, iv_programmed;
     aes_ctx_t cipher;
-    bool initialized, setup_programmed;
+    bool initialized, setup_programmed, servicing;
+    s5l8920_cdma_nand_t nand[S5L8920_CDMA_NAND_COUNT];
 } s5l8920_cdma_t;
 
-/* No default key, IV, context or channel register values. Functional reset
+/* First use requires a zero-initialized object. No default key, IV, context
+ * or channel register values. Init refuses reentry during endpoint service.
+ * Functional reset
  * discards an in-flight operation and invalidates all programming. */
 void s5l8920_cdma_init(s5l8920_cdma_t *c);
 bool s5l8920_cdma_read(const s5l8920_cdma_t *c,bool aes,uint32_t offset,uint32_t *value);
@@ -34,8 +62,21 @@ bool s5l8920_cdma_write(s5l8920_cdma_t *c,bool aes,uint32_t offset,uint32_t valu
  * unavailable RAM refuses without consuming a block or declaring completion.
  * Only context1, custom-key CBC, channels1/2, one whole-block data descriptor
  * per channel followed by a terminal descriptor are supported. In-place is
- * allowed; partial overlap, hardware keys, peripherals, scatter/gather,
+ * allowed; this AES service refuses partial overlap, hardware keys, peripherals, scatter/gather,
  * live reprogramming, hold/abort, interrupt mode and other channel/context
  * modes refuse. This is the bootloader's polled memory transfer path only. */
 bool s5l8920_cdma_service(s5l8920_cdma_t *c,s5l8920_cdma_memory_fn memory,void *owner);
+/* NAND receive channels5/7 use FMI+14, configuration58;6/8 use FMI+18,
+ * configuration0. Explicit reset/programming and a validated RAM descriptor
+ * chain are required. Up to31 nonempty segments (flags3, final103) followed by
+ * a flags0 terminal are supported. Live descriptor edits and descriptor/output
+ * overlap refuse. GO1C0009 enables completion events; W1C acknowledges them.
+ * One call moves at most16 supplied bytes, never crosses a descriptor, and
+ * never advances CPU/time. No peripheral, FIFO data or readiness is implicit.
+ * Other modes, encryption, outbound DMA, hold/abort and error IRQs refuse.
+ * These entry points do not implement the FMI data producer. */
+bool s5l8920_cdma_nand_service(s5l8920_cdma_t *c,unsigned channel,
+                              s5l8920_cdma_memory_fn memory,void *memory_owner,
+                              s5l8920_cdma_receive_fn receive,void *receive_owner);
+bool s5l8920_cdma_nand_irq(const s5l8920_cdma_t *c,unsigned channel);
 #endif

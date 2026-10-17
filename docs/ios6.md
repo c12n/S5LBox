@@ -19,6 +19,8 @@ readback; audio output and the remaining audio registers are unavailable.
 The AES key-disable latch accepts explicit initial state and sticky disables.
 An optional CDMA component executes the bootloader's polled RAM-to-RAM
 AES-CBC path with a supplied software key; hardware keys remain unavailable.
+Its NAND receive channels also move explicitly supplied peripheral bytes through
+validated descriptor chains. The FMI sector-data producer is still missing.
 A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
@@ -121,7 +123,8 @@ The sampled-status flag does not block subsequent command delivery.
 Unit tests copy explicit backing into an endpoint cache in separate work steps,
 prove that readiness follows completion, and cover refused/missing callbacks,
 poll cancellation, reset, selection, counter limits and both board gates.
-Page DMA and transfer into guest buffers remain unavailable.
+The separate CDMA receiver can transfer supplied bytes into guest buffers;
+this controller does not yet produce the FMI sector data for it.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
@@ -207,11 +210,14 @@ status polling observes 205 busy samples and one ready sample, acknowledges
 FSTATUS bit 5, then sends `0x00` and acknowledges that command's completion.
 Those counts describe the explicit functional schedule, not physical timing.
 Execution reaches original DMA setup `0x4ff01344` through `0x4ff048cc`.
-The next refusal is at `0x4ff01522`, writing value 2 to `0x87006000` or
-`0x87008000` for spare-data channel 6 or 8. The board reports that address
-unmapped because no CDMA component is attached in this fixture. The existing
-optional RAM/AES component supports channels 1/2; it does not provide these
-NAND channels. Guest page/spare buffers remain unchanged.
+The earlier fixture stopped at `0x4ff01522`, writing value 2 to an unattached
+spare-data DMA channel. With CDMA attached and original `0x4ff01328` opening
+its configured clock gate, the firmware now builds and queues both chains.
+The fixture's CPU heap and DMA use the same board RAM, including original
+descriptor pools at `0x4ff32a00` and `0x4ff32e80`. The next refusal is at
+`0x4ff041c0`, writing `0x000aa083` to FMI CFG at `0x81200000` or `0x81300000`.
+Both DMA channels remain running with their full byte counts; guest buffers
+remain unchanged because no FMI data producer is supplied.
 The original chip selector checks the bus encoded in the global chip number
 before selecting its low-three-bit chip line. The fixture's backed rows are
 zero, `0xffff`, `0x10000` and `0xfffff`, within its diagnostic geometry;
@@ -220,8 +226,52 @@ address packing only and exceeded that fixture's capacity.
 
 The kernel's guarded `#ce` read remains the conditional frontier, and the
 genuine audio-control write remains unresolved. Page/OOB storage, ECC processing,
-DMA, NAND interrupts, FTL, alternate initialization modes, the connected
+end-to-end NAND DMA, NAND-controller interrupts, FTL, alternate initialization modes, the connected
 bootloader chain, SpringBoard and physical behavior are unverified.
+
+## NAND DMA receive chains
+
+The optional CDMA component accepts channels 5/6 for FMI0 and 7/8 for FMI1.
+Data channels use peripheral offset `0x14` and configuration `0x58`; spare
+channels use offset `0x18` and configuration zero. These are the values emitted
+by original `0x4ff01344`. Explicit reset, configuration, peripheral address,
+byte count and descriptor pointer precede GO. Original `0x4ff01588` builds
+32-byte descriptors with flags 3, flags `0x103` on the final data segment,
+and a following flags-zero terminal. The supported chain contains at most
+31 segments and must cover the complete programmed count. Missing RAM,
+malformed links/counts and destination overlap with descriptor backing refuse
+before the channel starts. Live descriptor edits remain unsupported.
+
+`s5l8920_cdma_nand_board_service` supplies a transient receive capability for
+one selected channel. READY supplies exactly the requested bytes, WAIT leaves
+the transfer pending, and UNAVAILABLE refuses without consuming data. Output
+from a waiting or refusing callback is discarded. Each call copies at most
+16 bytes and stops at a descriptor boundary. Counts, addresses and completion
+follow actual stores; MMIO reads and the existing AES service do no NAND work.
+Closing the DMA gate pauses service. A store invalidates the local exclusive
+monitor without advancing guest instructions or time.
+
+The firmware's `0x1c0009` GO selects completion events. DONE and its enable
+drive VIC source `0x2a + channel`; W1C acknowledgement removes the DMA source
+while preserving independently asserted external input. Original `0x4ff01344`
+registers `0x4ff018bd` on that line, and `0x4ff01868` polls the same completion
+before dispatching the handler. The matching platform's
+[DMA header](https://github.com/iDroid-Project/openiBoot/blob/866562fdb1cfd019bcd77885c80fbf0af65d5c15/plat-s5l8920/includes/hardware/dma.h)
+corroborates the interrupt base. Error interrupts, hold/abort, outbound DMA,
+other settings, partial-chain restarts and encrypted NAND transfers are refused.
+The owner must zero-initialize the component before first use; reset/init
+discard channel programming, and board reset detaches the borrowed component.
+Nested service and board reset/free are refused during a receive callback.
+
+Original raw-read vectors interleave the two controller lanes across the two
+caller buffers. Nine data vectors carry 4,096 bytes, with the final sector split
+294/218 across those allocations; seven spare vectors carry 218 bytes into the
+first allocation. The controller lane names do not imply a direct main/OOB
+buffer mapping. Tests use explicit byte streams to reconstruct both complete
+outputs and check waiting/refusal, canaries, descriptor limits and mutation,
+RAM aliases, clock/reset behavior, reentry and both banks' interrupt sources.
+This validates the DMA receiver. Original firmware currently queues it and
+stops before the FMI CFG/CTRL sector handshake; no full NAND read is claimed.
 
 ## Optional IOP shared RAM aperture
 

@@ -17,15 +17,22 @@ static void store_word(uint8_t *p,uint32_t value) {
 static bool busy(const s5l8920_cdma_t *c) {
     return ((c->channel[0].control|c->channel[1].control)&RUNNING)!=0u;
 }
+static bool nand_channel(unsigned channel) {
+    return channel>=S5L8920_CDMA_NAND_FIRST &&
+        channel-S5L8920_CDMA_NAND_FIRST<S5L8920_CDMA_NAND_COUNT;
+}
+static bool nand_write(s5l8920_cdma_nand_t *n,unsigned channel,uint32_t reg,uint32_t value,
+                       s5l8920_cdma_memory_fn memory,void *owner);
 void s5l8920_cdma_init(s5l8920_cdma_t *c) {
-    if(c) { memset(c,0,sizeof *c);c->initialized=true; }
+    if(c && !c->servicing) { memset(c,0,sizeof *c);c->initialized=true; }
 }
 bool s5l8920_cdma_read(const s5l8920_cdma_t *c,bool aes,uint32_t offset,uint32_t *value) {
     /* AES readback semantics have not been established for this target. */
-    if(!c || !c->initialized || !value || aes || (offset&3u))return false;
+    if(!c || !c->initialized || c->servicing || !value || aes || (offset&3u))return false;
     unsigned bank=offset/0x1000u;
-    if(bank<1u || bank>2u)return false;
-    const s5l8920_cdma_channel_t *ch=&c->channel[bank-1u];
+    if((bank<1u || bank>2u) && !nand_channel(bank))return false;
+    const s5l8920_cdma_channel_t *ch=nand_channel(bank)?
+        &c->nand[bank-S5L8920_CDMA_NAND_FIRST].state:&c->channel[bank-1u];
     if(!ch->reset)return false;
     switch(offset%0x1000u) {
     case 0: *value=ch->control;return true;
@@ -106,9 +113,17 @@ static bool channel_write(s5l8920_cdma_t *c,unsigned bank,uint32_t reg,uint32_t 
 }
 bool s5l8920_cdma_write(s5l8920_cdma_t *c,bool aes,uint32_t offset,uint32_t value,
                       s5l8920_cdma_memory_fn memory,void *owner) {
-    if(!c || !c->initialized || (offset&3u))return false;
+    if(!c || !c->initialized || c->servicing || (offset&3u))return false;
     if(aes)return aes_write(c,offset,value);
     unsigned channel=offset/0x1000u;
+    if(nand_channel(channel)) {
+        s5l8920_cdma_nand_t next=c->nand[channel-S5L8920_CDMA_NAND_FIRST];
+        c->servicing=true;
+        bool okay=nand_write(&next,channel,offset%0x1000u,value,memory,owner);
+        c->servicing=false;
+        if(okay)c->nand[channel-S5L8920_CDMA_NAND_FIRST]=next;
+        return okay;
+    }
     if(channel<1u || channel>2u)return false;
     /* A malformed GO must not publish a partial descriptor/context change. */
     s5l8920_cdma_t next=*c;
@@ -116,7 +131,7 @@ bool s5l8920_cdma_write(s5l8920_cdma_t *c,bool aes,uint32_t offset,uint32_t valu
     *c=next;return true;
 }
 bool s5l8920_cdma_service(s5l8920_cdma_t *c,s5l8920_cdma_memory_fn memory,void *owner) {
-    if(!c || !c->initialized || !memory)return false;
+    if(!c || !c->initialized || c->servicing || !memory)return false;
     s5l8920_cdma_channel_t *a=&c->channel[0],*b=&c->channel[1];
     if(!(a->control&RUNNING) || !(b->control&RUNNING))return true;
     if(!pair_valid(c,memory,owner) || a->remaining<16u || (a->remaining&15u))return false;
@@ -137,6 +152,101 @@ bool s5l8920_cdma_service(s5l8920_cdma_t *c,s5l8920_cdma_memory_fn memory,void *
         a->control=(a->control&~RUNNING)|DONE;b->control=(b->control&~RUNNING)|DONE;
         a->descriptor=a->terminal;b->descriptor=b->terminal;
         memset(&c->cipher,0,sizeof c->cipher);memset(c->chain,0,sizeof c->chain);
+    }
+    return true;
+}
+
+static bool overlap(const uint8_t *a,uint32_t an,const uint8_t *b,uint32_t bn) {
+    uintptr_t x=(uintptr_t)a,y=(uintptr_t)b;
+    return x<=y?y-x<an:x-y<bn;
+}
+static bool nand_chain(s5l8920_cdma_nand_t *n,s5l8920_cdma_memory_fn memory,void *owner) {
+    s5l8920_cdma_channel_t *ch=&n->state;
+    if(!memory || !ch->remaining || !ch->size_programmed || !ch->descriptor_programmed ||
+       !n->configuration_programmed || !n->peripheral_programmed)return false;
+    uint32_t remaining=ch->remaining,at=ch->descriptor;
+    const uint8_t *records[S5L8920_CDMA_MAX_SEGMENTS+1u],*outputs[S5L8920_CDMA_MAX_SEGMENTS];
+    n->count=0u;
+    while(n->count<S5L8920_CDMA_MAX_SEGMENTS) {
+        if(at&31u)return false;
+        const uint8_t *p=memory(owner,at,32u);if(!p)return false;
+        uint32_t flags=word(p+4u),address=word(p+8u),length=word(p+12u);
+        if((flags!=3u && flags!=0x103u) || !length || length>remaining ||
+           address>UINT32_MAX-length)return false;
+        const uint8_t *dest=memory(owner,address,length);if(!dest)return false;
+        unsigned i=n->count++;records[i]=p;outputs[i]=dest;
+        n->segments[i]=(s5l8920_cdma_segment_t){at,word(p),flags,address,length};
+        remaining-=length;at=word(p);
+        if(flags==0x103u) {
+            if(remaining || (at&31u))return false;
+            const uint8_t *end=memory(owner,at,32u);if(!end || word(end+4u))return false;
+            records[n->count]=end;ch->terminal=at;
+            for(unsigned a=0;a<n->count;a++)for(unsigned b=0;b<=n->count;b++)
+                if(overlap(outputs[a],n->segments[a].length,records[b],32u))return false;
+            n->index=0u;n->offset=0u;ch->address=n->segments[0].address;
+            return true;
+        }
+        if(!remaining)return false;
+    }
+    return false;
+}
+static bool nand_write(s5l8920_cdma_nand_t *n,unsigned channel,uint32_t reg,uint32_t value,
+                       s5l8920_cdma_memory_fn memory,void *owner) {
+    s5l8920_cdma_channel_t *ch=&n->state;
+    if(ch->control&RUNNING)return false;
+    if(!reg && value==2u) { memset(n,0,sizeof *n);n->state.reset=true;return true; }
+    if(!ch->reset)return false;
+    if(reg==4u) {
+        if(value!=((channel&1u)?0x58u:0u))return false;
+        n->configuration=value;n->configuration_programmed=true;return true;
+    }
+    if(reg==8u) {
+        uint32_t expected=UINT32_C(0x81200000)+((channel-5u)/2u)*0x100000u+
+            ((channel&1u)?0x14u:0x18u);
+        if(value!=expected)return false;
+        n->peripheral=value;n->peripheral_programmed=true;return true;
+    }
+    if(reg==0xcu) { ch->remaining=value;ch->size_programmed=true;return true; }
+    if(reg==0x14u) { ch->descriptor=value;ch->descriptor_programmed=true;return true; }
+    if(reg || (value&~(EVENTS|9u)))return false;
+    if(value&1u) {
+        if(!(value&8u) || (ch->control&EVENTS&~value) || !nand_chain(n,memory,owner))return false;
+        ch->control=RUNNING|8u;ch->started=true;
+    }else ch->control=(ch->control&EVENTS&~value)|(value&8u);
+    return true;
+}
+bool s5l8920_cdma_nand_irq(const s5l8920_cdma_t *c,unsigned channel) {
+    if(!c || !c->initialized || !nand_channel(channel))return false;
+    return (c->nand[channel-S5L8920_CDMA_NAND_FIRST].state.control&(DONE|8u))==(DONE|8u);
+}
+bool s5l8920_cdma_nand_service(s5l8920_cdma_t *c,unsigned channel,
+                              s5l8920_cdma_memory_fn memory,void *memory_owner,
+                              s5l8920_cdma_receive_fn receive,void *receive_owner) {
+    if(!c || !c->initialized || c->servicing || !nand_channel(channel))return false;
+    s5l8920_cdma_nand_t *n=&c->nand[channel-S5L8920_CDMA_NAND_FIRST];
+    s5l8920_cdma_channel_t *ch=&n->state;
+    if(!(ch->control&RUNNING))return true;
+    if(!memory || !receive || n->index>=n->count)return false;
+    const s5l8920_cdma_segment_t *s=&n->segments[n->index];
+    if(n->offset>=s->length || ch->remaining<s->length-n->offset)return false;
+    c->servicing=true;
+    const uint8_t *p=memory(memory_owner,s->descriptor,32u);
+    const uint8_t *end=memory(memory_owner,ch->terminal,32u);
+    unsigned count=s->length-n->offset;if(count>16u)count=16u;
+    uint8_t *dest=memory(memory_owner,s->address+n->offset,count);
+    bool valid=p && end && dest && word(p)==s->next && word(p+4u)==s->flags &&
+        word(p+8u)==s->address && word(p+12u)==s->length && !word(end+4u);
+    if(!valid) { c->servicing=false;return false; }
+    uint8_t bytes[16];
+    s5l8920_cdma_input_t result=receive(receive_owner,n->peripheral,bytes,count);
+    c->servicing=false;
+    if(result==S5L8920_CDMA_WAIT)return true;
+    if(result!=S5L8920_CDMA_READY)return false;
+    memcpy(dest,bytes,count);n->offset+=count;ch->remaining-=count;ch->address+=count;
+    if(n->offset==s->length) {
+        ch->descriptor=s->next;n->index++;n->offset=0u;
+        if(n->index==n->count)ch->control=(ch->control&~RUNNING)|DONE;
+        else ch->address=n->segments[n->index].address;
     }
     return true;
 }

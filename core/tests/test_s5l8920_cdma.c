@@ -234,9 +234,212 @@ static void lifetime_and_gates(void) {
         CHECK(!board.bus_failure.reason);
     }
 }
+static void nand_register_setup(void) {
+    init(15u);
+    for(unsigned channel=5;channel<=8;channel++) {
+        uint32_t reg=S5L8920_CDMA_BASE+channel*0x1000u;
+        wr(reg,2u);CHECK(!board.bus_failure.reason);
+        s5l8920_clear_bus_failure(&board);
+        wr(reg+4u,(channel&1u)?0x58u:0u);CHECK(!board.bus_failure.reason);
+        s5l8920_clear_bus_failure(&board);
+    }
+}
+#define NAND_OUT0 0x41010000u
+#define NAND_OUT1 0x41012000u
+static struct {
+    uint8_t raw[4314],lane[2][4096];
+    unsigned cursor[2],available[2],length[2],calls,bank;
+    bool refuse,reenter,invalid;
+} nand_input;
+static s5l8920_cdma_input_t nand_receive(void *owner,uint32_t peripheral,uint8_t *bytes,unsigned count) {
+    CHECK(owner==&nand_input && count && count<=16);
+    unsigned lane=peripheral&4u?0u:1u;
+    CHECK(peripheral==0x81200000u+nand_input.bank*0x100000u+(lane?0x18u:0x14u));
+    nand_input.calls++;
+    if(nand_input.reenter) {
+        s5l8920_cdma_t before=cdma;uint32_t value=0x12345678u;uint8_t *ram=board.ram;
+        s5l8920_cdma_init(&cdma);CHECK(!memcmp(&before,&cdma,sizeof cdma));
+        CHECK(!s5l8920_cdma_write(&cdma,false,0x5000,2,NULL,NULL));
+        CHECK(!s5l8920_cdma_read(&cdma,false,0x5000,&value) && value==0x12345678u);
+        CHECK(!s5l8920_reset(&board));s5l8920_free(&board);CHECK(board.ram==ram);
+        CHECK(!s5l8920_cdma_attach(&board,&cdma));CHECK(!s5l8920_cdma_board_service(&board));
+        CHECK(!s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma));
+    }
+    memset(bytes,0xff,count); /* WAIT/refusal must discard even plausible bytes. */
+    if(nand_input.invalid)return (s5l8920_cdma_input_t)99;
+    if(nand_input.refuse)return S5L8920_CDMA_UNAVAILABLE;
+    if(count>nand_input.available[lane]-nand_input.cursor[lane])return S5L8920_CDMA_WAIT;
+    memcpy(bytes,nand_input.lane[lane]+nand_input.cursor[lane],count);
+    nand_input.cursor[lane]+=count;return S5L8920_CDMA_READY;
+}
+static void nand_segment(unsigned lane,unsigned index,uint32_t destination,unsigned length) {
+    uint32_t d=DESC+lane*0x400u+index*32u;
+    wr(d,d+32u);wr(d+4u,3u);wr(d+8u,destination);wr(d+12u,length);
+}
+static void nand_program(unsigned channel,unsigned length,uint32_t descriptor) {
+    uint32_t reg=S5L8920_CDMA_BASE+channel*0x1000u;
+    wr(reg,2u);wr(reg+4u,(channel&1u)?0x58u:0u);
+    wr(reg+8u,0x81200000u+((channel-5u)/2u)*0x100000u+((channel&1u)?0x14u:0x18u));
+    wr(reg+12u,length);wr(reg+20u,descriptor);
+}
+static void nand_prepare(unsigned bank) {
+    init(15u);memset(&nand_input,0,sizeof nand_input);nand_input.bank=bank;
+    nand_input.reenter=true;
+    memset(at(NAND_OUT0),0xa5,4096+16);memset(at(NAND_OUT1),0x5a,218+16);
+    memset(at(DESC),0,0x800);
+    for(unsigned n=0;n<sizeof nand_input.raw;n++)nand_input.raw[n]=(uint8_t)(bank*19+n*37+(n>>8));
+    unsigned offset=0,spare=218,segments[2]={0,0};
+    for(unsigned sector=0;sector<8;sector++)for(unsigned lane=0;lane<2;lane++) {
+        unsigned length=lane?(spare<32?spare:32):512;
+        if(lane)spare-=length;
+        memcpy(nand_input.lane[lane]+nand_input.length[lane],nand_input.raw+offset,length);
+        nand_input.length[lane]+=length;
+        while(length) {
+            unsigned chunk=length;
+            if(offset<4096 && chunk>4096-offset)chunk=4096-offset;
+            uint32_t destination=offset<4096?NAND_OUT0+offset:NAND_OUT1+offset-4096;
+            nand_segment(lane,segments[lane]++,destination,chunk);length-=chunk;offset+=chunk;
+        }
+    }
+    CHECK(offset==4314 && segments[0]==9 && segments[1]==7);
+    for(unsigned lane=0;lane<2;lane++) {
+        wr(DESC+lane*0x400+(segments[lane]-1)*32+4,0x103);
+        nand_program(5+bank*2+lane,nand_input.length[lane],DESC+lane*0x400);
+    }
+    CHECK(!board.bus_failure.reason);
+}
+static void nand_transfers(void) {
+    for(unsigned bank=0;bank<2;bank++) {
+        nand_prepare(bank);unsigned first=5+bank*2;
+        uint32_t reg=S5L8920_CDMA_BASE+first*0x1000;
+        for(unsigned lane=0;lane<2;lane++)wr(reg+lane*0x1000,0x1c0009);
+        CHECK(!board.bus_failure.reason);
+        s5l8920_cdma_t before=cdma;
+        CHECK(s5l8920_cdma_board_service(&board) && !memcmp(&before,&cdma,sizeof cdma));
+        CHECK(!s5l8920_cdma_nand_board_service(&board,first,NULL,NULL));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma));
+        for(unsigned n=0;n<3;n++) {
+            CHECK(s5l8920_cdma_nand_board_service(&board,first,nand_receive,&nand_input));
+            CHECK(!memcmp(&before,&cdma,sizeof cdma));
+        }
+        unsigned calls=nand_input.calls;
+        for(unsigned n=0;n<10;n++)CHECK(rd(reg)==0x10008 && rd(reg+12)==4096);
+        CHECK(nand_input.calls==calls && !memcmp(&before,&cdma,sizeof cdma));
+        nand_input.refuse=true;
+        CHECK(!s5l8920_cdma_nand_board_service(&board,first,nand_receive,&nand_input));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma));nand_input.refuse=false;nand_input.invalid=true;
+        CHECK(!s5l8920_cdma_nand_board_service(&board,first,nand_receive,&nand_input));
+        CHECK(!memcmp(&before,&cdma,sizeof cdma));nand_input.invalid=false;
+        for(unsigned n=0;n<32;n++)CHECK(at(NAND_OUT0)[n]==0xa5 && at(NAND_OUT1)[n]==0x5a);
+        nand_input.available[0]=4096;nand_input.available[1]=218;
+        wr(GATE,0);calls=nand_input.calls;
+        CHECK(s5l8920_cdma_nand_board_service(&board,first,nand_receive,&nand_input));
+        CHECK(nand_input.calls==calls && !memcmp(&before,&cdma,sizeof cdma));wr(GATE,15);
+        for(unsigned quantum=0;quantum<300;quantum++)for(unsigned lane=0;lane<2;lane++) {
+            s5l8920_cdma_nand_t *n=&cdma.nand[first-5+lane];
+            uint32_t remaining=n->state.remaining;
+            board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;arm_cpu_t cpu=board.cpu;
+            uint64_t ticks=board.timebase_ticks;
+            CHECK(s5l8920_cdma_nand_board_service(&board,first+lane,nand_receive,&nand_input));
+            if(n->state.remaining!=remaining) { cpu.excl_valid=false;cpu.a8_excl_size=0; }
+            CHECK(!memcmp(&cpu,&board.cpu,sizeof cpu) && ticks==board.timebase_ticks);
+            CHECK(remaining-n->state.remaining<=16);
+            CHECK(s5l8920_cdma_nand_irq(&cdma,first+lane)==(n->state.remaining==0));
+        }
+        CHECK(nand_input.cursor[0]==4096 && nand_input.cursor[1]==218);
+        CHECK(!memcmp(at(NAND_OUT0),nand_input.raw,4096));
+        CHECK(!memcmp(at(NAND_OUT1),nand_input.raw+4096,218));
+        for(unsigned n=0;n<16;n++)CHECK(at(NAND_OUT0)[4096+n]==0xa5 && at(NAND_OUT1)[218+n]==0x5a);
+        for(unsigned lane=0;lane<2;lane++) {
+            unsigned channel=first+lane,source=0x2a+channel;uint32_t control=reg+lane*0x1000;
+            uint32_t vic=S5L8920_VIC_BASE+S5L8920_VIC_STRIDE,bit=1u<<(source%32);
+            CHECK(rd(control)==0x80008 && rd(control+12)==0);
+            CHECK(rd(control+20)==DESC+lane*0x400+(lane?7:9)*32);
+            wr(vic+0x10,bit);CHECK(board.cpu.irq_line && (rd(vic+8)&bit));
+            CHECK(s5l8920_set_irq(&board,source,true));wr(control,0x80000);
+            CHECK(!s5l8920_cdma_nand_irq(&cdma,channel) && board.cpu.irq_line);
+            CHECK(s5l8920_set_irq(&board,source,false));CHECK(!board.cpu.irq_line && rd(control)==0);
+            wr(vic+0x14,bit);
+        }
+        CHECK(!board.bus_failure.reason);
+    }
+}
+static void nand_guards(void) {
+    nand_prepare(0);uint32_t reg=S5L8920_CDMA_BASE+0x5000;
+    const uint32_t offsets[]={0,4,8,12,20};
+    const uint32_t values[]={0x1c0001,0,0x81200018,0,0xffffffe0};
+    for(unsigned i=0;i<5;i++) {
+        nand_program(5,4096,DESC);
+        if(i<3)refuse(reg+offsets[i],4,values[i],S5L8920_BUS_REGISTER_REFUSED);
+        else { wr(reg+offsets[i],values[i]);refuse(reg,4,0x1c0009,S5L8920_BUS_REGISTER_REFUSED); }
+    }
+    for(unsigned omit=0;omit<4;omit++) {
+        nand_program(5,4096,DESC);s5l8920_cdma_nand_t *n=&cdma.nand[0];
+        if(omit==0)n->configuration_programmed=false;
+        if(omit==1)n->peripheral_programmed=false;
+        if(omit==2)n->state.size_programmed=false;
+        if(omit==3)n->state.descriptor_programmed=false;
+        refuse(reg,4,0x1c0009,S5L8920_BUS_REGISTER_REFUSED);
+    }
+    nand_program(5,4096,DESC);
+    const unsigned off[]={0,4,8,12,9*32+4};
+    const uint32_t bad[]={DESC,0x30103,0x87000000,0,3};
+    for(unsigned i=0;i<5;i++) {
+        uint32_t old=word(at(DESC+off[i]));wr(DESC+off[i],bad[i]);
+        refuse(reg,4,0x1c0009,S5L8920_BUS_REGISTER_REFUSED);wr(DESC+off[i],old);
+    }
+    CHECK(s5l8920_set_ram_boot_window(&board,true));
+    wr(DESC+8,DESC-S5L8920_RAM_BASE);refuse(reg,4,0x1c0009,S5L8920_BUS_REGISTER_REFUSED);
+    wr(DESC+8,NAND_OUT0);CHECK(s5l8920_set_ram_boot_window(&board,false));
+    wr(reg,0x1c0009);CHECK(!board.bus_failure.reason);
+    refuse(reg,4,2,S5L8920_BUS_REGISTER_REFUSED);refuse(reg,4,4,S5L8920_BUS_REGISTER_REFUSED);
+    refuse(reg+4,4,0x58,S5L8920_BUS_REGISTER_REFUSED);
+    nand_input.available[0]=4096;s5l8920_cdma_t before=cdma;unsigned calls=nand_input.calls;
+    wr(DESC+12,511);CHECK(!s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+    CHECK(!memcmp(&before,&cdma,sizeof cdma) && nand_input.calls==calls);wr(DESC+12,512);
+    CHECK(s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+    CHECK(cdma.nand[0].state.remaining==4080);
+    CHECK(s5l8920_reset(&board) && !board.cdma && cdma.nand[0].state.remaining==4080);
+    CHECK(!s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+    s5l8920_cdma_init(&cdma);CHECK(!cdma.nand[0].state.reset && !cdma.nand[0].state.remaining);
+    CHECK(s5l8920_cdma_attach(&board,&cdma));
+    uint32_t value=0x12345678;CHECK(!s5l8920_cdma_read(&cdma,false,0x5000,&value) && value==0x12345678);
+    CHECK(!s5l8920_cdma_nand_board_service(&board,4,nand_receive,&nand_input));
+    CHECK(!s5l8920_cdma_nand_board_service(&board,9,nand_receive,&nand_input));
+    CHECK(!s5l8920_cdma_nand_irq(NULL,5));CHECK(!s5l8920_cdma_nand_irq(&cdma,4));
+}
+static void nand_chain_limits(void) {
+    nand_prepare(0);uint32_t reg=S5L8920_CDMA_BASE+0x5000;
+    memset(at(DESC),0,0x800);
+    for(unsigned n=0;n<31;n++)nand_segment(0,n,NAND_OUT0+n,1);
+    wr(DESC+30*32+4,0x103);nand_program(5,31,DESC);
+    uint32_t value=0x12345678;
+    CHECK(!s5l8920_cdma_read(&cdma,false,0x5004,&value) && value==0x12345678);
+    CHECK(!s5l8920_cdma_read(&cdma,false,0x5008,&value) && value==0x12345678);
+    CHECK(s5l8920_set_ram_boot_window(&board,true));wr(reg+20,DESC-S5L8920_RAM_BASE);
+    wr(reg,0x1c0009);CHECK(!board.bus_failure.reason && cdma.nand[0].count==31);
+    nand_input.available[0]=31;unsigned calls=nand_input.calls;s5l8920_cdma_t before=cdma;
+    CHECK(s5l8920_set_ram_boot_window(&board,false));
+    CHECK(!s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+    CHECK(!memcmp(&before,&cdma,sizeof cdma) && nand_input.calls==calls);
+    CHECK(s5l8920_set_ram_boot_window(&board,true));wr(DESC+31*32+4,3);
+    CHECK(!s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+    CHECK(!memcmp(&before,&cdma,sizeof cdma) && nand_input.calls==calls);wr(DESC+31*32+4,0);
+    for(unsigned n=0;n<31;n++) {
+        CHECK(s5l8920_cdma_nand_board_service(&board,5,nand_receive,&nand_input));
+        CHECK(cdma.nand[0].state.remaining==30-n && cdma.nand[0].index==n+1);
+    }
+    CHECK(!memcmp(at(NAND_OUT0),nand_input.lane[0],31) && at(NAND_OUT0)[31]==0xa5);
+    wr(reg,2);CHECK(!s5l8920_cdma_nand_irq(&cdma,5));
+    wr(DESC+30*32+4,3);nand_segment(0,31,NAND_OUT0+31,1);wr(DESC+31*32+4,0x103);
+    nand_program(5,32,DESC);refuse(reg,4,0x1c0009,S5L8920_BUS_REGISTER_REFUSED);
+    CHECK(!s5l8920_cdma_nand_service(NULL,5,NULL,NULL,NULL,NULL));
+}
 int main(void) {
     vectors();guards();aliases_and_irqs();lifetime_and_gates();s5l8920_free(&board);
     CHECK(!s5l8920_cdma_board_service(&board));
     CHECK(!s5l8920_cdma_attach(&board,&cdma));
+    nand_register_setup();nand_transfers();nand_guards();nand_chain_limits();s5l8920_free(&board);
     printf("CDMA AES: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }
