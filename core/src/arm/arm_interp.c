@@ -2692,6 +2692,10 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
     if (writeback && (rn == 15u || rn == rd)) return ARM_UNDEFINED;
     if (!I && ((((insn >> 8) & 0xfu) != 0u) || (insn & 0xfu) == 15u))
         return ARM_UNDEFINED;
+    /* Mode 3 permits this overlap only from ARMv6 onward (DDI0100I A5.3.5/7).
+     * The partial ARMv4T profile must not inherit the later writeback rule. */
+    if (c->arch == ARM_ARCH_V4T && !I && writeback && rn == (insn & 0xfu))
+        return ARM_UNDEFINED;
 
     /* LDRD/STRD name a register PAIR, Rd and Rd+1, so Rd must be even — an odd
      * Rd has no defined pairing — and cannot be R14, which would make R15 the
@@ -4747,7 +4751,12 @@ static bool v4t_a32_supported(const arm_cpu_t *c, uint32_t insn) {
         return d!=15u && s!=15u && m!=15u && d!=m &&
             ((insn&0x00200000u) ? a!=15u : a==0u);
     }
-    if (group == 0u && (insn & 0x90u) == 0x90u) return false;
+    if (group == 0u && (insn & 0x90u) == 0x90u) {
+        unsigned sh=(insn>>5)&3u;
+        /* ARMv4 halfword stores and unsigned/signed loads only. L=0,S=1
+         * encodings became doubleword transfers in v5TE and remain refused. */
+        return sh==1u || (sh!=0u && (insn&0x00100000u));
+    }
     unsigned opcode = (insn >> 21) & 15u, rd = (insn >> 12) & 15u;
     if (opcode >= 8u && opcode <= 11u)                  /* TST..CMN */
         return (insn & 0x00100000u) != 0u && rd == 0u;

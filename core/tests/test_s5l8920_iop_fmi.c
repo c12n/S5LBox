@@ -29,6 +29,7 @@ static void init(void) {
     wr(S5L8920_IOP_BASE+0x100,1);
     wr(BASE+4,0xe5801000u);wr(BASE+8,0xe5901000u); /* STR/LDR r1,[r0]. */
     wr(BASE+12,0xe5c01000u);wr(BASE+16,0xe5d01000u); /* STRB/LDRB. */
+    wr(BASE+20,0xe1c010b0u);wr(BASE+24,0xe1d010b0u); /* STRH/LDRH. */
     CHECK(!board.bus_failure.reason && iop.running);
 }
 static void bindings_cleared(void) {
@@ -76,8 +77,8 @@ static void check_refusal(s5l8920_iop_failure_reason_t reason) {
     s5l8920_bus_failure_t ap_failure=board.bus_failure;
     CHECK(s5l8920_iop_board_service(&board)==ARM_HALT);
     CHECK(iop.failure.reason==reason && iop.failure.pc==cpu.r[15] &&
-          iop.failure.address==cpu.r[0] && iop.failure.write==(cpu.r[15]==4 || cpu.r[15]==12));
-    CHECK(iop.failure.size==(cpu.r[15]>=12?1u:4u));
+          iop.failure.address==cpu.r[0] && iop.failure.write==(cpu.r[15]==4 || cpu.r[15]==12 || cpu.r[15]==20));
+    CHECK(iop.failure.size==(cpu.r[15]>=20?2u:cpu.r[15]>=12?1u:4u));
     CHECK(iop.failure.value==(iop.failure.write?cpu.r[1]:0));
     arm_cpu_t after=iop.cpu;
     CHECK(!after.abort_pending && after.abort_fsr==ARM_MMU_BUS_FAILURE && after.abort_far==cpu.r[0]);
@@ -99,7 +100,7 @@ static void test_refusals(void) {
         {8,0x400,0},{8,0x408,0},{8,0x448,0}, /* No fabricated readbacks. */
         {4,0x40c,3},{4,0x440,1},{4,0x814,1},{4,0x404,0},{8,0x404,0},
         {4,0x14,0},{8,0x18,0},{4,0x818,0},{8,0xffc,0},
-        {12,0x400,1},{16,0x444,0},{12,0x401,1}
+        {12,0x400,1},{16,0x444,0},{12,0x401,1},{20,0x400,1},{24,0x444,0}
     };
     for(unsigned bank=0;bank<S5L8920_FMI_COUNT;++bank) {
         uint32_t a=S5L8920_FMI_BASE+bank*S5L8920_FMI_STRIDE;

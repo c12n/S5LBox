@@ -28,6 +28,9 @@ static void init(bool mapped,unsigned capacity){
     wr(FW,0xe5801000u);wr(FW+4,0xe5901000u); /* STR/LDR r1,[r0]. */
     wr(FW+8,0xe5c01000u);wr(FW+12,0xe5d01000u); /* STRB/LDRB. */
     wr(FW+16,0xe8a00006u); /* STMIA r0!,{r1,r2}. */
+    wr(FW+20,0xe1c010b0u);wr(FW+24,0xe1d010b0u); /* STRH/LDRH r1,[r0]. */
+    wr(FW+28,0xe1d010d0u);wr(FW+32,0xe1d010f0u); /* LDRSB/LDRSH r1,[r0]. */
+    wr(FW+36,0xe18520b0u); /* Original IOP STRH r2,[r5,r0]. */
     wr(S5L8920_IOP_BASE+0x118,S5L8920_IOP_BASE);wr(S5L8920_IOP_BASE+0x110,FW);
     wr(S5L8920_IOP_BASE+0x114,0x3ffff000u);wr(CTRL,1);
     CHECK(!board.bus_failure.reason && iop.running);
@@ -136,7 +139,40 @@ static void test_cache_and_aliases(void){
     CHECK(execute(0,HEAP+16,0x66)==ARM_HALT && iop.failure.reason==S5L8920_IOP_CACHE_LIMIT);
     CHECK(!iop.bytes_written && rd(PHYS(HEAP))==0);
 }
+static void test_halfword_backing(void){
+    for(unsigned cached=0;cached<2;++cached){
+        init(true,cached?16:0);uint32_t a=HEAP+0x1b8;
+        wr(PHYS(a),0xa5a5a5a5u);if(cached)enable();
+        board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;
+        iop.cpu.r[15]=36;iop.cpu.r[5]=HEAP;iop.cpu.r[0]=0x1b8;iop.cpu.r[2]=0xabcdffffu;
+        CHECK(s5l8920_iop_board_service(&board)==ARM_OK && iop.cpu.r[15]==40);
+        CHECK(iop.cpu.r[5]==HEAP && iop.cpu.r[0]==0x1b8 && iop.cpu.r[2]==0xabcdffffu);
+        CHECK(rd(PHYS(a))==(cached?0xa5a5a5a5u:0xa5a5ffffu));
+        CHECK(iop.bytes_written==(cached?0u:2u) && board.cpu.excl_valid==(cached!=0));
+        CHECK(execute(24,a,0)==ARM_OK && iop.cpu.r[1]==0xffff);
+        CHECK(execute(32,a,0)==ARM_OK && iop.cpu.r[1]==0xffffffffu);
+        CHECK(execute(28,a+1,0)==ARM_OK && iop.cpu.r[1]==0xffffffffu);
+        CHECK(execute(20,a,0x12348080u)==ARM_OK);
+        CHECK(execute(24,a,0)==ARM_OK && iop.cpu.r[1]==0x8080);
+        CHECK(execute(32,a,0)==ARM_OK && iop.cpu.r[1]==0xffff8080u);
+        CHECK(execute(28,a+1,0)==ARM_OK && iop.cpu.r[1]==0xffffff80u);
+        if(cached){
+            CHECK(rd(PHYS(a))==0xa5a5a5a5u && !iop.bytes_written && board.cpu.excl_valid);
+            command(0x18,a&~15u);command(0x1c,0);
+        }
+        CHECK(rd(PHYS(a))==0xa5a58080u && iop.bytes_written==(cached?16u:4u));
+        CHECK(!board.cpu.excl_valid && !board.cpu.a8_excl_size && !board.bus_failure.reason);
+        CHECK(!iop.failure.reason && !iop.servicing && !iop.memory && !iop.memory_owner);
+        /* An odd halfword access is refused by the CPU before any RAM/cache
+         * operation. It must not turn into an aligned store or a device fault. */
+        uint64_t retired=iop.cpu.cycles,written=iop.bytes_written;
+        CHECK(execute(20,a+1,0x1234)==ARM_UNDEFINED && iop.cpu.r[15]==20);
+        CHECK(!iop.failure.reason && !board.bus_failure.reason && iop.cpu.cycles==retired && iop.bytes_written==written);
+        CHECK(rd(PHYS(a))==0xa5a58080u);
+    }
+}
 int main(void){
     test_selection();test_shared_mapping();test_failures();test_cache_and_aliases();
+    test_halfword_backing();
     s5l8920_free(&board);printf("s5l8920_iop_ram: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

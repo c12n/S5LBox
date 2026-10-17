@@ -50,16 +50,26 @@ once, preserving the AP CPU. Tests also cover both banks, shared readback,
 pending commands without endpoints, reset/gating, absent capabilities,
 unsupported accesses, first-fault retention and reentry.
 
-A conditional whole-kernel run with explicit cold FMI attachments now retires
-that original store and reaches IOP `0x28b4`, an unsupported ARMv4T `STRH`.
-The IOP retires 202,958 instructions, 268 beyond the previous stop; the AP
-reaches 324,677,925, an additional 6,700. FMI0 is enabled with the original
+A conditional whole-kernel run with explicit cold FMI attachments retired
+that original store and reached IOP `0x28b4`, then an unsupported ARMv4T `STRH`.
+The IOP retired 202,958 instructions, 268 beyond the previous stop; the AP
+reached 324,677,925, an additional 6,700. FMI0 was enabled with the original
 zero-mask programming, no pending command, and no supplied NAND bytes. The
 first 514 preceding trace lines match the previous run. The experiment keeps
 the earlier audio exception and CPU/cache/clock/device hypotheses, and treats
 the complete captured NAND device-tree node as final handoff data. These
 inputs and cold controllers do not establish a continuous firmware handoff.
 Complete iOS 6 boot and usable storage remain unproven.
+
+With ARMv4T halfword transfers implemented, the same inputs execute the
+original `STRH` at `0x28b4`, storing `0xffff` at IOP address `0x0171afc8`.
+All 518 preceding trace lines match. The IOP reaches 268,669 retired
+instructions without a fault, and the AP reaches 326,320,693 before its
+word write `0xbf100078=0x500f` is refused at `PC=0x8078a094`. This is clock
+gate zero: the original caller clears bit 4, which the current model does
+not permit changing. The new boundary is an AP register refusal; the IOP
+remains running at `0x80b0`. FMI0 has no pending commands or supplied bytes.
+The same diagnostic hypotheses remain in effect.
 
 ## Optional polled NAND commands
 
@@ -607,7 +617,27 @@ product plus the optional addend. The S forms update N/Z and preserve V;
 this functional model retains C for ARMv4's architecturally unknown carry
 result. Instruction retirement counts do not model multiplier cycle timing.
 
-Thumb execution, long multiply, swap, halfword/signed transfers, SWI and
+The profile implements A32 `STRH`, `LDRH`, `LDRSB` and `LDRSH` using the
+existing memory-transfer paths, following
+[ARM DDI0100I, A4.1.28-30, A4.1.104 and A5.3](https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a).
+The six immediate/register offset, pre-indexed and post-indexed forms retain
+ARMv4's operand restrictions. In particular, register-offset writeback with
+the same base and offset register is refused on ARMv4T, while the existing
+ARMv6 and later behavior is preserved. Odd halfword addresses, PC data or
+offset operands, PC writeback, base/data writeback overlap and reserved
+encodings are refused before data access. A PC base without writeback uses
+the original instruction address plus eight. Loads zero- or sign-extend the
+actual bytes, stores write only the low halfword, and failed host accesses
+preserve registers and retirement. This does not introduce a physical abort
+or timing model. Doubleword transfers remain unavailable on ARMv4T.
+
+The original IOP `STRH r2,[r5,r0]` regression failed before this change and
+now performs a two-byte store. Architectural cases cover all six addressing
+forms, sign boundaries, aliases, failed conditions and bus refusals. IOP
+regressions exercise shared RAM, private cache stores and real clean writeback;
+timer and FMI halfword accesses still fail at their word-only device boundary.
+
+Thumb execution, long multiply, swap, doubleword transfers, SWI and
 coprocessors remain unavailable in this profile. Later ARM extensions stop
 before side effects; failed conditions still skip instructions. Unsupported
 instructions return `ARM_UNDEFINED` to the host without retirement. No CPU

@@ -121,11 +121,9 @@ static void test_refusals(void){
     for(unsigned n=0;n<sizeof bad/sizeof bad[0];n++){
         init(true);s5l8920_iop_timer_t before=iop.timer;
         arm_status_t result=execute(bad[n].pc,bad[n].address,bad[n].value);
-        /* The partial ARMv4T decoder stops these halfword instructions before
-         * any device access. Keep that CPU limit separate from MMIO refusal. */
-        bool halfword=bad[n].pc==16 || bad[n].pc==20;
-        arm_status_t expected=halfword?ARM_UNDEFINED:ARM_HALT;
-        s5l8920_iop_failure_reason_t reason=halfword?S5L8920_IOP_NO_FAILURE:S5L8920_IOP_REGISTER_REFUSED;
+        /* ARMv4T executes halfword transfers; this timer still requires words. */
+        arm_status_t expected=ARM_HALT;
+        s5l8920_iop_failure_reason_t reason=S5L8920_IOP_REGISTER_REFUSED;
         if(result!=expected || iop.failure.reason!=reason)
             printf("REFUSAL case=%u instruction=%08x address=%08x status=%u reason=%u\n",n,bad[n].pc,bad[n].address,result,iop.failure.reason);
         CHECK(result==expected);

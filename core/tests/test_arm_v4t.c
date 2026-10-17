@@ -8,13 +8,14 @@
 #define PROFILE ARM_ARCH_V4T
 static arm_cpu_t c;
 static uint8_t ram[4096];
-static unsigned passed, failed, reads, writes;
+static unsigned passed, failed, reads, writes, read_size, write_size;
+static uint32_t last_read,last_write;
 static bool fault;
 #define CHECK(x) do { if (x) passed++; else { failed++; \
     printf("FAIL %s:%d: %s\n", __func__, __LINE__, #x); } } while (0)
 static bool access_failed(void *ctx) { (void)ctx; return fault; }
 static uint32_t read_width(uint32_t a, unsigned width) {
-    reads++;
+    reads++;read_size=width;last_read=a;
     if (a > sizeof ram - width) { fault = true; return 0; }
     uint32_t v = 0;
     for (unsigned i = 0; i < width; ++i) v |= (uint32_t)ram[a+i] << (8u*i);
@@ -27,13 +28,14 @@ static void put(uint32_t a, uint32_t v, unsigned width) {
 static uint32_t r32(void *ctx, uint32_t a) { (void)ctx; return read_width(a, 4); }
 static uint16_t r16(void *ctx, uint32_t a) { (void)ctx; return (uint16_t)read_width(a, 2); }
 static uint8_t r8(void *ctx, uint32_t a) { (void)ctx; return (uint8_t)read_width(a, 1); }
-static void w32(void *ctx, uint32_t a, uint32_t v) { (void)ctx; writes++; put(a, v, 4); }
-static void w16(void *ctx, uint32_t a, uint16_t v) { (void)ctx; writes++; put(a, v, 2); }
-static void w8(void *ctx, uint32_t a, uint8_t v) { (void)ctx; writes++; put(a, v, 1); }
+static void w32(void *ctx, uint32_t a, uint32_t v) { (void)ctx; writes++;write_size=4;last_write=a;put(a,v,4); }
+static void w16(void *ctx, uint32_t a, uint16_t v) { (void)ctx; writes++;write_size=2;last_write=a;put(a,v,2); }
+static void w8(void *ctx, uint32_t a, uint8_t v) { (void)ctx; writes++;write_size=1;last_write=a;put(a,v,1); }
 static arm_bus_t bus = { .read32=r32, .read16=r16, .read8=r8,
     .write32=w32, .write16=w16, .write8=w8, .access_failed=access_failed };
 static void init(uint32_t insn) {
     memset(ram, 0, sizeof ram); fault=false; reads=writes=0;
+    read_size=write_size=0;last_read=last_write=0;
     CHECK(arm_reset_profile(&c, &bus, PROFILE)); put(0, insn, 4);
 }
 static void test_reset(void) {
@@ -111,7 +113,7 @@ static void test_boundaries(void) {
         0xee100f10u, /* MRC CP15 */ 0xee010f10u, /* MCR CP15 */
         0xeeb00a40u, /* VFP */ 0xf2000840u, /* NEON */
         0xe0810392u, /* UMULL */ 0xe1012090u, /* SWP */
-        0xe1d010b0u, /* LDRH */ 0xef000000u, /* SWI */
+        0xe1c120f0u, /* STRD */ 0xef000000u, /* SWI */
         0xe10ff000u, /* MRS pc */ 0xe128f00fu /* MSR flags,pc */
     };
     for (unsigned i=0; i<sizeof refused/sizeof refused[0]; ++i) {
@@ -217,12 +219,128 @@ static void test_bus_failure(void) {
         CHECK(arm_step(&c)==ARM_HALT && reads==before && c.cycles==0);
     }
 }
+static void test_original_halfword_store(void) {
+    init(0xe18520b0u); /* Original IOP 0x28b4: STRH r2,[r5,r0]. */
+    c.r[5]=128;c.r[0]=0x1b8;c.r[2]=0xabcdffffu;c.cpsr|=0xf0000000u;
+    memset(ram+0x237,0xa5,4);uint32_t psr=c.cpsr;
+    CHECK(arm_step(&c)==ARM_OK);
+    CHECK(c.r[15]==4 && c.cycles==1 && writes==1 && reads==1);
+    CHECK(ram[0x237]==0xa5 && ram[0x238]==0xff && ram[0x239]==0xff && ram[0x23a]==0xa5);
+    CHECK(c.r[5]==128 && c.r[0]==0x1b8 && c.r[2]==0xabcdffffu && c.cpsr==psr);
+}
+/* DDI0100I A4.1.28-30/104, A5.3: STRH, LDRH, LDRSB, LDRSH; the six
+ * forms are immediate/register offset, pre-indexed, and post-indexed. */
+static uint32_t extra(unsigned op,unsigned form,bool up,unsigned rn,unsigned rd,unsigned offset) {
+    const uint32_t operations[]={0xb0u,0x1000b0u,0x1000d0u,0x1000f0u};
+    bool immediate=!(form&1u);
+    return 0xe0000000u|operations[op]|(form<4?1u<<24:0)|(up?1u<<23:0)|
+        (immediate?1u<<22:0)|((form==2 || form==3)?1u<<21:0)|(rn<<16)|(rd<<12)|
+        (immediate?((offset&0xf0u)<<4)|(offset&15u):offset);
+}
+static uint32_t loaded(unsigned op,uint32_t value) {
+    if(op==2)return (value&0xffu)|((value&0x80u)?0xffffff00u:0);
+    return (value&0xffffu)|((op==3 && (value&0x8000u))?0xffff0000u:0);
+}
+static void test_extra_transfers(void) {
+    const unsigned offsets[]={0,2,14,16,0x5a,0xfe};
+    const uint32_t values[]={0,0x7f,0x80,0x7fff,0x8000,0xffff,0x89abcdefu};
+    for(unsigned op=0;op<4;++op)for(unsigned form=0;form<6;++form)
+    for(unsigned up=0;up<2;++up)for(unsigned n=0;n<6;++n)for(unsigned v=0;v<7;++v) {
+        unsigned offset=offsets[n],width=op==2?1:2;
+        init(extra(op,form,up,1,2,(form&1u)?3:offset));
+        c.r[1]=512;c.r[2]=values[v];c.r[3]=offset;c.cpsr|=0xf0000000u;
+        uint32_t changed=up?512+offset:512-offset,address=form<4?changed:512,psr=c.cpsr;
+        memset(ram+address-1,0xa5,4);if(op)put(address,values[v],width);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4 && c.cycles==1);
+        CHECK(c.r[1]==(form<2?512:changed) && c.r[3]==offset && c.cpsr==psr);
+        CHECK(c.r[2]==(op?loaded(op,values[v]):values[v]) && !fault);
+        CHECK(ram[address-1]==0xa5 && ram[address+width]==0xa5);
+        if(op)CHECK(reads==2 && writes==0 && read_size==width && last_read==address);
+        else {
+            CHECK(reads==1 && writes==1 && write_size==2 && last_write==address);
+            CHECK(ram[address]==(uint8_t)values[v] && ram[address+1]==(uint8_t)(values[v]>>8));
+        }
+    }
+    /* Unsigned halfword and signed-halfword loads differ at both sign edges;
+     * signed byte also accepts odd addresses. Post-index may leave an odd base. */
+    for(unsigned op=0;op<4;++op) {
+        init(extra(op,4,true,1,2,1));c.r[1]=128;c.r[2]=0x8080;put(128,0x8080,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==129 && c.r[2]==(op?loaded(op,0x8080):0x8080));
+    }
+    init(extra(2,0,true,1,2,1));c.r[1]=128;ram[129]=0x80;
+    CHECK(arm_step(&c)==ARM_OK && c.r[2]==0xffffff80u && read_size==1 && last_read==129);
+}
+static void test_extra_aliases(void) {
+    for(unsigned op=0;op<4;++op) {
+        /* PC-relative base uses instruction address +8, without writeback. */
+        init(extra(op,0,true,15,2,120));c.r[2]=0x8123;put(128,0x8123,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[15]==4 && c.r[2]==(op?loaded(op,0x8123):0x8123));
+        /* Rn==Rd and Rn==Rm are legal without writeback; Rd==Rm is legal
+         * even with writeback. Every address uses the original operands. */
+        init(extra(op,0,true,1,1,2));c.r[1]=128;put(130,0x8123,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==(op?loaded(op,0x8123):128));
+        if(!op)CHECK(ram[130]==128 && ram[131]==0);
+        init(extra(op,1,true,1,2,1));c.r[1]=128;c.r[2]=0x8123;put(256,0x8123,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==128 && c.r[2]==(op?loaded(op,0x8123):0x8123));
+        init(extra(op,3,true,1,2,2));c.r[1]=128;c.r[2]=2;put(130,0x8123,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==130 && c.r[2]==(op?loaded(op,0x8123):2));
+        if(!op)CHECK(ram[130]==2 && ram[131]==0);
+    }
+    const arm_arch_t later[]={ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for(unsigned p=0;p<3;++p)for(unsigned op=0;op<4;++op)for(unsigned form=3;form<=5;form+=2) {
+        init(extra(op,form,true,1,2,1));CHECK(arm_reset_profile(&c,&bus,later[p]));
+        c.r[1]=128;c.r[2]=0x8123;put(form==3?256:128,0x8123,2);
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==256 && c.r[2]==(op?loaded(op,0x8123):0x8123));
+    }
+}
+static void test_extra_refusals(void) {
+    for(unsigned op=0;op<4;++op) {
+        const uint32_t bad[]={
+            extra(op,0,true,1,15,0),extra(op,1,true,1,2,15),
+            extra(op,1,true,1,2,3)|0x100u, /* Register encoding's SBZ field. */
+            extra(op,4,true,1,2,2)|(1u<<21), /* P=0 W=1. */
+            extra(op,2,true,15,2,2),extra(op,4,true,15,2,2),
+            extra(op,2,true,1,1,2),extra(op,4,true,1,1,2),
+            extra(op,3,true,1,2,1),extra(op,5,true,1,2,1) /* Pre-v6 Rn==Rm. */
+        };
+        for(unsigned n=0;n<sizeof bad/sizeof bad[0];++n) {
+            init(bad[n]);c.r[1]=128;c.r[2]=0x8123;c.r[3]=2;arm_cpu_t before=c;
+            CHECK(arm_step(&c)==ARM_UNDEFINED && !memcmp(&before,&c,sizeof c));
+            CHECK(reads==1 && writes==0 && !fault);
+            init(bad[n]&0x0fffffffu);c.r[1]=128;c.r[2]=0x8123;
+            CHECK(arm_step(&c)==ARM_OK && c.r[15]==4 && c.cycles==1 && reads==1 && !writes);
+        }
+        if(op!=2) {
+            init(extra(op,0,true,1,2,0));c.r[1]=129;c.r[2]=0x8123;arm_cpu_t before=c;
+            CHECK(arm_step(&c)==ARM_UNDEFINED && !memcmp(&before,&c,sizeof c));
+            CHECK(reads==1 && !writes && !fault);
+        }
+    }
+}
+static void test_extra_faults(void) {
+    for(unsigned op=0;op<4;++op)for(unsigned form=0;form<6;++form) {
+        init(extra(op,form,true,1,2,(form&1u)?3:2));
+        c.r[1]=form<4?sizeof ram-2:sizeof ram;c.r[2]=0x89abcdef;c.r[3]=2;
+        uint32_t before[16],psr=c.cpsr;memcpy(before,c.r,sizeof before);
+        CHECK(arm_step(&c)==ARM_HALT && fault && !c.cycles && !c.abort_pending);
+        CHECK(!memcmp(before,c.r,sizeof before) && c.cpsr==psr);
+        CHECK(c.abort_fsr==ARM_MMU_BUS_FAILURE && c.abort_far==sizeof ram);
+        CHECK(reads==(op?2u:1u) && writes==(op?0u:1u));
+        unsigned r=reads,w=writes;
+        CHECK(arm_step(&c)==ARM_HALT && reads==r && writes==w && !c.cycles);
+        init(extra(op,form,true,1,2,(form&1u)?3:2)&0x0fffffffu);
+        c.r[1]=sizeof ram;c.r[2]=0x89abcdef;c.r[3]=2;
+        CHECK(arm_step(&c)==ARM_OK && c.r[1]==sizeof ram && c.r[2]==0x89abcdef && !fault && reads==1 && !writes);
+    }
+}
 int main(void) {
     if (!arm_reset_profile(&c,&bus,PROFILE)) {
         puts("FAIL: explicit ARMv4T profile is unavailable"); return 1;
     }
     test_reset(); test_bootstrap(); test_pc_loads(); test_boundaries();
     test_psr_and_irq(); test_multiply(); test_bus_failure();
+    test_original_halfword_store();
+    test_extra_transfers();test_extra_aliases();test_extra_refusals();test_extra_faults();
     printf("arm_v4t: %u passed, %u failed\n",passed,failed);
     return failed ? 1 : 0;
 }
