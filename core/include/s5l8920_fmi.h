@@ -26,11 +26,12 @@ typedef bool (*s5l8920_fmi_device_fn)(void *owner,unsigned chip,uint8_t command,
 
 typedef struct {
     uint32_t timing, control, status;
-    uint8_t selected, command, address, id[S5L8920_FMI_ID_SIZE], cursor, data;
+    uint8_t selected, command, id[S5L8920_FMI_ID_SIZE], cursor, data;
     uint8_t programmed, pending;
     bool initialized, enabled, reset_asserted, id_valid, data_valid, servicing;
     uint64_t commands, bytes_latched;
     uint32_t ecc_mask;
+    uint32_t address, address_high, address_end;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -43,6 +44,12 @@ typedef struct {
  * readback requires that explicit write. Reset invalidates its programming.
  * Other mask values, ECC pending/status, mask polarity and ECC IRQ effects
  * are not modeled. Mask programming never completes or acknowledges a command.
+ * Address staging retains the observed ADDR0/ADDR1/ANUM fields at 0x418/41c/420.
+ * ADDR0 accepts one-byte ID addresses or zero-column page rows in bits 16..31;
+ * ADDR1 accepts the high row byte, and ANUM accepts 0 or 4. Readback requires
+ * explicit programming, which reset invalidates. Staging never starts work.
+ * READID requires ANUM=0 and an ADDR0 that fits one byte; a staged page address
+ * must not be truncated into an ID request. Page commands remain unsupported.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);

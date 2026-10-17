@@ -3,7 +3,7 @@
 #include "s5l8920_fmi.h"
 #include <string.h>
 
-enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u };
+enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u, ADDRESS_HIGH=64u };
 enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u };
 
 bool s5l8920_fmi_init(s5l8920_fmi_t *f) {
@@ -28,6 +28,15 @@ bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
         if(!(f->programmed&TIMING))return false;
         *value=f->timing;return true;
     case 0x40cu:*value=f->selected;return true;
+    case 0x418u:
+        if(!(f->programmed&ADDRESS))return false;
+        *value=f->address;return true;
+    case 0x41cu:
+        if(!(f->programmed&ADDRESS_HIGH))return false;
+        *value=f->address_high;return true;
+    case 0x420u:
+        if(!(f->programmed&ADDRESS_END))return false;
+        *value=f->address_end;return true;
     case 0x444u:*value=f->status;return true;
     case 0x448u:
         if(f->control!=0x50u || !f->data_valid)return false;
@@ -69,7 +78,7 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
            f->status || f->commands==UINT64_MAX)return false;
         if(value==1u) {
             if(f->command!=0xffu)return false;
-        }else if(f->command!=0x90u ||
+        }else if(f->command!=0x90u || f->address>0xffu || f->address_end ||
                  (f->programmed&(ADDRESS|ADDRESS_END))!=(ADDRESS|ADDRESS_END))return false;
         f->control=value;f->pending=value==1u?RESET:READ_ID;
         f->id_valid=f->data_valid=false;f->cursor=0u;
@@ -87,11 +96,14 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         if(value!=0x90u && value!=0xffu)return false;
         f->command=(uint8_t)value;f->programmed|=COMMAND;return true;
     case 0x418u:
+        if(value>0xffu && (value&0xffffu))return false;
+        f->address=value;f->programmed|=ADDRESS;return true;
+    case 0x41cu:
         if(value>0xffu)return false;
-        f->address=(uint8_t)value;f->programmed|=ADDRESS;return true;
+        f->address_high=value;f->programmed|=ADDRESS_HIGH;return true;
     case 0x420u:
-        if(value)return false;
-        f->programmed|=ADDRESS_END;return true;
+        if(value!=0u && value!=4u)return false;
+        f->address_end=value;f->programmed|=ADDRESS_END;return true;
     case 0x424u:
         if(value)return false;
         f->programmed|=PIO;return true;
@@ -114,7 +126,7 @@ bool s5l8920_fmi_service(s5l8920_fmi_t *f,s5l8920_fmi_device_fn device,void *own
     if(f->selected) { chip=0u;while(!(f->selected&(1u<<chip)))chip++; }
     uint8_t id[S5L8920_FMI_ID_SIZE]={0};
     f->servicing=true;
-    bool okay=device(owner,chip,f->command,f->command==0x90u?f->address:0u,id);
+    bool okay=device(owner,chip,f->command,f->command==0x90u?(uint8_t)f->address:0u,id);
     f->servicing=false;
     if(!okay)return false;
     if(f->pending==READ_ID) {

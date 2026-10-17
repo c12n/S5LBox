@@ -69,6 +69,17 @@ ECC processing and interrupt effects are not established; this write neither
 completes nor acknowledges a command. Gate, reset, pending-work, active-byte
 and callback restrictions still apply.
 
+Address registers `0x418`, `0x41c` and `0x420` retain explicitly programmed
+ADDR0, ADDR1 and ANUM values. Matching IOP firmware names and reads these fields
+in its diagnostic; its address helper matches original iBoot's page packing.
+The supported forms are a one-byte ID address or a zero-column page row in
+ADDR0's upper 16 bits, a high row byte in ADDR1, and ANUM values zero or four.
+Readback requires explicit programming, which reset invalidates. Existing mode,
+gate, pending-work, active-byte and callback restrictions apply. Staging these
+fields does not start a transfer. READID additionally requires ANUM zero and an
+ADDR0 fitting one byte, so a staged page cannot be truncated into an ID request.
+Page commands, other address forms and additional ANUM values remain unsupported.
+
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
 byte transfers, timing restoration and deselection. Reset returns after 95
@@ -142,11 +153,12 @@ property value is supplied to the kernel.
 Following discovery, the original table getter at `0x4ff02180` exposes the raw
 page callback at `0x4ff02e38`. A guarded invocation uses explicit chip/page inputs
 and buffers allocated and zeroed by original firmware. It reaches the address
-helper at `0x4ff03628` and stops at `0x4ff0362e`, writing the page's high byte to
-unsupported register `0x41c` on the selected controller. No page command starts
-and the page/spare buffers remain unchanged. Static inspection shows the next
-writes pack the remaining page bits into `0x418` and write `4` to `0x420`;
-their execution and page transfer effects remain unverified. The original chip
+helper at `0x4ff03628`. Before address staging was implemented, it stopped at
+`0x4ff0362e`, writing the page's high byte to unsupported register `0x41c`.
+The original helper now completes all three writes, including the remaining
+page bits in `0x418` and value `4` in `0x420`, and returns. The callback then
+stops at `0x4ff03e78` attempting unsupported command word `0x3000` at `0x414`.
+No page command starts and the page/spare buffers remain unchanged. The original chip
 selector checks the bus encoded in the global chip number before selecting its
 low-three-bit chip line.
 
