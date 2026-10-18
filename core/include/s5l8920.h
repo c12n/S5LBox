@@ -162,6 +162,8 @@ typedef struct {
     uint8_t control, selectors[3], selectors_programmed;
     bool control_programmed;
     uint8_t pins[8], pins_programmed;
+    uint8_t suspend[2];
+    bool suspend_programmed;
 } s5l8920_pmu_config_t;
 
 typedef struct {
@@ -551,6 +553,10 @@ bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint
  * a three-byte transfer beginning at59. Every read requires prior programming
  * of all requested bytes. Registers50..57 are independent pin configuration
  * bytes, supporting exact byte writes and retained reads after programming.
+ * The separate LDO suspend image at12/13 accepts only the matching board's
+ * complete two-byte write00/40. It stages that requested configuration without
+ * changing live LDO fields. Readback, partial or different images, and applying
+ * the image during a power transition are unimplemented and remain refused.
  * No initial values are inferred. These are logical
  * configuration images, without electrical routing or power effects.
  * Service only the matching active I2C transaction, preserving CPU registers

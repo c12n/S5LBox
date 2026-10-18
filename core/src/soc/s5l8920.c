@@ -1459,6 +1459,16 @@ bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
     const s5l8920_i2c_t *i=&m->i2c[0];
     s5l8920_pmu_config_t *c=&m->pmu_config;
     if (!i->active || i->sequence!=sequence || i->address!=0x74u) return false;
+    if (i->subaddress==0x12u && i->length==2u) {
+        /* Original D1755 start copies this complete suspend image from the
+         * matching board's ldo-suspend-defaults. Other images and readback
+         * have no established contract. Live regulator state is independent. */
+        if (!i->write || i->tx[0]!=0u || i->tx[1]!=0x40u) return false;
+        uint8_t value[2];memcpy(value,i->tx,sizeof value);
+        if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
+        memcpy(c->suspend,value,sizeof value);c->suspend_programmed=true;
+        return true;
+    }
     if (i->subaddress==S5L8920_PMU_CONFIG_CONTROL && i->length==1u) {
         if (!i->write) return c->control_programmed &&
             s5l8920_i2c_complete(m,0u,sequence,true,&c->control,1u);

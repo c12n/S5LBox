@@ -1422,6 +1422,20 @@ behavior, bootloader/kernel handoff, physical saved-state defaults or full boot.
 
 ## D1755 LDO and pin configuration
 
+The configuration service stages the matching board's LDO suspend image with
+an exact two-byte write of `00 40` at `0x12`. The original kernel obtains
+`ldo-suspend-defaults` from the supplied device tree and limits its four-byte
+property to two bytes before calling the real I2C write path. This image is
+stored separately from the live enable and voltage fields. It has no inferred
+initial value. Repeated programming is idempotent; functional SoC reset retains
+the external PMU programming, while free/init clears it.
+
+Partial or different suspend images remain refused. Reads also remain refused
+after programming: retaining the requested bytes does not establish hardware
+readback. Applying this configuration during sleep, regulator transitions and
+physical power effects are not implemented. A successful transfer uses the
+existing I2C completion and interrupt path without creating PMU events.
+
 Exact byte transactions now retain eleven LDO settings at `0x17..0x21`,
 selector fields at `0x22`, and enable fields at `0x10/0x11`. Their masks come
 from the matching kernel's twelve-row table at `0x80af1f90`: the twelfth rail

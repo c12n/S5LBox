@@ -2160,6 +2160,64 @@ static void test_pmu_config(s5l8920_t *m) {
     CHECK(s5l8920_reset(m),"final configuration reset");
 }
 
+static void test_pmu_suspend(s5l8920_t *m) {
+    static s5l8920_t before;
+    CHECK(s5l8920_reset(m) && !m->pmu_config.suspend_programmed &&
+          !m->pmu_config.suspend[0] && !m->pmu_config.suspend[1],"invented suspend configuration");
+    uint64_t seq=pmu_request(m,0x74u,0x12u,true,2u,0x4000u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_config_service(m,seq) &&
+          !m->pmu_config.suspend_programmed,"cancelled write established suspend image");
+    const unsigned unsupported[][3]={{0x75u,0x12u,2u},{0x74u,0x11u,2u},
+        {0x74u,0x13u,2u},{0x74u,0x12u,1u},{0x74u,0x13u,1u},
+        {0x74u,0x12u,3u},{0x74u,0x12u,4u}};
+    for (unsigned programmed=0;programmed<2u;programmed++) {
+        for (unsigned n=0;n<sizeof unsupported/sizeof *unsupported;n++) for (unsigned write=0;write<2u;write++) {
+            seq=pmu_request(m,unsupported[n][0],unsupported[n][1],write!=0u,unsupported[n][2],0x4000u);
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported suspend transfer changed state");
+            CHECK(s5l8920_reset(m),"cancel unsupported suspend transfer");
+        }
+        seq=pmu_request(m,0x74u,0x12u,false,2u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"staged suspend image invented hardware readback");
+        CHECK(s5l8920_reset(m),"cancel unsupported suspend read");
+        for (unsigned bit=0;bit<16u;bit++) {
+            seq=pmu_request(m,0x74u,0x12u,true,2u,0x4000u^(1u<<bit));memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unverified suspend image accepted");
+            CHECK(s5l8920_reset(m),"cancel different suspend image");
+        }
+        seq=pmu_request(m,0x74u,0x12u,true,2u,0x4000u);
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq-1u) && !s5l8920_pmu_config_service(m,seq+1u) &&
+              !s5l8920_pmu_ldo_service(m,seq) && !s5l8920_pmu_events_service(m,seq) &&
+              !memcmp(&before,m,sizeof before),"suspend transaction identity/isolation");
+        CHECK(s5l8920_pmu_config_service(m,seq) && m->pmu_config.suspend_programmed &&
+              m->pmu_config.suspend[0]==0u && m->pmu_config.suspend[1]==0x40u &&
+              !m->i2c[0].active && m->i2c[0].status==0x10u && !m->i2c[0].rx_count && m->cpu.irq_line,
+              "original LDO suspend configuration refused");
+        before.pmu_config.suspend[0]=0u;before.pmu_config.suspend[1]=0x40u;
+        before.pmu_config.suspend_programmed=true;
+        CHECK(!memcmp(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config),"suspend write changed neighboring configuration");
+        before.cpu.irq_line=m->cpu.irq_line;
+        CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && !memcmp(&before.pmu_ldo,&m->pmu_ldo,sizeof m->pmu_ldo) &&
+              !memcmp(&before.pmu_voltage,&m->pmu_voltage,sizeof m->pmu_voltage) &&
+              !memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events) && m->timebase_ticks==before.timebase_ticks,
+              "suspend programming changed CPU/live regulator/event/time state");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"completed suspend token replayed");
+        m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+        CHECK(!m->cpu.irq_line && !m->i2c[0].status,"suspend write completion acknowledgement");
+        CHECK(s5l8920_reset(m) && !memcmp(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config),"SoC reset lost external suspend programming");
+    }
+    seq=pmu_request(m,0x74u,0x12u,true,2u,0x4000u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_config_service(m,seq) && m->pmu_config.suspend_programmed,
+          "cancelled repeated write lost retained suspend image");
+    seq=pmu_request(m,0x74u,0x12u,true,2u,0x4000u);
+    (void)m->bus.read32(m,0u);s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(diagnostic.reason && s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"suspend service repaired unrelated bus fault");
+    CHECK(s5l8920_reset(m),"final suspend cleanup");
+}
+
 static bool test_pmu_boot_state(s5l8920_t *m) {
     static s5l8920_t before;s5l8920_t empty={0};
     CHECK(s5l8920_reset(m),"clear diagnostic before boot-state tests");
@@ -4295,6 +4353,7 @@ int main(void) {
     test_pmu_rtc(&m);
     test_pmu_adc(&m);
     test_pmu_config(&m);
+    test_pmu_suspend(&m);
     test_pmu_control(&m);
     test_fiq_and_reset(&m);
     test_clock_selectors(&m);
@@ -4330,6 +4389,7 @@ int main(void) {
     CHECK(!m.pmu_adc.programmed && !m.pmu_adc.result_valid && !m.pmu_adc.sequence &&
           !s5l8920_pmu_adc_service(&m,1u) && !s5l8920_pmu_adc_complete(&m,1u,0u,0u),"free retained ADC state");
     CHECK(!m.pmu_config.control_programmed && !m.pmu_config.selectors_programmed && !m.pmu_config.pins_programmed &&
+          !m.pmu_config.suspend_programmed && !m.pmu_config.suspend[0] && !m.pmu_config.suspend[1] &&
           !s5l8920_pmu_config_service(&m,1u),"free retained PMU configuration");
     CHECK(!m.pmu_events.configured && !m.pmu_events.status_valid && !m.pmu_events.masks_programmed &&
           !m.pmu_events.pending && !s5l8920_pmu_events_service(&m,1u) &&
