@@ -338,8 +338,56 @@ static void test_pending_board(void) {
     s5l8920_clear_bus_failure(&board);CHECK(s5l8920_reset(&board) && !board.fmi[0] && !board.fmi[1]);
     CHECK(f[1].ecc_pending_configured && f[1].ecc_pending==0x68);s5l8920_free(&board);
 }
+static void test_page_programming_board(void) {
+    const uint32_t offsets[]={0,0x808},values[]={0x64a29,0xf00};
+    for(unsigned b=0;b<2;b++) {
+        board_init_modes(true,true);wr(reg(b,0x80c),1);wr(reg(b,0x810),0x68);
+        CHECK(s5l8920_fmi_ecc_supply(&f[b],7,true) && s5l8920_fmi_ecc_pending_supply(&f[b],8));
+        s5l8920_fmi_t peer=f[b^1u];uint32_t backing[2][10];memcpy(backing,storage,sizeof backing);
+        for(unsigned n=0;n<2;n++) {
+            instruction(0xe5801000,reg(b,offsets[n]),values[n]);
+            board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;arm_cpu_t ap=board.cpu;
+            s5l8920_fmi_t expected=f[b];
+            if(n) {expected.ecc_control=0xf00;expected.programmed|=2048u;}
+            else {expected.sector_configuration=0x64a29;expected.programmed|=1024u;}
+            CHECK(step()==ARM_OK && !board.bus_failure.reason);
+            CHECK(!memcmp(&expected,&f[b],sizeof expected) && !memcmp(&peer,&f[b^1u],sizeof peer));
+            CHECK(!memcmp(&ap,&board.cpu,sizeof ap) && !board.timebase_ticks && !iop.bytes_written);
+            wr(reg(b,offsets[n]),values[n]);CHECK(!board.bus_failure.reason && !memcmp(&expected,&f[b],sizeof expected));
+        }
+        CHECK(!memcmp(backing,storage,sizeof backing));
+        CHECK(f[b].ecc_count==1 && f[b].ecc_pending==8 && f[b].ecc_pending_known==0x68);
+        wr(GATE(S5L8920_FMI_GATE+b),0x8000000f);
+        CHECK(!board.bus_failure.reason && !f[b].sector_configuration && !f[b].ecc_control && !f[b].programmed);
+    }
+    for(unsigned b=0;b<2;b++)for(unsigned n=0;n<2;n++)for(unsigned condition=0;condition<5;condition++) {
+        board_init(false);wr(reg(b,0),0x64a29);
+        if(condition==0)wr(GATE(S5L8920_FMI_GATE+b),0);
+        if(condition==1)wr(GATE(S5L8920_FMI_GATE+b),0x8000000f);
+        if(condition==2)f[b^1u].servicing=true;
+        if(condition==3)f[b].pending=1;
+        if(condition==4)f[b].fifo_count[1]=1;
+        instruction(0xe5801000,reg(b,offsets[n]),values[n]);
+        s5l8920_fmi_t before=f[b];arm_cpu_t ap=board.cpu;
+        CHECK(step()==ARM_HALT && !memcmp(&before,&f[b],sizeof before));
+        CHECK(!memcmp(&ap,&board.cpu,sizeof ap) && !board.bus_failure.reason);
+        wr(reg(b,offsets[n]),values[n]);
+        CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&f[b],sizeof before));
+        f[b^1u].servicing=false;
+    }
+    for(unsigned n=0;n<2;n++)for(unsigned size=1;size<=4;size*=2) {
+        board_init(false);wr(reg(0,0),0x64a29);s5l8920_fmi_t before=f[0];
+        uint32_t a=reg(0,offsets[n]);
+        if(size==1)board.bus.write8(&board,a,(uint8_t)values[n]);
+        else if(size==2)board.bus.write16(&board,a,(uint16_t)values[n]);
+        else wr(a+1,values[n]);
+        CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&before,&f[0],sizeof before));
+    }
+    s5l8920_free(&board);
+}
 int main(void) {
     test_configuration();test_fifo();test_refusals_and_reset();test_board_shared();test_board_refusals();
     test_pending_knowledge();test_pending_events();test_pending_reset_and_refusal();test_pending_board();
+    test_page_programming_board();
     printf("s5l8920_fmi_ecc: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

@@ -4,7 +4,7 @@
 #include <string.h>
 
 enum { TIMING=1u, COMMAND=2u, ADDRESS=4u, ADDRESS_END=8u, PIO=16u, ECC_MASK=32u, ADDRESS_HIGH=64u,
-       RBB=128u, STATUS_MASK=256u, INTERRUPT_ENABLE=512u, SECTOR_CONFIG=1024u };
+       RBB=128u, STATUS_MASK=256u, INTERRUPT_ENABLE=512u, SECTOR_CONFIG=1024u, ECC_CONTROL=2048u };
 enum { IDLE=0u, RESET=1u, READ_ID=2u, BYTE=3u, READ_PAGE=4u,
        STATUS_COMMAND=5u, STATUS_POLL=6u, READ_MODE=7u };
 
@@ -37,6 +37,16 @@ static unsigned selected_chip(const s5l8920_fmi_t *f) {
 }
 static bool data_busy(const s5l8920_fmi_t *f) {
     return f->sector_pending || f->fifo_count[0] || f->fifo_count[1];
+}
+static bool raw_sector_configuration(uint32_t value) {
+    unsigned spare=(value>>8)&63u;
+    return spare<=32u && value==(0xa8003u|(spare<<8)|(spare<<2));
+}
+static bool ecc_page_configuration(uint32_t value) {
+    unsigned auxiliary=(value>>8)&63u;
+    /* Original page constructor: four page codes, mode8/16 and repeated count.
+     * This validates programming, not NAND geometry or an ECC data layout. */
+    return value==(0x60000u|(value&0x4003u)|(auxiliary<<8)|(auxiliary<<2));
 }
 static bool ecc_queue_valid(const s5l8920_fmi_t *f) {
     return f->ecc_results && f->ecc_capacity && f->ecc_capacity<=SIZE_MAX/sizeof(uint32_t) &&
@@ -140,9 +150,9 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         f->interrupt_pending&=~value;return true;
     }
     if(offset==0u) {
-        unsigned spare=(value>>8)&63u;
-        if(f->sector_pending || f->control==0x50u || spare>32u ||
-           value!=(0xa8003u|(spare<<8)|(spare<<2)))return false;
+        bool raw=raw_sector_configuration(value);
+        if(f->sector_pending || f->control==0x50u ||
+           (!raw && (!ecc_page_configuration(value) || data_busy(f))))return false;
         f->sector_configuration=value;f->programmed|=SECTOR_CONFIG;return true;
     }
     if(offset==4u) {
@@ -150,11 +160,16 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         if(value!=3u || f->sector_pending || f->control==0x50u || !f->selected ||
            !f->page_issued || f->status_mode || (f->status&0xbu) || f->interrupt_pending ||
            (f->programmed&required)!=required || !f->fifo_capacity[0] || !f->fifo_capacity[1] ||
-           f->sectors_completed==UINT64_MAX)return false;
+           f->sectors_completed==UINT64_MAX || !raw_sector_configuration(f->sector_configuration))return false;
         f->sector_remaining[0]=512u;f->sector_remaining[1]=(uint16_t)((f->sector_configuration>>8)&63u);
         f->sector_pending=true;return true;
     }
     if(data_busy(f))return false;
+    if(offset==0x808u) {
+        if(value!=0xf00u || f->control==0x50u || !(f->programmed&SECTOR_CONFIG) ||
+           !ecc_page_configuration(f->sector_configuration))return false;
+        f->ecc_control=value;f->programmed|=ECC_CONTROL;return true;
+    }
     if(offset==0x80cu) {
         if(value!=1u || !ecc_queue_valid(f) || f->control==0x50u)return false;
         f->ecc_head=f->ecc_count=0;f->ecc_clear_seen=true;return true;
@@ -296,7 +311,8 @@ bool s5l8920_fmi_data_configure(s5l8920_fmi_t *f,unsigned data_depth,unsigned sp
 bool s5l8920_fmi_data_service(s5l8920_fmi_t *f,s5l8920_fmi_data_fn receive,void *owner) {
     if(!f || !f->initialized || f->servicing)return false;
     if(f->reset_asserted || !f->sector_pending)return true;
-    if(!f->enabled || !receive || !f->selected || !f->page_issued || f->status_mode)return false;
+    if(!f->enabled || !receive || !f->selected || !f->page_issued || f->status_mode ||
+       !(f->programmed&SECTOR_CONFIG) || !raw_sector_configuration(f->sector_configuration))return false;
     unsigned lane=f->sector_remaining[0]?0u:1u;
     unsigned depth=f->fifo_capacity[lane],count=f->sector_remaining[lane];
     if(!count || !depth || f->fifo_count[lane]>depth)return false;

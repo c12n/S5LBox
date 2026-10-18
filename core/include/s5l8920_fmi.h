@@ -77,7 +77,7 @@ typedef struct {
     uint32_t rbb_config, status_interrupt_mask, interrupt_enable, interrupt_pending;
     uint64_t status_samples;
     bool status_mode, page_issued;
-    uint32_t sector_configuration;
+    uint32_t sector_configuration,ecc_control;
     uint16_t fifo_capacity[2],fifo_head[2],fifo_count[2],sector_remaining[2];
     uint8_t data_fifo[S5L8920_FMI_DATA_STAGING_MAX],spare_fifo[S5L8920_FMI_SPARE_STAGING_MAX];
     bool sector_pending;
@@ -187,8 +187,17 @@ bool s5l8920_fmi_service_io(s5l8920_fmi_t *f,const s5l8920_fmi_endpoint_t *endpo
  * There is no default; these bounds describe host storage, not measured silicon
  * FIFO capacity. Configure only while idle/empty; reset invalidates the depths.
  * CFG0 supports the original raw512-byte sector mode A8003 with the same spare
- * count (0..32) in bits8..13 and2..7. CTRL4=3 queues one sector after a backed
- * page command in data mode. Modes using ECC, writes or other fields refuse.
+ * count (0..32) in bits8..13 and2..7. It also retains the original ECC page
+ * constructor's 60000 base, mode16 bit14, repeated auxiliary count0..63 and
+ * low page codes3/0/1/2 for software512/2048/4096/8192 bytes. Page programming
+ * requires idle, empty FIFOs; it establishes no physical geometry or layout.
+ * With an ECC page configuration, 808=F00 retains the observed read setup;
+ * other control values and readback of CFG0/808 remain unsupported. Neither
+ * write starts work or alters result/pending queues. Reset invalidates both.
+ * CTRL4=3 queues one RAW sector after a backed page command in data mode.
+ * Both its launch and producer service refuse ECC page execution; writes and
+ * ECC decoding/correction are unimplemented. Raw reprogramming can preserve
+ * buffered bytes, but switching to ECC page mode requires draining them.
  * Service clocks at most16 actual bytes into the data lane, then spare lane;
  * full FIFOs apply backpressure. INTPNDbit1 latches when all sector bytes have
  * arrived, independently of DMA stores. After W1C, another sector may queue

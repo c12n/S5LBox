@@ -198,8 +198,8 @@ enable. Matching controller firmware identifies it by reading `0x810` and
 `0x814` for its ECC pending/mask diagnostic. Original iBoot initialization
 at `0x4ff037f4` writes zero to the mask before setting its object flag.
 Readback requires an explicit write, and reset invalidates that programming.
-Nonzero masks and other ECC registers remain unavailable except for the
-optional result-buffer policy below. Mask polarity,
+Nonzero masks remain unavailable. Separate bounded ECC programming,
+result-buffer and pending policies are described below. Mask polarity,
 ECC processing and interrupt effects are not established; this write neither
 completes nor acknowledges a command. Gate, reset, pending-work, active-byte
 and callback restrictions still apply.
@@ -229,8 +229,8 @@ completion, status, interrupt, DMA or time effects. A producer must provide
 independently backed results; fixtures may supply explicitly labeled inputs.
 There is no production ECC producer yet. Pending command/data or byte-strobe
 activity refuses clears. AP and IOP access share the queue, retain gate and
-reset checks, and refuse during endpoint callbacks. ECC control remains
-unsupported; pending access has a separate optional policy.
+reset checks, and refuse during endpoint callbacks. Pending access has a
+separate optional policy.
 
 The pending register at `0x810` supports an explicitly selected latch for
 the observed `0x68` bit set. Selection and controller reset leave these bits
@@ -252,6 +252,27 @@ No zero reset status is supplied. Readback zero after a full acknowledgement
 comes from the guest clearing the supported bits. No automatic ECC event
 producer, NAND readiness, mask polarity, interrupt delivery, DMA or timing
 is inferred. Nonzero ECC masks remain unavailable.
+
+CFG0 also retains the ECC page configuration produced by original IOP
+`0x44dc`/`0x4390`: base `0x60000`, bit 14 for mode 16, the same six-bit
+auxiliary count in bits 2 through 7 and 8 through 13, and page codes
+3/0/1/2 for software sizes 512/2048/4096/8192 bytes. The observed `0x64a29`
+selects mode 16, software size 4096 and auxiliary count 10. The original
+DMA setup at `0x4694` derives separate data and auxiliary lengths from object
+fields; this does not establish physical spare capacity or parity layout.
+The original read-programming tail at `0x4630` writes CFG0 then `0xf00` to
+ECC control `0x808`. That control value is retained only after ECC page
+configuration. Other controls and CFG0/808 readback remain unsupported.
+
+These writes only stage configuration. They require idle command/data paths
+and empty FIFOs, preserve result/pending storage, and produce no data,
+completion, events or IRQs. Reset invalidates both. The raw 512-byte launch
+and producer explicitly reject ECC page modes; already buffered raw bytes
+must drain before switching to one. Raw sector pipelining remains supported.
+ECC decoding, correction and page execution still require a backed data path.
+Original constructor and read-tail fixtures cover both banks, four page
+sizes, five auxiliary counts and both modes; they prove instruction execution
+and configuration retention, not physical NAND geometry or guest boot.
 
 Address registers `0x418`, `0x41c` and `0x420` retain explicitly programmed
 ADDR0, ADDR1 and ANUM values. Matching IOP firmware names and reads these fields

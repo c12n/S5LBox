@@ -522,6 +522,8 @@ static void test_board(void) {
     (void)board.bus.read32(&board,reg(0,0x810));
     CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
     (void)board.bus.read32(&board,reg(0,0x808));
+    CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
+    (void)board.bus.read32(&board,reg(0,0x804));
     CHECK(board.bus_failure.reason==S5L8920_BUS_UNMAPPED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
     bw(0,0x408,0);bw(0,0x40c,2);bw(0,0x414,0x90);bw(0,0x418,0);bw(0,0x420,0);bw(0,0x410,9);
     s5l8920_fmi_t before=fmi;board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;board.timebase_ticks=123;
@@ -749,6 +751,59 @@ static void test_sector_guards(void) {
     CHECK(s5l8920_fmi_data_receive(&fmi,0,NULL,1)==S5L8920_FMI_DATA_UNAVAILABLE);
     CHECK(!memcmp(&before,&fmi,sizeof before));for(unsigned n=0;n<17;n++)CHECK(bytes[n]==0x96);
 }
+static void test_ecc_page_programming(void) {
+    init();reject(0,0x64a29);reject(0x808,0xf00);wr(0x400,1);reject(0x808,0xf00);
+    wr(0,0xa8003);reject(0x808,0xf00);
+    for(unsigned mode=0;mode<4;mode++)for(unsigned aux=0;aux<64;aux++)for(unsigned strength=0;strength<2;strength++) {
+        uint32_t cfg=0x60000u|(strength<<14)|(aux<<8)|(aux<<2)|mode;
+        s5l8920_fmi_t expected=fmi;expected.sector_configuration=cfg;expected.programmed|=1024u;
+        wr(0,cfg);CHECK(!memcmp(&expected,&fmi,sizeof expected));
+        expected.ecc_control=0xf00;expected.programmed|=2048u;
+        wr(0x808,0xf00);CHECK(!memcmp(&expected,&fmi,sizeof expected));
+        reject_read(0);reject_read(0x808);reject(4,3);
+        /* A mismatch in either copy, or any reserved configuration bit. */
+        for(unsigned bit=2;bit<32;bit++)if(bit!=14)reject(0,cfg^(1u<<bit));
+    }
+    for(unsigned bit=0;bit<32;bit++)reject(0x808,0xf00u^(1u<<bit));
+    reject(0x808,0x900);reject(0x808,0x1100);reject(0x808,0);reject(0x808,UINT32_MAX);
+    for(unsigned condition=0;condition<7;condition++) {
+        init();wr(0x400,1);wr(0,0x64a29);
+        if(condition==0)fmi.pending=1;
+        if(condition==1)fmi.control=0x50;
+        if(condition==2)fmi.sector_pending=true;
+        if(condition==3)fmi.fifo_count[0]=1;
+        if(condition==4)fmi.fifo_count[1]=1;
+        if(condition==5)fmi.servicing=true;
+        if(condition==6)fmi.reset_asserted=true;
+        reject(0,0x64a29);reject(0x808,0xf00);
+        fmi.servicing=false;
+    }
+    init();stream_setup(&fmi,0,512,32);wr(0,0x64a29);wr(0x808,0xf00);
+    /* All raw prerequisites are present; ECC configuration alone must refuse. */
+    reject(4,3);s5l8920_fmi_t before=fmi;
+    CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(!memcmp(&before,&fmi,sizeof before) && !stream.calls);
+    fmi.sector_pending=true;before=fmi;
+    CHECK(!s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(!memcmp(&before,&fmi,sizeof before) && !stream.calls);fmi.sector_pending=false;
+    uint8_t byte=0xa5;before=fmi;
+    CHECK(s5l8920_fmi_data_receive(&fmi,0,&byte,1)==S5L8920_FMI_DATA_WAIT && byte==0xa5);
+    CHECK(!memcmp(&before,&fmi,sizeof before));
+    /* Raw mode still streams and pipelines; ECC cannot reinterpret its FIFO. */
+    sector_start(&fmi,0);stream.available=sizeof stream.raw;
+    for(unsigned n=0;n<32;n++)CHECK(s5l8920_fmi_data_service(&fmi,stream_read,&stream));
+    CHECK(!fmi.sector_pending && fmi.fifo_count[0]==512 && stream.cursor==512);
+    reject(0,0x64a29);reject(0x808,0xf00);wr(0,0xa8003);wr(0xc,2);
+    uint8_t bytes[16];
+    for(unsigned n=0;n<32;n++) {
+        CHECK(s5l8920_fmi_data_receive(&fmi,0,bytes,16)==S5L8920_FMI_DATA_READY);
+        CHECK(!memcmp(bytes,stream.raw+n*16,16));
+    }
+    wr(0,0x64a29);wr(0x808,0xf00);reject(4,3);
+    CHECK(s5l8920_fmi_reset_line(&fmi,true));
+    CHECK(!fmi.programmed && !fmi.sector_configuration && !fmi.ecc_control);
+    CHECK(s5l8920_fmi_reset_line(&fmi,false));wr(0x400,1);reject(0x808,0xf00);
+}
 #define SECTOR_DATA 0x41000000u
 #define SECTOR_SPARE 0x41002000u
 #define SECTOR_DESC 0x41003000u
@@ -825,6 +880,6 @@ static void test_sector_board_dma(void) {
 }
 int main(void) {
     test_configuration();test_data();test_unselected_bus();test_timing_before_mode();test_ecc_mask();test_page_address_staging();test_page_command_queue();test_page_commands();test_status_setup_queue();test_status_polling();test_status_guards();test_reset();test_board();test_board_pages();test_board_status();s5l8920_free(&board);
-    test_sector_registers();test_sector_producer();test_sector_guards();test_sector_board_dma();
+    test_sector_registers();test_sector_producer();test_sector_guards();test_ecc_page_programming();test_sector_board_dma();
     printf("s5l8920_fmi: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }
