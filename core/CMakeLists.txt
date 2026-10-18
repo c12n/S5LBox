@@ -32,6 +32,7 @@ add_library(emucore STATIC
     src/soc/s5l8920.c
     src/soc/s5l8920_cdma.c
     src/soc/s5l8920_iop.c
+    src/soc/s5l8920_sdhc.c
     src/soc/s5l8920_fmi.c
     src/soc/s5l8920_uart.c
     src/soc/s5l8920_dart.c
@@ -247,6 +248,9 @@ add_test(NAME s5l8920_iop COMMAND test_s5l8920_iop)
 add_executable(test_s5l8920_iop_fmi tests/test_s5l8920_iop_fmi.c)
 target_link_libraries(test_s5l8920_iop_fmi PRIVATE emucore)
 add_test(NAME s5l8920_iop_fmi COMMAND test_s5l8920_iop_fmi)
+add_executable(test_s5l8920_sdhc tests/test_s5l8920_sdhc.c)
+target_link_libraries(test_s5l8920_sdhc PRIVATE emucore)
+add_test(NAME s5l8920_sdhc COMMAND test_s5l8920_sdhc)
 add_executable(test_s5l8920_iop_vic tests/test_s5l8920_iop_vic.c)
 target_link_libraries(test_s5l8920_iop_vic PRIVATE emucore)
 add_test(NAME s5l8920_iop_vic COMMAND test_s5l8920_iop_vic)

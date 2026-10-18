@@ -26,6 +26,41 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
+## Optional SDHC reset component
+
+An explicitly initialized SDHC component models a bounded SDHCI-compatible
+reset and preparation-register subset. Software-reset byte `0x2f` latches
+all, command or data reset requests; reads never complete them. Explicit
+owner service with an available controller clock performs the reset. All
+reset clears every modeled register, while command/data resets clear their
+separate normal-status domains and preserve preparation, error and enable
+state. This is functional scheduling, without a measured reset duration.
+No command execution, card responses, present-state samples, clock stability,
+capabilities or interrupt wiring are supplied. Unsupported accesses refuse.
+
+The IOP can borrow a separate capability for aligned accesses within
+`0x80000000..0x80000fff`, with exact register widths checked by the component.
+Refusal stays local to the IOP; callbacks and owners are released on every
+return. Earlier service APIs and board service continue withholding this
+capability. The target device tree identifies this window, but its logical
+clock-gate identifier still needs translation through the platform driver's
+tables before board attachment. No raw gate number is guessed.
+
+The original IOP reset setter at `0x79e0` previously stopped at its byte read
+at `0x79e4`. With this capability, the original setter and getter at `0x79f4`
+execute in 128 input/flag combinations, retaining pending state across reads
+and a stopped clock, then observing explicit reset completion. The test uses
+explicit cold/controller-clock inputs; it does not execute the complete
+reset caller or establish whole-kernel advancement. Synthetic tests cover
+separate reset domains, width/value refusals, IOP hold/reset and capability
+lifetime. The genuine audio-register boundary remains unchanged.
+
+The register layout is checked against the matching target instructions and
+the [Linux v2.6.28 SDHCI definitions](https://github.com/torvalds/linux/blob/4a6908a3a050aacc9c3a2f36b276b46c0629ad91/drivers/mmc/host/sdhci.h).
+The [Microchip SDMMC reset description](https://onlinedocs.microchip.com/oxy/GUID-4D282FC5-82FC-4934-8BAD-D4A5D8422E6C-en-US-7/GUID-A9EA9B00-152F-4DD1-8092-0422D92B3F8A.html)
+provides a generic reset-domain reference. Neither source establishes this
+target's physical clock, timing, capabilities or card state.
+
 ## IOP access to shared NAND controllers
 
 The IOP can access the two explicitly attached FMI controllers through a

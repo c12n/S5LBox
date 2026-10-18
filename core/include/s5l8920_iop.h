@@ -32,6 +32,10 @@ typedef uint64_t (*s5l8920_iop_timebase_fn)(void *);
  * refused with no device effect. Do not mutate the IOP or its owning board,
  * service endpoints, or advance time. The owner is shared with RAM. */
 typedef bool (*s5l8920_iop_fmi_fn)(void *,unsigned,uint32_t,bool,uint32_t *);
+/* Borrowed SDHC access, restricted to its 4 KiB register window. Arguments
+ * are owner, offset, byte width, write flag and value. As with FMI, refusal
+ * must preserve device state; reads/writes never service hardware or time. */
+typedef bool (*s5l8920_iop_sdhc_fn)(void *,uint32_t,unsigned,bool,uint32_t *);
 typedef struct {
     uint32_t remaining;
     bool configured,programmed,enabled,expired,pending;
@@ -69,6 +73,7 @@ typedef struct {
     s5l8920_iop_signal_fn signal_ap;
     s5l8920_iop_timebase_fn timebase;
     s5l8920_iop_fmi_fn fmi;
+    s5l8920_iop_sdhc_fn sdhc;
     void *memory_owner;
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
@@ -144,6 +149,16 @@ arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
 arm_status_t s5l8920_iop_service_with_fmi(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
     s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,void *owner);
+/* Also lends SDHC access to 80000000..80000FFF, for this instruction only.
+ * Only aligned byte/halfword/word accesses wholly within the window reach
+ * the callback. Its owner enforces presence, bus clock/reset and supported
+ * register semantics. NULL keeps the window unavailable. No RAM fallback,
+ * AP forwarding, interrupt wiring or reset completion is implicit. Earlier
+ * service APIs, including board service, do not lend this capability. */
+arm_status_t s5l8920_iop_service_with_sdhc(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,
+    s5l8920_iop_sdhc_fn sdhc,void *owner);
 
 /* Explicit cold functional timer1: BF10020C count, BF100224 control, VIC0
  * hardware source5. Requires configured VICs and precedes first CPU reset.

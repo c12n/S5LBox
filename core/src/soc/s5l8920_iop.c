@@ -2,6 +2,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920_iop.h"
 #include "s5l8920_fmi.h"
+#include "s5l8920_sdhc.h"
 #include <string.h>
 
 #define AP_VIC_BASE UINT32_C(0xbf200000)
@@ -198,6 +199,13 @@ static bool cache_command(s5l8920_iop_t *i,uint32_t offset,uint32_t value) {
 }
 static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
     if(bus_failed(i))return 0;
+    if(address>=S5L8920_SDHC_BASE && address-S5L8920_SDHC_BASE<S5L8920_SDHC_SIZE) {
+        uint32_t offset=address-S5L8920_SDHC_BASE,value=0;
+        if(i->sdhc && !(address&(size-1u)) && offset<=S5L8920_SDHC_SIZE-size &&
+           i->sdhc(i->memory_owner,offset,size,false,&value))return value;
+        fail(i,i->sdhc?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,false,0);return 0;
+    }
     if(fmi_address(address)) {
         uint32_t relative=address-S5L8920_FMI_BASE,value=0;
         if(i->fmi && size==4u && !(address&3u) &&
@@ -242,6 +250,13 @@ static uint32_t read_value(s5l8920_iop_t *i,uint32_t address,unsigned size) {
 }
 static void write_value(s5l8920_iop_t *i,uint32_t address,unsigned size,uint32_t value) {
     if(bus_failed(i))return;
+    if(address>=S5L8920_SDHC_BASE && address-S5L8920_SDHC_BASE<S5L8920_SDHC_SIZE) {
+        uint32_t offset=address-S5L8920_SDHC_BASE,operand=value;
+        if(i->sdhc && !(address&(size-1u)) && offset<=S5L8920_SDHC_SIZE-size &&
+           i->sdhc(i->memory_owner,offset,size,true,&operand))return;
+        fail(i,i->sdhc?S5L8920_IOP_REGISTER_REFUSED:S5L8920_IOP_UNMAPPED,
+             address,size,true,value);return;
+    }
     if(fmi_address(address)) {
         uint32_t relative=address-S5L8920_FMI_BASE,operand=value;
         if(i->fmi && size==4u && !(address&3u) &&
@@ -379,13 +394,19 @@ arm_status_t s5l8920_iop_service_with_timebase(s5l8920_iop_t *i,
 arm_status_t s5l8920_iop_service_with_fmi(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
     s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,void *owner) {
+    return s5l8920_iop_service_with_sdhc(i,memory,signal_ap,timebase,fmi,NULL,owner);
+}
+arm_status_t s5l8920_iop_service_with_sdhc(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,
+    s5l8920_iop_sdhc_fn sdhc,void *owner) {
     if(!i || !i->initialized || !i->reset_seen || i->servicing)return ARM_HALT;
     if(!i->running || i->reset_asserted)return ARM_OK;
     if(i->failure.reason || !memory)return ARM_HALT;
     i->memory=memory;i->signal_ap=signal_ap;i->timebase=timebase;i->fmi=fmi;
-    i->memory_owner=owner;i->servicing=true;
+    i->sdhc=sdhc;i->memory_owner=owner;i->servicing=true;
     arm_status_t result=arm_step(&i->cpu);
     i->servicing=false;i->memory=NULL;i->signal_ap=NULL;i->timebase=NULL;
-    i->fmi=NULL;i->memory_owner=NULL;
+    i->fmi=NULL;i->sdhc=NULL;i->memory_owner=NULL;
     return result;
 }
