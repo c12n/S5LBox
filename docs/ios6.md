@@ -26,7 +26,7 @@ A complete machine, kernel boot, and SpringBoard have not
 been demonstrated. The existing iPhone
 OS 3 machine and application defaults remain ARM1176/S5L8900.
 
-## Optional SDHC reset component
+## Optional SDHC reset and clock component
 
 An explicitly initialized SDHC component models a bounded SDHCI-compatible
 reset and preparation-register subset. Software-reset byte `0x2f` latches
@@ -35,8 +35,19 @@ owner service with an available controller clock performs the reset. All
 reset clears every modeled register, while command/data resets clear their
 separate normal-status domains and preserve preparation, error and enable
 state. This is functional scheduling, without a measured reset duration.
-No command execution, card responses, present-state samples, clock stability,
-capabilities or interrupt wiring are supplied. Unsupported accesses refuse.
+No command execution, card responses, present-state samples, capabilities or
+interrupt wiring are supplied. Unsupported accesses refuse.
+
+Clock-control halfword `0x2c` stores internal-enable, card-clock request and
+the older eight-bit divider, bounded to bypass and power-of-two divisors
+2 through 256. The stable bit is read-only; register reads and writes never
+establish readiness. Enabling, disabling or changing the divider clears it.
+A separate explicit clock-service call establishes readiness only when the
+internal clock is enabled and its owner supplies an available source. Source
+loss clears readiness while preserving the control requests. Reset service
+does not call clock service; pending reset pauses it. All reset clears clock
+state, while command/data reset preserves it. No physical settling duration,
+frequency, phase, card output clock or card presence is inferred.
 
 The IOP can borrow a separate capability for aligned accesses within
 `0x80000000..0x80000fff`, with exact register widths checked by the component.
@@ -50,6 +61,9 @@ explicit reset service also requires a caller-supplied controller clock.
 Reads never service resets or alter the AP's exclusive monitor. Board
 reset/free detach the caller-owned controller without modifying it. Raw-gate
 reset coupling and interrupt routing remain unavailable.
+The same gate/fault/reentry checks apply to clock service. A closed raw gate
+pauses that service and retains its state, without assuming how the raw gate
+is physically coupled to the oscillator.
 
 A control run against the validated component library reproduces all 714
 prior conditional trace lines. At IOP `0x79e4`, the guest has opened gate
@@ -68,11 +82,22 @@ reset caller or establish whole-kernel advancement. Synthetic tests cover
 separate reset domains, width/value refusals, IOP hold/reset and capability
 lifetime. The genuine audio-register boundary remains unchanged.
 
+A subsequent conditional run with the board attachment completes reset mask
+7 through explicit service, then stops at original IOP `0x7714` reading
+`0x8000002c`. It preserves all 544 earlier trace lines before the old stop.
+The original `0x7710` setter, `0x7734` stable getter, `0x6fa8` bounded poll and
+`0x768c` divider routine establish the next clock-register use. A separate
+32-case probe reproduces the clock read refusal before clock implementation.
+All earlier audio, PMU, NAND and firmware-handoff hypotheses still apply.
+
 The register layout is checked against the matching target instructions and
 the [Linux v2.6.28 SDHCI definitions](https://github.com/torvalds/linux/blob/4a6908a3a050aacc9c3a2f36b276b46c0629ad91/drivers/mmc/host/sdhci.h).
 The [Microchip SDMMC reset description](https://onlinedocs.microchip.com/oxy/GUID-4D282FC5-82FC-4934-8BAD-D4A5D8422E6C-en-US-7/GUID-A9EA9B00-152F-4DD1-8092-0422D92B3F8A.html)
 provides a generic reset-domain reference. Neither source establishes this
 target's physical clock, timing, capabilities or card state.
+The [TI SDMMC register reference](https://software-dl.ti.com/simplelink/esd/simplelink_wifi_sdk/10.10.00.18/exports/docs/driverlib/cc35xx/register_descriptions/SDMMC.html)
+also distinguishes read-only internal-clock status from enable controls.
+Its different offset, divider, clock sources and reset quirks are not imported.
 
 ## IOP access to shared NAND controllers
 

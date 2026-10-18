@@ -8,7 +8,7 @@ static unsigned passed,failed;
 #define CHECK(x) do {if(x)passed++;else {failed++;printf("FAIL %s:%d: %s\n",__func__,__LINE__,#x);}}while(0)
 static const struct {uint32_t offset,value;unsigned size;} registers[]={
     {0x00,0x12345678,4},{0x04,0x7200,2},{0x06,7,2},{0x08,0x89abcdef,4},
-    {0x0c,0x37,2},{0x28,3,1},{0x2e,14,1},
+    {0x0c,0x37,2},{0x28,3,1},{0x2c,0x8001,2},{0x2e,14,1},
     {0x34,0x1ff,2},{0x36,0x1ff,2},{0x38,0x1ff,2},{0x3a,0x1ff,2}
 };
 static uint32_t read_reg(const s5l8920_sdhc_t *s,uint32_t off,unsigned size) {
@@ -83,6 +83,7 @@ static void test_register_refusals(void) {
     }
     const struct {unsigned off,size;uint32_t value;} bad[]={
         {4,2,0x8000},{6,2,0x10000},{0xc,2,8},{0x28,1,4},{0x28,1,0x100},
+        {0x2c,2,8},{0x2c,2,0x40},{0x2c,2,0x10000},{0x2c,2,0x300},
         {0x2e,1,15},{0x2f,1,8},{0x2f,1,0x100},{0x30,2,0x200},
         {0x32,2,0x200},{0x34,2,0x8000},{0x36,2,0x200},{0x38,2,0x8000},{0x3a,2,0x200}
     };
@@ -96,6 +97,57 @@ static void test_register_refusals(void) {
     s=(s5l8920_sdhc_t){0};uint32_t out=7;
     CHECK(!s5l8920_sdhc_read(&s,0x2f,1,&out) && out==7);
     CHECK(!s5l8920_sdhc_write(&s,0x2f,1,1) && !s5l8920_sdhc_service(&s,true));
+}
+
+static void test_clock_progress(void) {
+    s5l8920_sdhc_t s={0};CHECK(!s5l8920_sdhc_clock_service(&s,true));
+    CHECK(!s5l8920_sdhc_clock_service(NULL,true));CHECK(s5l8920_sdhc_init(&s));
+    CHECK(read_reg(&s,0x2c,2)==0);
+    CHECK(s5l8920_sdhc_write(&s,0x2c,2,2)); /* Software cannot assert status. */
+    CHECK(read_reg(&s,0x2c,2)==0);
+    CHECK(s5l8920_sdhc_clock_service(&s,true) && !s.clock_stable);
+    for(unsigned div=0;div<256;div++) {
+        uint32_t request=(div<<8)|1u;s5l8920_sdhc_t before=s;
+        if(div && (div&(div-1u))) {
+            CHECK(!s5l8920_sdhc_write(&s,0x2c,2,request));
+            CHECK(!memcmp(&s,&before,sizeof s));continue;
+        }
+        CHECK(s5l8920_sdhc_write(&s,0x2c,2,request|2u));
+        CHECK(read_reg(&s,0x2c,2)==request && !s.clock_stable);
+        before=s;
+        for(unsigned n=0;n<4;n++) {
+            CHECK(read_reg(&s,0x2c,2)==request);
+            CHECK(s5l8920_sdhc_service(&s,true)); /* Reset service cannot stabilize. */
+            CHECK(s5l8920_sdhc_clock_service(&s,false));
+            CHECK(!memcmp(&s,&before,sizeof s));
+        }
+        CHECK(s5l8920_sdhc_clock_service(&s,true));
+        CHECK(read_reg(&s,0x2c,2)==(request|2u));
+        CHECK(s5l8920_sdhc_write(&s,0x2c,2,request)); /* Clearing RO bit cannot erase it. */
+        CHECK(read_reg(&s,0x2c,2)==(request|2u));
+        CHECK(s5l8920_sdhc_write(&s,0x2c,2,request|6u));
+        CHECK(read_reg(&s,0x2c,2)==(request|6u));
+        CHECK(s5l8920_sdhc_clock_service(&s,false));
+        CHECK(read_reg(&s,0x2c,2)==(request|4u));
+        CHECK(s5l8920_sdhc_clock_service(&s,true) && s.clock_stable);
+        CHECK(s5l8920_sdhc_write(&s,0x2c,2,(request&~1u)|6u));
+        CHECK(read_reg(&s,0x2c,2)==((request&~1u)|4u));
+        CHECK(s5l8920_sdhc_clock_service(&s,true) && !s.clock_stable);
+    }
+    CHECK(s5l8920_sdhc_write(&s,0x2c,2,0x101));
+    CHECK(s5l8920_sdhc_clock_service(&s,true) && s.clock_stable);
+    CHECK(s5l8920_sdhc_write(&s,0x2c,2,0x203));
+    CHECK(read_reg(&s,0x2c,2)==0x201); /* Divider change invalidates readiness. */
+    for(unsigned mask=1;mask<8;mask++) {
+        CHECK(s5l8920_sdhc_write(&s,0x2c,2,0x105));
+        CHECK(s5l8920_sdhc_clock_service(&s,true) && s.clock_stable);
+        CHECK(s5l8920_sdhc_write(&s,0x2f,1,mask));s5l8920_sdhc_t pending=s;
+        CHECK(s5l8920_sdhc_clock_service(&s,false));
+        CHECK(s5l8920_sdhc_clock_service(&s,true) && !memcmp(&s,&pending,sizeof s));
+        CHECK(!s5l8920_sdhc_write(&s,0x2c,2,0) && !memcmp(&s,&pending,sizeof s));
+        CHECK(s5l8920_sdhc_service(&s,true));
+        CHECK(read_reg(&s,0x2c,2)==((mask&1u)?0u:0x107u));
+    }
 }
 
 static s5l8920_iop_t iop;
@@ -197,6 +249,6 @@ static void test_bus_shape(void) {
     }
 }
 int main(void) {
-    test_reset_domains();test_register_refusals();test_iop_access();test_bus_shape();
+    test_reset_domains();test_register_refusals();test_clock_progress();test_iop_access();test_bus_shape();
     printf("s5l8920_sdhc: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

@@ -79,7 +79,7 @@ static void test_iop_refusals(void) {
         if(condition==1)wr(GATE,0);
         if(condition==2)board.clock_gate[S5L8920_SDHC_GATE].configured=false;
         if(condition==3)board.clock_gate[S5L8920_SDHC_GATE].value=0x8000000f;
-        if(condition==4)address=REG(0x2c); /* No clock-stable register fabrication. */
+        if(condition==4)address=REG(0x24); /* No fabricated card-present state. */
         if(condition==5)opcode=0xe5901000; /* Word crossing reset byte is unsupported. */
         if(condition==6) {opcode=0xe5c01000;value=8;}
         if(condition==7)address=REG(0x1000);
@@ -96,7 +96,7 @@ static void test_iop_refusals(void) {
 }
 static void test_ap_refusals(void) {
     const struct {uint32_t off,value;unsigned size;bool write;} bad[]={
-        {0x2f,0,2,false},{0x2f,0,4,false},{0x2c,0,2,false},
+        {0x2f,0,2,false},{0x2f,0,4,false},{0x2c,0,4,false},{0x2c,8,2,true},
         {0x40,0,4,false},{0x0e,1,2,true},{0x2f,8,1,true},{0xfff,0,4,true}
     };
     for(unsigned n=0;n<sizeof bad/sizeof bad[0];n++) {
@@ -113,7 +113,8 @@ static void test_ap_refusals(void) {
         CHECK(board.bus_failure.reason && board.bus_failure.address==a && board.bus_failure.size==bad[n].size);
         CHECK(!memcmp(&sdhc,&before,sizeof sdhc) && !memcmp(&cpu,&iop.cpu,sizeof cpu));
         s5l8920_bus_failure_t failure=board.bus_failure;
-        CHECK(!s5l8920_sdhc_board_service(&board,true) && step()==ARM_HALT);
+        CHECK(!s5l8920_sdhc_board_service(&board,true) &&
+              !s5l8920_sdhc_clock_board_service(&board,true) && step()==ARM_HALT);
         CHECK(!memcmp(&failure,&board.bus_failure,sizeof failure));
     }
     for(unsigned condition=0;condition<3;condition++) {
@@ -153,7 +154,49 @@ static void test_lifetime(void) {
     CHECK(!memcmp(&pending,&sdhc,sizeof sdhc));board.fmi[0]=NULL;
     CHECK(s5l8920_sdhc_board_service(&board,true) && !sdhc.reset_pending);
 }
+static void test_shared_clock(void) {
+    init(false);
+    CHECK(!s5l8920_sdhc_clock_board_service(NULL,true));
+    CHECK(!s5l8920_sdhc_clock_board_service(&board,true));
+    CHECK(s5l8920_sdhc_attach(&board,&sdhc));
+    board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;
+    instruction(0xe1c010b0,REG(0x2c),0x101);
+    CHECK(step()==ARM_OK && board.bus.read16(&board,REG(0x2c))==0x101);
+    arm_cpu_t ap=board.cpu,peer=iop.cpu;uint64_t ticks=board.timebase_ticks;
+    CHECK(s5l8920_sdhc_board_service(&board,true) && !sdhc.clock_stable);
+    CHECK(s5l8920_sdhc_clock_board_service(&board,false) && !sdhc.clock_stable);
+    wr(GATE,0);s5l8920_sdhc_t stopped=sdhc;
+    CHECK(s5l8920_sdhc_clock_board_service(&board,true) && !memcmp(&stopped,&sdhc,sizeof sdhc));
+    wr(GATE,15);
+    CHECK(s5l8920_sdhc_clock_board_service(&board,true) && sdhc.clock_stable);
+    CHECK(!memcmp(&ap,&board.cpu,sizeof ap) && !memcmp(&peer,&iop.cpu,sizeof peer));
+    CHECK(board.timebase_ticks==ticks && !iop.bytes_written);
+    instruction(0xe1d010b0,REG(0x2c),0);
+    CHECK(step()==ARM_OK && iop.cpu.r[1]==0x103);
+    board.bus.write16(&board,REG(0x2c),0x107);
+    CHECK(board.bus.read16(&board,REG(0x2c))==0x107);
+    wr(GATE,0);stopped=sdhc;
+    CHECK(s5l8920_sdhc_clock_board_service(&board,false) && !memcmp(&stopped,&sdhc,sizeof sdhc));
+    wr(GATE,15);CHECK(s5l8920_sdhc_clock_board_service(&board,false));
+    CHECK(board.bus.read16(&board,REG(0x2c))==0x105);
+    for(unsigned guard=0;guard<5;guard++) {
+        stopped=sdhc;
+        if(guard==0)board.clock_gate[S5L8920_SDHC_GATE].configured=false;
+        if(guard==1)board.clock_gate[S5L8920_SDHC_GATE].value=0x8000000f;
+        if(guard==2)board.clock_gate[S5L8920_SDHC_GATE].value=1;
+        if(guard==3)iop.servicing=true;
+        s5l8920_fmi_t fmi={.initialized=true,.servicing=true};
+        if(guard==4)board.fmi[0]=&fmi;
+        CHECK(!s5l8920_sdhc_clock_board_service(&board,true) && !memcmp(&stopped,&sdhc,sizeof sdhc));
+        board.clock_gate[S5L8920_SDHC_GATE].configured=true;
+        board.clock_gate[S5L8920_SDHC_GATE].value=15;iop.servicing=false;board.fmi[0]=NULL;
+    }
+    CHECK(s5l8920_sdhc_clock_board_service(&board,true) && sdhc.clock_stable);
+    instruction(0xe1c010b0,REG(0x2c),0);CHECK(step()==ARM_OK);
+    CHECK(board.bus.read16(&board,REG(0x2c))==0 && !board.bus_failure.reason);
+    CHECK(board.cpu.excl_valid && board.cpu.a8_excl_size==4 && !iop.bytes_written);
+}
 int main(void) {
-    test_shared_state();test_iop_refusals();test_ap_refusals();test_lifetime();s5l8920_free(&board);
+    test_shared_state();test_iop_refusals();test_ap_refusals();test_lifetime();test_shared_clock();s5l8920_free(&board);
     printf("s5l8920_sdhc_board: %u passed, %u failed\n",passed,failed);return failed?1:0;
 }

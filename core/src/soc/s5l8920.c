@@ -1634,13 +1634,20 @@ bool s5l8920_sdhc_attach(s5l8920_t *m,s5l8920_sdhc_t *sdhc) {
     if(sdhc->reset_pending)return false;
     m->sdhc=sdhc;return true;
 }
-bool s5l8920_sdhc_board_service(s5l8920_t *m,bool clock_available) {
+static bool sdhc_service_gate(s5l8920_t *m,uint32_t *gate) {
     if(!m || !m->ram || !m->sdhc || !m->sdhc->initialized || access_failed(m) ||
        endpoint_servicing(m) || (m->iop && m->iop->servicing) ||
        !m->clock_gate[S5L8920_SDHC_GATE].configured)return false;
-    uint32_t gate=m->clock_gate[S5L8920_SDHC_GATE].value;
-    if((gate&0x80000000u) || ((gate&15u)!=0u && (gate&15u)!=15u))return false;
+    *gate=m->clock_gate[S5L8920_SDHC_GATE].value;
+    return !(*gate&0x80000000u) && ((*gate&15u)==0u || (*gate&15u)==15u);
+}
+bool s5l8920_sdhc_board_service(s5l8920_t *m,bool clock_available) {
+    uint32_t gate;if(!sdhc_service_gate(m,&gate))return false;
     return s5l8920_sdhc_service(m->sdhc,clock_available && (gate&15u)==15u);
+}
+bool s5l8920_sdhc_clock_board_service(s5l8920_t *m,bool source_available) {
+    uint32_t gate;if(!sdhc_service_gate(m,&gate))return false;
+    return !(gate&15u) || s5l8920_sdhc_clock_service(m->sdhc,source_available);
 }
 
 bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {

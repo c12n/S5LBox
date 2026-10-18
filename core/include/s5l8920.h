@@ -777,7 +777,7 @@ bool s5l8920_fmi_data_board_service(s5l8920_t *m,unsigned bank,
                                    s5l8920_fmi_data_fn receive,void *owner);
 bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
 
-/* Optional caller-owned SDHC reset/preparation component on80000000/1000.
+/* Optional caller-owned SDHC reset/clock/preparation component on80000000/1000.
  * The target platform maps logical gate10 to raw23. Attachment requires an
  * initialized peer, a configured gate with bit31 clear, no pending reset,
  * fault or active IOP/endpoint service. Keep the peer alive and exclusively
@@ -787,10 +787,14 @@ bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
  * Software reset progresses only through explicit service with a supplied
  * controller clock; a closed gate pauses it. The owner supplies clock
  * availability independently of CPU/time. Selector words do not establish
- * frequency or phase. No raw-gate reset coupling, IRQ, card or clock-stable
- * response is implemented. Accesses do not execute commands or advance time. */
+ * frequency or phase. Separate clock service below updates internal-clock
+ * readiness from an explicit source input; reset service never calls it.
+ * A closed raw gate pauses clock service and retains its state, without
+ * inferring an oscillator/reset coupling. No raw-gate reset coupling, IRQ or
+ * card response is implemented. Accesses do not execute commands or advance time. */
 bool s5l8920_sdhc_attach(s5l8920_t *m,s5l8920_sdhc_t *sdhc);
 bool s5l8920_sdhc_board_service(s5l8920_t *m,bool clock_available);
+bool s5l8920_sdhc_clock_board_service(s5l8920_t *m,bool source_available);
 
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.
