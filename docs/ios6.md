@@ -229,8 +229,29 @@ completion, status, interrupt, DMA or time effects. A producer must provide
 independently backed results; fixtures may supply explicitly labeled inputs.
 There is no production ECC producer yet. Pending command/data or byte-strobe
 activity refuses clears. AP and IOP access share the queue, retain gate and
-reset checks, and refuse during endpoint callbacks. Remaining ECC control
-and pending registers stay unsupported.
+reset checks, and refuse during endpoint callbacks. ECC control remains
+unsupported; pending access has a separate optional policy.
+
+The pending register at `0x810` supports an explicitly selected latch for
+the observed `0x68` bit set. Selection and controller reset leave these bits
+unknown. Reads refuse until every supported bit is established. Guest
+write-one-to-clear acknowledgements establish cleared bits; independently
+supplied events establish set bits. A zero write or event establishes
+nothing. Unsupported bits refuse atomically. Pending command, byte and data
+work continue independently; acknowledgement does not complete or cancel them.
+Reset retains policy selection while invalidating pending knowledge; explicit
+init discards selection. The result queue and pending latch are independent.
+
+Original IOP helper `0x3964` writes `0x68` at `0x396c`, after the result-buffer
+clear. The firmware names this register PND in its diagnostic. Matching iBoot
+writes the same acknowledgement, and the older H2FMI implementation reads
+pending state and writes it back. The referenced S5L8930 model also clears
+written-one pending bits. These support the bounded acknowledgement policy,
+without proving a complete silicon bit layout, reset value or event causes.
+No zero reset status is supplied. Readback zero after a full acknowledgement
+comes from the guest clearing the supported bits. No automatic ECC event
+producer, NAND readiness, mask polarity, interrupt delivery, DMA or timing
+is inferred. Nonzero ECC masks remain unavailable.
 
 Address registers `0x418`, `0x41c` and `0x420` retain explicitly programmed
 ADDR0, ADDR1 and ANUM values. Matching IOP firmware names and reads these fields

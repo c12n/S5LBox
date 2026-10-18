@@ -18,10 +18,12 @@ bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted) {
         uint64_t commands=f->commands,bytes=f->bytes_latched,samples=f->status_samples;
         uint64_t stream=f->stream_bytes,sectors=f->sectors_completed;
         uint32_t *ecc_results=f->ecc_results;size_t ecc_capacity=f->ecc_capacity;
+        bool ecc_pending_configured=f->ecc_pending_configured;
         (void)s5l8920_fmi_init(f);f->commands=commands;f->bytes_latched=bytes;
         f->status_samples=samples;
         f->stream_bytes=stream;f->sectors_completed=sectors;
         f->ecc_results=ecc_results;f->ecc_capacity=ecc_capacity;
+        f->ecc_pending_configured=ecc_pending_configured;
     }
     f->reset_asserted=asserted;return true;
 }
@@ -54,6 +56,18 @@ bool s5l8920_fmi_ecc_supply(s5l8920_fmi_t *f,unsigned corrected_bits,bool failed
     size_t tail=(f->ecc_head+f->ecc_count)%f->ecc_capacity;
     f->ecc_results[tail]=(corrected_bits<<16)|(failed?1u:0u);f->ecc_count++;
     return true;
+}
+bool s5l8920_fmi_ecc_pending_configure(s5l8920_fmi_t *f) {
+    if(!f || !f->initialized || f->servicing)return false;
+    if(f->ecc_pending_configured)return true;
+    if(f->enabled || f->reset_asserted || f->programmed || f->pending || data_busy(f) ||
+       f->commands || f->bytes_latched || f->stream_bytes)return false;
+    f->ecc_pending_configured=true;return true;
+}
+bool s5l8920_fmi_ecc_pending_supply(s5l8920_fmi_t *f,uint32_t events) {
+    if(!usable(f) || !f->enabled || !f->ecc_pending_configured ||
+       (events&~S5L8920_FMI_ECC_PENDING_BITS))return false;
+    f->ecc_pending|=events;f->ecc_pending_known|=events;return true;
 }
 bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     if(!usable(f) || !f->enabled || !value)return false;
@@ -94,6 +108,9 @@ bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
         if(!f->ecc_clear_seen || !ecc_queue_valid(f) || !f->ecc_count)return false;
         *value=f->ecc_results[f->ecc_head];
         f->ecc_head=(f->ecc_head+1u)%f->ecc_capacity;f->ecc_count--;return true;
+    case 0x810u:
+        if(!f->ecc_pending_configured || f->ecc_pending_known!=S5L8920_FMI_ECC_PENDING_BITS)return false;
+        *value=f->ecc_pending;return true;
     default:return false;
     }
 }
@@ -108,6 +125,10 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         f->timing=value;f->programmed|=TIMING;return true;
     }
     if(!f->enabled)return false;
+    if(offset==0x810u) {
+        if(!f->ecc_pending_configured || (value&~S5L8920_FMI_ECC_PENDING_BITS))return false;
+        f->ecc_pending&=~value;f->ecc_pending_known|=value;return true;
+    }
     if(offset==0x444u) {
         if((value&~0x2bu) && value!=0x31ffffu)return false;
         f->status&=~value;return true;

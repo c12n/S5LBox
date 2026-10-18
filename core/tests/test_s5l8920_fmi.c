@@ -520,6 +520,8 @@ static void test_board(void) {
     board.bus.write32(&board,reg(0,0x815),0);
     CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
     (void)board.bus.read32(&board,reg(0,0x810));
+    CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
+    (void)board.bus.read32(&board,reg(0,0x808));
     CHECK(board.bus_failure.reason==S5L8920_BUS_UNMAPPED && !memcmp(&cold,&fmi,sizeof cold));s5l8920_clear_bus_failure(&board);
     bw(0,0x408,0);bw(0,0x40c,2);bw(0,0x414,0x90);bw(0,0x418,0);bw(0,0x420,0);bw(0,0x410,9);
     s5l8920_fmi_t before=fmi;board.cpu.excl_valid=true;board.cpu.a8_excl_size=4;board.timebase_ticks=123;

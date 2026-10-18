@@ -12,6 +12,8 @@
 #define S5L8920_FMI_GATE 0x26u
 #define S5L8920_FMI_ID_SIZE 8u
 #define S5L8920_FMI_NO_CHIP 8u
+/* Observed pending acknowledgement bits; no names for unproven event causes. */
+#define S5L8920_FMI_ECC_PENDING_BITS UINT32_C(0x68)
 
 /* A transient device capability for one selected chip (0..7), or NO_CHIP
  * when the controller clocks a command with no chip line selected. Commands are
@@ -84,6 +86,8 @@ typedef struct {
     uint32_t *ecc_results;
     size_t ecc_capacity,ecc_head,ecc_count;
     bool ecc_clear_seen;
+    uint32_t ecc_pending,ecc_pending_known;
+    bool ecc_pending_configured;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -94,8 +98,9 @@ typedef struct {
  * reset, pending work and an active byte strobe still refuse timing writes.
  * ECC mask 0x814 retains only the observed zero programming after mode enable;
  * readback requires that explicit write. Reset invalidates its programming.
- * Other mask values, ECC pending/status, mask polarity and ECC IRQ effects
- * are not modeled. Mask programming never completes or acknowledges a command.
+ * Other mask values, mask polarity and ECC IRQ effects are not modeled.
+ * Pending bits require the separate explicit policy below. Mask programming
+ * never completes or acknowledges a command.
  * Address staging retains the observed ADDR0/ADDR1/ANUM fields at 0x418/41c/420.
  * ADDR0 accepts one-byte ID addresses or zero-column page rows in bits 16..31;
  * ADDR1 accepts the high row byte, and ANUM accepts 0 or 4. Readback requires
@@ -133,6 +138,24 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
  * No ECC status/IRQ, chip readiness, command completion, time or DMA effect. */
 bool s5l8920_fmi_ecc_configure(s5l8920_fmi_t *f,uint32_t *storage,size_t capacity);
 bool s5l8920_fmi_ecc_supply(s5l8920_fmi_t *f,unsigned corrected_bits,bool failed);
+
+/* Optional functional pending-latch policy for the observed 0x68 bit set.
+ * Select before guest programming; identical repetition preserves state.
+ * Selection and reset leave all supported bits UNKNOWN, not implicitly clear.
+ * A word810 acknowledgement clears its written-one bits and makes those bits
+ * known. Supply ORs independently backed event bits and makes those bits known.
+ * Readback requires every supported bit known; reads never generate events.
+ * Unsupported bits refuse atomically. A zero acknowledgement/event changes
+ * nothing, including knowledge. This is a bounded software-backed policy,
+ * not a silicon reset-value, complete bit-layout or event-cause assertion.
+ * Controller reset retains selection but invalidates all pending knowledge;
+ * init discards selection. Mode enable is required for reads, acks and events.
+ * Calls are serialized between instructions and endpoint service. Pending
+ * command/data/byte work is independent and is not completed or cancelled.
+ * No result-queue, ECC-mask, NAND-status, INTPND, IRQ, DMA or time effects.
+ * There is no automatic event producer; the owner must supply backed events. */
+bool s5l8920_fmi_ecc_pending_configure(s5l8920_fmi_t *f);
+bool s5l8920_fmi_ecc_pending_supply(s5l8920_fmi_t *f,uint32_t events);
 
 /* One explicit functional quantum completes one endpoint command or latches
  * one previously supplied ID byte. Reads never service work. The 0x50/0 byte
