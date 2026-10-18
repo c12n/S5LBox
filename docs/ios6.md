@@ -630,6 +630,24 @@ product plus the optional addend. The S forms update N/Z and preserve V;
 this functional model retains C for ARMv4's architecturally unknown carry
 result. Instruction retirement counts do not model multiplier cycle timing.
 
+The A32 `UMULL`, `UMLAL`, `SMULL` and `SMLAL` forms use the existing
+64-bit arithmetic, following
+[ARM DDI0100I, A4.1.76/87/128/129](https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a).
+Accumulation wraps at 64 bits; S forms set N from bit63 and Z from the
+complete result. The model retains ARMv4's unpredictable C/V values.
+PC operands and equal destination registers are refused. This partial
+profile also conservatively refuses a first source equal to either
+destination: the manual relaxes that older restriction for known
+implementations, but this profile does not identify one. Second-source
+overlap is supported; ARMv6 and ARMv7 behavior is unchanged.
+
+An isolated original IOP routine at `0x6e00` multiplies its 64-bit argument
+by24. Before long-multiply support it stopped at `UMULL` at `0x6e0c` after
+three instructions. Eight explicit arguments across all16 flag states now
+return the correct wrapped result after all six original instructions,
+without data access or device responses. This is original-code execution
+evidence, not whole-kernel progress or a multiplier timing measurement.
+
 The profile implements A32 `STRH`, `LDRH`, `LDRSB` and `LDRSH` using the
 existing memory-transfer paths, following
 [ARM DDI0100I, A4.1.28-30, A4.1.104 and A5.3](https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a).
@@ -650,7 +668,7 @@ forms, sign boundaries, aliases, failed conditions and bus refusals. IOP
 regressions exercise shared RAM, private cache stores and real clean writeback;
 timer and FMI halfword accesses still fail at their word-only device boundary.
 
-Thumb execution, long multiply, swap, doubleword transfers, SWI and
+Thumb execution, swap, doubleword transfers, SWI and
 coprocessors remain unavailable in this profile. Later ARM extensions stop
 before side effects; failed conditions still skip instructions. Unsupported
 instructions return `ARM_UNDEFINED` to the host without retirement. No CPU

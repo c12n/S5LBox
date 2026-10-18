@@ -3516,7 +3516,8 @@ static arm_status_t exec_multiply_long(arm_cpu_t *c, uint32_t pc, uint32_t insn)
     if (S) {
         set_flag(c, ARM_CPSR_N, (res >> 63) & 1u);
         set_flag(c, ARM_CPSR_Z, res == 0);
-        /* C and V are unpredictable after a long multiply on ARMv6. */
+        /* ARMv5+ preserves C/V. For ARMv4's unpredictable C/V result,
+         * this functional model retains their previous values as well. */
     }
     return ARM_OK;
 }
@@ -4750,6 +4751,15 @@ static bool v4t_a32_supported(const arm_cpu_t *c, uint32_t insn) {
          * MUL's unused addend field must have its defined zero encoding. */
         return d!=15u && s!=15u && m!=15u && d!=m &&
             ((insn&0x00200000u) ? a!=15u : a==0u);
+    }
+    if ((insn & 0x0f8000f0u) == 0x00800090u) {          /* long multiply */
+        unsigned hi=(insn>>16)&15u, lo=(insn>>12)&15u;
+        unsigned s=(insn>>8)&15u, m=insn&15u;
+        /* Retain the conservative pre-v6 first-source overlap boundary.
+         * DDI0100I relaxes it for known implementations; this partial
+         * generic profile does not identify one of those implementations. */
+        return hi!=15u && lo!=15u && s!=15u && m!=15u &&
+            hi!=lo && hi!=m && lo!=m;
     }
     if (group == 0u && (insn & 0x90u) == 0x90u) {
         unsigned sh=(insn>>5)&3u;

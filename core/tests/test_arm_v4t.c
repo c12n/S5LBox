@@ -112,7 +112,7 @@ static void test_boundaries(void) {
         0xf5d0f000u, /* PLD */ 0xe320f003u, /* WFI */
         0xee100f10u, /* MRC CP15 */ 0xee010f10u, /* MCR CP15 */
         0xeeb00a40u, /* VFP */ 0xf2000840u, /* NEON */
-        0xe0810392u, /* UMULL */ 0xe1012090u, /* SWP */
+        0xe1012090u, /* SWP */
         0xe1c120f0u, /* STRD */ 0xef000000u, /* SWI */
         0xe10ff000u, /* MRS pc */ 0xe128f00fu /* MSR flags,pc */
     };
@@ -207,6 +207,82 @@ static void test_multiply(void) {
         CHECK(arm_step(&c)==ARM_OK && c.r[1]==0xfffffffeu && c.r[15]==4);
         CHECK(c.cpsr==((before&~ARM_CPSR_Z)|ARM_CPSR_N));
     }
+}
+static uint32_t long_multiply(unsigned kind, bool set, unsigned lo,
+                              unsigned hi, unsigned m, unsigned s) {
+    return 0xe0800090u | (kind<<21) | ((uint32_t)set<<20) |
+        (hi<<16) | (lo<<12) | (s<<8) | m;
+}
+static void test_multiply_long(void) {
+    /* Independently calculated products: signed high words, zero low words,
+     * and values whose product crosses both the 32- and 63-bit boundaries. */
+    static const struct { uint32_t m,s; uint64_t u,i; } cases[]={
+        {0,0xffffffffu,0,0},
+        {1,1,1,1},
+        {0xffffffffu,2,UINT64_C(0x1fffffffe),UINT64_C(0xfffffffffffffffe)},
+        {0xffffffffu,0xffffffffu,UINT64_C(0xfffffffe00000001),1},
+        {0x80000000u,2,UINT64_C(0x100000000),UINT64_C(0xffffffff00000000)},
+        {0x80000000u,0x80000000u,UINT64_C(0x4000000000000000),UINT64_C(0x4000000000000000)},
+        {0x7fffffffu,0x7fffffffu,UINT64_C(0x3fffffff00000001),UINT64_C(0x3fffffff00000001)},
+        {0x80000000u,0xffffffffu,UINT64_C(0x7fffffff80000000),UINT64_C(0x80000000)},
+        {0x10000u,0x10000u,UINT64_C(0x100000000),UINT64_C(0x100000000)}
+    };
+    static const uint64_t addends[]={0,UINT64_C(0xffffffff),UINT64_MAX,UINT64_C(0x8000000000000000)};
+    const arm_arch_t profiles[]={PROFILE,ARM_ARCH_V6_ARM1176,ARM_ARCH_V7_CORTEX_A8,ARM_ARCH_V7_SWIFT};
+    for(unsigned p=0;p<4;p++)for(unsigned n=0;n<sizeof cases/sizeof cases[0];n++)
+    for(unsigned kind=0;kind<4;kind++)for(unsigned set=0;set<2;set++)
+    for(unsigned flags=0;flags<16;flags++)for(unsigned a=0;a<(kind&1u?4u:1u);a++) {
+        init(long_multiply(kind,set!=0,0,1,2,3));
+        CHECK(arm_reset_profile(&c,&bus,profiles[p]));
+        c.r[0]=(uint32_t)addends[a];c.r[1]=(uint32_t)(addends[a]>>32);
+        c.r[2]=cases[n].m;c.r[3]=cases[n].s;c.cpsr|=flags<<28;
+        c.excl_valid=true;c.excl_addr=0x300;c.a8_excl_size=4;
+        arm_cpu_t expected=c;
+        uint64_t result=(kind&2u?cases[n].i:cases[n].u)+(kind&1u?addends[a]:0);
+        expected.r[0]=(uint32_t)result;expected.r[1]=(uint32_t)(result>>32);
+        expected.r[15]=4;expected.cycles=1;
+        if(set)expected.cpsr=(expected.cpsr&~(ARM_CPSR_N|ARM_CPSR_Z))|
+            ((result>>63)?ARM_CPSR_N:0)|(result?0:ARM_CPSR_Z);
+        CHECK(arm_step(&c)==ARM_OK);
+        CHECK(!memcmp(&c,&expected,sizeof c));
+        CHECK(reads==1 && read_size==4 && last_read==0 && writes==0 && !fault);
+    }
+    /* All sources and the addend must be read before either destination is
+     * written. First-source aliases remain refused only on the v4T profile. */
+    static const struct { unsigned m,s; uint64_t product; } aliases[]={
+        {2,0,55},{2,1,77},{2,2,121},{0,2,55},{1,2,77},{0,1,35}
+    };
+    for(unsigned p=0;p<4;p++)for(unsigned n=0;n<6;n++)for(unsigned kind=0;kind<4;kind++) {
+        init(long_multiply(kind,true,0,1,aliases[n].m,aliases[n].s));
+        CHECK(arm_reset_profile(&c,&bus,profiles[p]));
+        c.r[0]=5;c.r[1]=7;c.r[2]=11;c.cpsr|=ARM_CPSR_C|ARM_CPSR_V|ARM_CPSR_N|ARM_CPSR_Z;
+        arm_cpu_t expected=c;
+        bool refuse=p==0 && aliases[n].m<2;
+        uint64_t result=aliases[n].product+(kind&1u?UINT64_C(0x700000005):0);
+        if(!refuse) {
+            expected.r[0]=(uint32_t)result;expected.r[1]=(uint32_t)(result>>32);
+            expected.cpsr&=~(ARM_CPSR_N|ARM_CPSR_Z);expected.r[15]=4;expected.cycles=1;
+        }
+        CHECK(arm_step(&c)==(refuse?ARM_UNDEFINED:ARM_OK));
+        CHECK(!memcmp(&c,&expected,sizeof c) && reads==1 && writes==0 && !fault);
+    }
+    /* PC in each role and equal destinations refuse atomically, including
+     * S/accumulate variants. EQ with Z clear skips those same encodings. */
+    const unsigned invalid[][4]={{15,1,2,3},{0,15,2,3},{0,1,15,3},{0,1,2,15},{1,1,2,3},{0,1,0,3},{0,1,1,3}};
+    for(unsigned n=0;n<7;n++)for(unsigned kind=0;kind<4;kind++)
+    for(unsigned set=0;set<2;set++)for(unsigned skip=0;skip<2;skip++) {
+        uint32_t insn=long_multiply(kind,set!=0,invalid[n][0],invalid[n][1],invalid[n][2],invalid[n][3]);
+        init(skip?insn&0x0fffffffu:insn);
+        c.r[0]=5;c.r[1]=7;c.r[2]=11;c.r[3]=13;c.excl_valid=true;
+        arm_cpu_t expected=c;
+        if(skip){expected.r[15]=4;expected.cycles=1;}
+        CHECK(arm_step(&c)==(skip?ARM_OK:ARM_UNDEFINED));
+        CHECK(!memcmp(&c,&expected,sizeof c) && reads==1 && writes==0 && !fault);
+    }
+    /* Existing bus failure wins before instruction fetch or multiplication. */
+    init(long_multiply(3,true,0,1,2,3));c.r[2]=11;c.r[3]=13;fault=true;
+    arm_cpu_t before=c;
+    CHECK(arm_step(&c)==ARM_HALT && !memcmp(&c,&before,sizeof c) && !reads && !writes);
 }
 static void test_bus_failure(void) {
     const uint32_t insns[] = {0xe5901000u,0xe5801000u,0xe8b00006u};
@@ -338,7 +414,7 @@ int main(void) {
         puts("FAIL: explicit ARMv4T profile is unavailable"); return 1;
     }
     test_reset(); test_bootstrap(); test_pc_loads(); test_boundaries();
-    test_psr_and_irq(); test_multiply(); test_bus_failure();
+    test_psr_and_irq(); test_multiply(); test_multiply_long(); test_bus_failure();
     test_original_halfword_store();
     test_extra_transfers();test_extra_aliases();test_extra_refusals();test_extra_faults();
     printf("arm_v4t: %u passed, %u failed\n",passed,failed);

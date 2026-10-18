@@ -383,10 +383,11 @@ typedef enum {
 
 /* ARM_ARCH_V4T is an explicit little-endian bootstrap profile, not an IOP
  * hardware/revision identification. Currently supported: A32 data processing,
- * MRS/MSR, B/BL/BX, MUL/MLA, byte/word/halfword and block transfers, signed
- * byte/halfword loads, IRQ/FIQ and exception
- * return. MUL/MLA retain the architecturally unknown ARMv4 carry result.
- * Thumb execution, long multiply, swap, doubleword transfers, SWI and all
+ * MRS/MSR, B/BL/BX, MUL/MLA and long multiply, byte/word/halfword and block
+ * transfers, signed byte/halfword loads, IRQ/FIQ and exception return.
+ * MUL/MLA retain the architecturally unknown ARMv4 carry result; long
+ * multiplies retain unknown C/V and refuse first-source/destination overlap.
+ * Thumb execution, swap, doubleword transfers, SWI and all
  * coprocessors stop with ARM_UNDEFINED. There is no CP15/MMU or CPU-ID reply.
  * Reset chooses zero for architecturally indeterminate registers/flags;
  * those values are emulator initialization choices, not measured silicon.
