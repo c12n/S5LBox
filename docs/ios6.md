@@ -198,10 +198,39 @@ enable. Matching controller firmware identifies it by reading `0x810` and
 `0x814` for its ECC pending/mask diagnostic. Original iBoot initialization
 at `0x4ff037f4` writes zero to the mask before setting its object flag.
 Readback requires an explicit write, and reset invalidates that programming.
-Nonzero masks and adjacent ECC registers remain unavailable. Mask polarity,
+Nonzero masks and other ECC registers remain unavailable except for the
+optional result-buffer policy below. Mask polarity,
 ECC processing and interrupt effects are not established; this write neither
 completes nor acknowledges a command. Gate, reset, pending-work, active-byte
 and callback restrictions still apply.
+
+The optional ECC result buffer at `0x80c` uses disjoint caller-owned storage
+selected before guest programming. After mode enable, a word write of `1`
+clears queued results and prepares the buffer; other values refuse. Each
+word read consumes one explicitly supplied result, with corrected-bit count
+in bits 16 through 20 and failure in bit 0. An empty or unselected buffer
+refuses access instead of returning a clean result. Full storage refuses
+new results without discarding old ones. Reset discards results and preparation
+while preserving the host storage selection; explicit init detaches storage.
+The capacity and preserved host selection are functional configuration,
+not measurements of physical FIFO depth or reset retention.
+
+Original IOP `0x5118` and matching iBoot `0x4ff042e6` write `1` after reset.
+The IOP consumer at `0x4968` reads `0x80c` once per result, takes the maximum
+corrected-bit count and writes either that count or failure byte `0xff`.
+The older [S5L8930 H2FMI model](https://github.com/danzatt/QEMU-s5l89xx-port/blob/919b455415703e6fb0ef10878e0b087ed3d282e4/hw/s5l8930_h2fmi.c)
+names its offset `0xc` ECCBUF and clears its buffer on writes. Together these
+support the optional clear/consume policy, but do not establish silicon
+semantics. Its different aperture and automatic clean results are not used.
+No implementation is copied from that model.
+
+This queue performs no ECC computation and supplies no NAND readiness,
+completion, status, interrupt, DMA or time effects. A producer must provide
+independently backed results; fixtures may supply explicitly labeled inputs.
+There is no production ECC producer yet. Pending command/data or byte-strobe
+activity refuses clears. AP and IOP access share the queue, retain gate and
+reset checks, and refuse during endpoint callbacks. Remaining ECC control
+and pending registers stay unsupported.
 
 Address registers `0x418`, `0x41c` and `0x420` retain explicitly programmed
 ADDR0, ADDR1 and ANUM values. Matching IOP firmware names and reads these fields

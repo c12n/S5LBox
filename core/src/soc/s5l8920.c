@@ -80,7 +80,7 @@ static bool fmi_enabled(const s5l8920_t *m,unsigned bank) {
 }
 static bool fmi_register_window(uint32_t offset) {
     return offset<8u || (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
-           (offset>=0x814u && offset<0x818u);
+           (offset>=0x80cu && offset<0x810u) || (offset>=0x814u && offset<0x818u);
 }
 static bool sdhc_address(uint32_t address) {
     return address>=S5L8920_SDHC_BASE && address-S5L8920_SDHC_BASE<S5L8920_SDHC_SIZE;
@@ -428,7 +428,8 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
             fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
         else if(size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
-        else if(!fmi_enabled(m,fmi_bank) || !s5l8920_fmi_read(m->fmi[fmi_bank],fmi_offset,&value))
+        else if(!fmi_enabled(m,fmi_bank) || (fmi_offset==0x80cu && endpoint_servicing(m)) ||
+                !s5l8920_fmi_read(m->fmi[fmi_bank],fmi_offset,&value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
         else return value;
         return 0u;
@@ -664,7 +665,8 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
             fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
         else if(size!=4u || (address&3u))
             fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
-        else if(!fmi_enabled(m,fmi_bank) || !s5l8920_fmi_write(m->fmi[fmi_bank],fmi_offset,value))
+        else if(!fmi_enabled(m,fmi_bank) || (fmi_offset==0x80cu && endpoint_servicing(m)) ||
+                !s5l8920_fmi_write(m->fmi[fmi_bank],fmi_offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }

@@ -3,6 +3,7 @@
 #ifndef S5LBOX_S5L8920_FMI_H
 #define S5LBOX_S5L8920_FMI_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define S5L8920_FMI_BASE UINT32_C(0x81200000)
@@ -79,6 +80,10 @@ typedef struct {
     uint8_t data_fifo[S5L8920_FMI_DATA_STAGING_MAX],spare_fifo[S5L8920_FMI_SPARE_STAGING_MAX];
     bool sector_pending;
     uint64_t stream_bytes,sectors_completed;
+    /* Optional owner-backed functional result queue, not measured FIFO depth. */
+    uint32_t *ecc_results;
+    size_t ecc_capacity,ecc_head,ecc_count;
+    bool ecc_clear_seen;
 } s5l8920_fmi_t;
 
 /* First use requires a zero-initialized object. Init discards all programming.
@@ -108,8 +113,26 @@ typedef struct {
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
-bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value);
+bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value);
 bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
+
+/* Optional functional ECC result-buffer policy. Select disjoint owner storage
+ * before guest programming; identical repetition preserves state. Storage stays
+ * valid until init, which detaches it without freeing it. Controller reset
+ * preserves this host selection but discards results and the clear command.
+ * This storage bound is not a physical FIFO capacity/reset-retention claim.
+ * After mode enable, aligned word80C=1 clears results and opens a new result
+ * sequence. Other values and clears during pending commands/data/byte strobes
+ * refuse. A word read pops one supplied result; an empty/unselected/unprepared
+ * queue refuses without changing output or state. No implicit zero result.
+ * Supply appends one independently backed sector result: corrected count0..31
+ * in bits16..20, failure flag in bit0. Full queues refuse without dropping data.
+ * Calls are serialized between instructions and endpoint service. The owner
+ * must derive results from actual ECC processing or explicit fixture inputs;
+ * this queue neither performs ECC nor generates results from raw NAND bytes.
+ * No ECC status/IRQ, chip readiness, command completion, time or DMA effect. */
+bool s5l8920_fmi_ecc_configure(s5l8920_fmi_t *f,uint32_t *storage,size_t capacity);
+bool s5l8920_fmi_ecc_supply(s5l8920_fmi_t *f,unsigned corrected_bits,bool failed);
 
 /* One explicit functional quantum completes one endpoint command or latches
  * one previously supplied ID byte. Reads never service work. The 0x50/0 byte

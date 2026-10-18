@@ -17,9 +17,11 @@ bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted) {
     if(asserted && !f->reset_asserted) {
         uint64_t commands=f->commands,bytes=f->bytes_latched,samples=f->status_samples;
         uint64_t stream=f->stream_bytes,sectors=f->sectors_completed;
+        uint32_t *ecc_results=f->ecc_results;size_t ecc_capacity=f->ecc_capacity;
         (void)s5l8920_fmi_init(f);f->commands=commands;f->bytes_latched=bytes;
         f->status_samples=samples;
         f->stream_bytes=stream;f->sectors_completed=sectors;
+        f->ecc_results=ecc_results;f->ecc_capacity=ecc_capacity;
     }
     f->reset_asserted=asserted;return true;
 }
@@ -34,7 +36,26 @@ static unsigned selected_chip(const s5l8920_fmi_t *f) {
 static bool data_busy(const s5l8920_fmi_t *f) {
     return f->sector_pending || f->fifo_count[0] || f->fifo_count[1];
 }
-bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
+static bool ecc_queue_valid(const s5l8920_fmi_t *f) {
+    return f->ecc_results && f->ecc_capacity && f->ecc_capacity<=SIZE_MAX/sizeof(uint32_t) &&
+        f->ecc_head<f->ecc_capacity && f->ecc_count<=f->ecc_capacity;
+}
+bool s5l8920_fmi_ecc_configure(s5l8920_fmi_t *f,uint32_t *storage,size_t capacity) {
+    if(!f || !f->initialized || f->servicing || !storage || !capacity ||
+       capacity>SIZE_MAX/sizeof *storage)return false;
+    if(f->ecc_results)return f->ecc_results==storage && f->ecc_capacity==capacity;
+    if(f->enabled || f->reset_asserted || f->programmed || f->pending || data_busy(f) ||
+       f->commands || f->bytes_latched || f->stream_bytes)return false;
+    f->ecc_results=storage;f->ecc_capacity=capacity;return true;
+}
+bool s5l8920_fmi_ecc_supply(s5l8920_fmi_t *f,unsigned corrected_bits,bool failed) {
+    if(!usable(f) || !f->enabled || !f->ecc_clear_seen || !ecc_queue_valid(f) ||
+       f->ecc_count==f->ecc_capacity || corrected_bits>31u)return false;
+    size_t tail=(f->ecc_head+f->ecc_count)%f->ecc_capacity;
+    f->ecc_results[tail]=(corrected_bits<<16)|(failed?1u:0u);f->ecc_count++;
+    return true;
+}
+bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     if(!usable(f) || !f->enabled || !value)return false;
     switch(offset) {
     case 0xcu:
@@ -69,6 +90,10 @@ bool s5l8920_fmi_read(const s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     case 0x814u:
         if(!(f->programmed&ECC_MASK))return false;
         *value=f->ecc_mask;return true;
+    case 0x80cu:
+        if(!f->ecc_clear_seen || !ecc_queue_valid(f) || !f->ecc_count)return false;
+        *value=f->ecc_results[f->ecc_head];
+        f->ecc_head=(f->ecc_head+1u)%f->ecc_capacity;f->ecc_count--;return true;
     default:return false;
     }
 }
@@ -109,6 +134,10 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         f->sector_pending=true;return true;
     }
     if(data_busy(f))return false;
+    if(offset==0x80cu) {
+        if(value!=1u || !ecc_queue_valid(f) || f->control==0x50u)return false;
+        f->ecc_head=f->ecc_count=0;f->ecc_clear_seen=true;return true;
+    }
     if(offset==0x410u) {
         if(!value) {
             f->control=0u;f->data_valid=false;f->pending=IDLE;return true;
