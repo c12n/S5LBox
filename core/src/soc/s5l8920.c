@@ -82,6 +82,13 @@ static bool fmi_register_window(uint32_t offset) {
     return offset<8u || (offset>=0xcu && offset<0x14u) || (offset>=0x400u && offset<0x450u) ||
            (offset>=0x814u && offset<0x818u);
 }
+static bool sdhc_address(uint32_t address) {
+    return address>=S5L8920_SDHC_BASE && address-S5L8920_SDHC_BASE<S5L8920_SDHC_SIZE;
+}
+static bool sdhc_enabled(const s5l8920_t *m) {
+    const s5l8920_clock_gate_t *g=&m->clock_gate[S5L8920_SDHC_GATE];
+    return m->sdhc && g->configured && (g->value&0x8000000fu)==15u;
+}
 static bool endpoint_servicing(const s5l8920_t *m) {
     if(m->cdma && m->cdma->servicing)return true;
     for(unsigned bank=0;bank<S5L8920_FMI_COUNT;bank++)
@@ -387,6 +394,17 @@ static uint32_t read_value(s5l8920_t *m, uint32_t address, unsigned size) {
         for (unsigned n = 0; n < size; n++) value |= (uint32_t)p[n] << (8u * n);
         return value;
     }
+    if(sdhc_address(address)) {
+        uint32_t value,offset=address-S5L8920_SDHC_BASE;
+        if(!m->sdhc)fail(m,S5L8920_BUS_UNMAPPED,address,size,false,0u);
+        else if((address&(size-1u)) || offset>S5L8920_SDHC_SIZE-size)
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,false,0u);
+        else if(!sdhc_enabled(m) || endpoint_servicing(m) ||
+                !s5l8920_sdhc_read(m->sdhc,offset,size,&value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,false,0u);
+        else return value;
+        return 0u;
+    }
     unsigned fmi_bank;uint32_t fmi_offset;
     if(fmi_address(address,&fmi_bank,&fmi_offset)) {
         uint32_t value;
@@ -612,6 +630,16 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
     if (ram_offset(m,address,size,&ram_at)) {
         uint8_t *p = m->ram + ram_at;
         for (unsigned n = 0; n < size; n++) p[n] = (uint8_t)(value >> (8u * n));
+        return;
+    }
+    if(sdhc_address(address)) {
+        uint32_t offset=address-S5L8920_SDHC_BASE;
+        if(!m->sdhc)fail(m,S5L8920_BUS_UNMAPPED,address,size,true,value);
+        else if((address&(size-1u)) || offset>S5L8920_SDHC_SIZE-size)
+            fail(m,S5L8920_BUS_ACCESS_UNIMPLEMENTED,address,size,true,value);
+        else if(!sdhc_enabled(m) || endpoint_servicing(m) ||
+                !s5l8920_sdhc_write(m->sdhc,offset,size,value))
+            fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
         return;
     }
     unsigned fmi_bank;uint32_t fmi_offset;
@@ -1597,6 +1625,24 @@ bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
     m->iop=iop;return true;
 }
 
+bool s5l8920_sdhc_attach(s5l8920_t *m,s5l8920_sdhc_t *sdhc) {
+    if(!m || !m->ram || !sdhc || !sdhc->initialized || access_failed(m) ||
+       endpoint_servicing(m) || (m->iop && m->iop->servicing) ||
+       !m->clock_gate[S5L8920_SDHC_GATE].configured ||
+       (m->clock_gate[S5L8920_SDHC_GATE].value&0x80000000u))return false;
+    if(m->sdhc)return m->sdhc==sdhc;
+    if(sdhc->reset_pending)return false;
+    m->sdhc=sdhc;return true;
+}
+bool s5l8920_sdhc_board_service(s5l8920_t *m,bool clock_available) {
+    if(!m || !m->ram || !m->sdhc || !m->sdhc->initialized || access_failed(m) ||
+       endpoint_servicing(m) || (m->iop && m->iop->servicing) ||
+       !m->clock_gate[S5L8920_SDHC_GATE].configured)return false;
+    uint32_t gate=m->clock_gate[S5L8920_SDHC_GATE].value;
+    if((gate&0x80000000u) || ((gate&15u)!=0u && (gate&15u)!=15u))return false;
+    return s5l8920_sdhc_service(m->sdhc,clock_available && (gate&15u)==15u);
+}
+
 bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
     if(!m || !m->ram || bank>=S5L8920_FMI_COUNT || !fmi || !fmi->initialized ||
        access_failed(m) || fmi->servicing || endpoint_servicing(m) ||
@@ -1674,6 +1720,15 @@ static bool iop_fmi(void *owner,unsigned bank,uint32_t offset,bool write,uint32_
     return write?s5l8920_fmi_write(m->fmi[bank],offset,*value):
                  s5l8920_fmi_read(m->fmi[bank],offset,value);
 }
+static bool iop_sdhc(void *owner,uint32_t offset,unsigned size,bool write,uint32_t *value) {
+    s5l8920_t *m=owner;
+    if(!m || !m->ram || !m->iop || !m->iop->servicing || !iop_enabled(m) ||
+       access_failed(m) || endpoint_servicing(m) || !sdhc_enabled(m) || !value ||
+       (size!=1u && size!=2u && size!=4u) || (offset&(size-1u)) ||
+       offset>S5L8920_SDHC_SIZE-size)return false;
+    return write?s5l8920_sdhc_write(m->sdhc,offset,size,*value):
+                 s5l8920_sdhc_read(m->sdhc,offset,size,value);
+}
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if(!m || !m->ram || !m->iop || access_failed(m) || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
@@ -1683,7 +1738,8 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
     uint64_t before=m->iop->bytes_written;
-    arm_status_t result=s5l8920_iop_service_with_fmi(m->iop,iop_ram,iop_signal_ap,iop_timebase,iop_fmi,m);
+    arm_status_t result=s5l8920_iop_service_with_sdhc(m->iop,iop_ram,iop_signal_ap,iop_timebase,
+        iop_fmi,m->sdhc?iop_sdhc:NULL,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }
@@ -1770,6 +1826,7 @@ bool s5l8920_reset(s5l8920_t *m) {
     m->swi=NULL;
     m->cdma=NULL;
     m->iop=NULL;
+    m->sdhc=NULL;
     memset(m->fmi,0,sizeof m->fmi);
     memset(&m->deadline,0,sizeof m->deadline);
     for (unsigned gate=0;gate<S5L8920_CLOCK_GATE_COUNT;gate++)

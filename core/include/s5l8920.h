@@ -16,6 +16,7 @@
 #include "s5l8920_cdma.h"
 #include "s5l8920_iop.h"
 #include "s5l8920_fmi.h"
+#include "s5l8920_sdhc.h"
 #include "lis331dl.h"
 #include "ak8973.h"
 #include <stddef.h>
@@ -80,6 +81,7 @@
 #define S5L8920_AUDIO_NCO_BASE UINT32_C(0x84300014)
 #define S5L8920_AUDIO_GATE 0x18u
 #define S5L8920_CDMA_GATE 0x25u
+#define S5L8920_SDHC_GATE 0x23u /* Target device-clocks maps logical SDIO gate10 here. */
 #define S5L8920_AES_KEY_DISABLE UINT32_C(0x87800000)
 #define S5L8920_DMC_BASE UINT32_C(0xbfc00000)
 #define S5L8920_DMC_CONFIG_COUNT 36u
@@ -288,6 +290,7 @@ typedef struct {
     pinot_panel_t *pinot;
     s5l8920_swi_t *swi;
     s5l8920_fmi_t *fmi[S5L8920_FMI_COUNT];
+    s5l8920_sdhc_t *sdhc;
 } s5l8920_t;
 
 /* Requires a zero-initialized object, freed before reuse. Allocates the matching
@@ -774,6 +777,21 @@ bool s5l8920_fmi_data_board_service(s5l8920_t *m,unsigned bank,
                                    s5l8920_fmi_data_fn receive,void *owner);
 bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
 
+/* Optional caller-owned SDHC reset/preparation component on80000000/1000.
+ * The target platform maps logical gate10 to raw23. Attachment requires an
+ * initialized peer, a configured gate with bit31 clear, no pending reset,
+ * fault or active IOP/endpoint service. Keep the peer alive and exclusively
+ * owned by one board. Reset/free detach without modifying/freeing it.
+ * AP and IOP accesses share this state and require an open gate (nibbleF).
+ * Missing/closed/unsupported states refuse, never substitute zero registers.
+ * Software reset progresses only through explicit service with a supplied
+ * controller clock; a closed gate pauses it. The owner supplies clock
+ * availability independently of CPU/time. Selector words do not establish
+ * frequency or phase. No raw-gate reset coupling, IRQ, card or clock-stable
+ * response is implemented. Accesses do not execute commands or advance time. */
+bool s5l8920_sdhc_attach(s5l8920_t *m,s5l8920_sdhc_t *sdhc);
+bool s5l8920_sdhc_board_service(s5l8920_t *m,bool clock_available);
+
 /* Optional borrowed IOP controller/CPU. Attach a freshly initialized peer
  * with both raw gates explicitly configured and reset bit31 initially clear.
  * Only gate2E bit31 drives its reset line. MMIO/execution require both gate2E
@@ -789,6 +807,8 @@ bool s5l8920_fmi_dma_board_service(s5l8920_t *m,unsigned channel);
  * Aligned IOP word accesses to attached FMI banks use their existing register,
  * gate and reset checks. Missing/refusing controllers fault only the IOP;
  * accesses do not service endpoints, advance time or add interrupt routing.
+ * An attached SDHC similarly lends its bounded byte/halfword/word register
+ * capability, using the same open-gate checks and state as the AP path.
  * Service during a CDMA/FMI endpoint callback is refused without CPU work.
  * Reset/free detach the peer; no RAM/owner pointer survives service. The
  * owner must reset and reattach explicitly. No component or image by default. */

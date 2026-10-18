@@ -41,10 +41,23 @@ capabilities or interrupt wiring are supplied. Unsupported accesses refuse.
 The IOP can borrow a separate capability for aligned accesses within
 `0x80000000..0x80000fff`, with exact register widths checked by the component.
 Refusal stays local to the IOP; callbacks and owners are released on every
-return. Earlier service APIs and board service continue withholding this
-capability. The target device tree identifies this window, but its logical
-clock-gate identifier still needs translation through the platform driver's
-tables before board attachment. No raw gate number is guessed.
+return. Earlier standalone service APIs continue withholding this capability.
+An optional board attachment now shares one controller between AP and IOP.
+The target's `device-clocks` table and original platform methods map logical
+SDIO gate `0x10` to raw gate `0x23`, with selector `0x14` and a dependency on
+logical gate 1 (selector 2). Register access requires the open raw gate;
+explicit reset service also requires a caller-supplied controller clock.
+Reads never service resets or alter the AP's exclusive monitor. Board
+reset/free detach the caller-owned controller without modifying it. Raw-gate
+reset coupling and interrupt routing remain unavailable.
+
+A control run against the validated component library reproduces all 714
+prior conditional trace lines. At IOP `0x79e4`, the guest has opened gate
+`0x23` to `0xf` and programmed selectors `0x14=0xd04` and `2=0xe02`. The
+original caller at `0x1b7c` requests reset mask 7. The observer reads cached
+stack/register state without guest bus accesses or mutation. These values
+establish the guest's configuration at that stop, not a physical clock rate
+or complete firmware handoff. All earlier audio/PMU/handoff hypotheses remain.
 
 The original IOP reset setter at `0x79e0` previously stopped at its byte read
 at `0x79e4`. With this capability, the original setter and getter at `0x79f4`

@@ -154,7 +154,8 @@ arm_status_t s5l8920_iop_service_with_fmi(s5l8920_iop_t *i,
  * the callback. Its owner enforces presence, bus clock/reset and supported
  * register semantics. NULL keeps the window unavailable. No RAM fallback,
  * AP forwarding, interrupt wiring or reset completion is implicit. Earlier
- * service APIs, including board service, do not lend this capability. */
+ * standalone service APIs do not lend this capability. Board service lends
+ * it only for an explicitly attached SDHC component. */
 arm_status_t s5l8920_iop_service_with_sdhc(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
     s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,
