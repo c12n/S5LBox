@@ -15,6 +15,9 @@
 #define S5L8920_IOP_VIC_BASE UINT32_C(0xbf300000)
 #define S5L8920_IOP_VIC_STRIDE UINT32_C(0x10000)
 #define S5L8920_IOP_VIC_COUNT 3u
+/* Shared AP/IOP gate register aperture; configuration remains board-owned. */
+#define S5L8920_CLOCK_GATE_BASE UINT32_C(0xbf100078)
+#define S5L8920_CLOCK_GATE_COUNT 52u
 
 /* RAM only, no MMIO or side effects. A failed lookup returns NULL. The owner
  * keeps views valid during one controller call. Guest aliases refer to the
@@ -36,6 +39,10 @@ typedef bool (*s5l8920_iop_fmi_fn)(void *,unsigned,uint32_t,bool,uint32_t *);
  * are owner, offset, byte width, write flag and value. As with FMI, refusal
  * must preserve device state; reads/writes never service hardware or time. */
 typedef bool (*s5l8920_iop_sdhc_fn)(void *,uint32_t,unsigned,bool,uint32_t *);
+/* Borrowed aligned word access to a shared gate, indexed from GATE_BASE.
+ * False must preserve state. The owner checks configuration and supported
+ * reset coupling; no endpoint service, time advance or CPU reset is implicit. */
+typedef bool (*s5l8920_iop_gate_fn)(void *,unsigned,bool,uint32_t *);
 typedef struct {
     uint32_t remaining;
     bool configured,programmed,enabled,expired,pending;
@@ -74,6 +81,7 @@ typedef struct {
     s5l8920_iop_timebase_fn timebase;
     s5l8920_iop_fmi_fn fmi;
     s5l8920_iop_sdhc_fn sdhc;
+    s5l8920_iop_gate_fn gate;
     void *memory_owner;
     bool servicing;
     pl192_t vic[S5L8920_IOP_VIC_COUNT];
@@ -160,6 +168,16 @@ arm_status_t s5l8920_iop_service_with_sdhc(s5l8920_iop_t *i,
     s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
     s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,
     s5l8920_iop_sdhc_fn sdhc,void *owner);
+/* Also lends only the 52 aligned gate words at BF100078..BF100144. The
+ * board shares its existing configured control values and FMI reset lines;
+ * unsupported reset domains still refuse. This does not lend other power
+ * manager registers or the AP bus. Self-reset during an IOP instruction is
+ * refused. NULL and all earlier standalone APIs withhold this capability.
+ * No binding survives the instruction, including failure. */
+arm_status_t s5l8920_iop_service_with_gates(s5l8920_iop_t *i,
+    s5l8920_iop_memory_fn memory,s5l8920_iop_signal_fn signal_ap,
+    s5l8920_iop_timebase_fn timebase,s5l8920_iop_fmi_fn fmi,
+    s5l8920_iop_sdhc_fn sdhc,s5l8920_iop_gate_fn gate,void *owner);
 
 /* Explicit cold functional timer1: BF10020C count, BF100224 control, VIC0
  * hardware source5. Requires configured VICs and precedes first CPU reset.

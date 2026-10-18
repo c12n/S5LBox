@@ -95,6 +95,22 @@ static bool endpoint_servicing(const s5l8920_t *m) {
         if(m->fmi[bank] && m->fmi[bank]->servicing)return true;
     return false;
 }
+/* Shared control semantics, without either CPU's bus-failure side effects.
+ * Validate before resetting a peer; publish the word only after acceptance. */
+static bool clock_gate_write(s5l8920_t *m,unsigned index,uint32_t value) {
+    if(index>=S5L8920_CLOCK_GATE_COUNT)return false;
+    s5l8920_clock_gate_t *gate=&m->clock_gate[index];
+    bool iop_reset=m->iop && index==S5L8920_IOP_RESET_GATE;
+    s5l8920_fmi_t *fmi=index>=S5L8920_FMI_GATE && index<S5L8920_FMI_GATE+S5L8920_FMI_COUNT?
+        m->fmi[index-S5L8920_FMI_GATE]:NULL;
+    uint32_t writable=iop_reset || fmi?0x8000000fu:15u;
+    if(index==S5L8920_CPU_GATE)writable|=S5L8920_CPU_IDLE_CONTROL;
+    if(!gate->configured || ((value^gate->value)&~writable) ||
+       ((value&15u)!=0u && (value&15u)!=15u) ||
+       (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)) ||
+       (fmi && !s5l8920_fmi_reset_line(fmi,(value>>31)!=0u)))return false;
+    gate->value=value;return true;
+}
 
 static bool dsim_address(uint32_t address) {
     return address>=S5L8920_DSIM_BASE && address-S5L8920_DSIM_BASE<0x1000u;
@@ -856,20 +872,8 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         } else if (address>=S5L8920_CLOCK_GATE_BASE &&
                    address-S5L8920_CLOCK_GATE_BASE<4u*S5L8920_CLOCK_GATE_COUNT) {
             unsigned index=(address-S5L8920_CLOCK_GATE_BASE)/4u;
-            s5l8920_clock_gate_t *gate=&m->clock_gate[index];
-            bool iop_reset=m->iop && index==S5L8920_IOP_RESET_GATE;
-            s5l8920_fmi_t *fmi=index>=S5L8920_FMI_GATE && index<S5L8920_FMI_GATE+S5L8920_FMI_COUNT?
-                m->fmi[index-S5L8920_FMI_GATE]:NULL;
-            uint32_t writable=iop_reset || fmi?0x8000000fu:15u;
-            /* The original CPU idle-update method changes bit4 of gate0.
-             * Retain its control state; the CPU's WFI hint remains separate. */
-            if (index==S5L8920_CPU_GATE) writable|=S5L8920_CPU_IDLE_CONTROL;
-            if (!gate->configured || ((value^gate->value)&~writable) ||
-                ((value&15u)!=0u && (value&15u)!=15u) ||
-                (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)) ||
-                (fmi && !s5l8920_fmi_reset_line(fmi,(value>>31)!=0u)))
+            if(!clock_gate_write(m,index,value))
                 fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
-            else gate->value=value;
         } else if (offset==S5L8920_DEADLINE_COUNT) {
             m->deadline.remaining=value;
             m->deadline.programmed=true;
@@ -1736,6 +1740,14 @@ static bool iop_sdhc(void *owner,uint32_t offset,unsigned size,bool write,uint32
     return write?s5l8920_sdhc_write(m->sdhc,offset,size,*value):
                  s5l8920_sdhc_read(m->sdhc,offset,size,value);
 }
+static bool iop_gate(void *owner,unsigned index,bool write,uint32_t *value) {
+    s5l8920_t *m=owner;
+    if(!m || !m->ram || !m->iop || !m->iop->servicing || !iop_enabled(m) ||
+       access_failed(m) || endpoint_servicing(m) || index>=S5L8920_CLOCK_GATE_COUNT ||
+       !value || !m->clock_gate[index].configured)return false;
+    if(write)return clock_gate_write(m,index,*value);
+    *value=m->clock_gate[index].value;return true;
+}
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if(!m || !m->ram || !m->iop || access_failed(m) || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
@@ -1745,8 +1757,8 @@ arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
     uint64_t before=m->iop->bytes_written;
-    arm_status_t result=s5l8920_iop_service_with_sdhc(m->iop,iop_ram,iop_signal_ap,iop_timebase,
-        iop_fmi,m->sdhc?iop_sdhc:NULL,m);
+    arm_status_t result=s5l8920_iop_service_with_gates(m->iop,iop_ram,iop_signal_ap,iop_timebase,
+        iop_fmi,m->sdhc?iop_sdhc:NULL,iop_gate,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }

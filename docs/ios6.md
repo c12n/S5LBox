@@ -1909,6 +1909,26 @@ other widths and misalignment remain checked failures. Reapplying an identical
 initial input preserves guest programming; replacing it fails. Functional reset restores the supplied
 initial words, and free/init invalidates them.
 
+IOP board service lends access to these same 52 gate words for one instruction
+at a time. It accepts only aligned words and shares the AP's existing checked
+write semantics without calling the AP bus or changing its failure latch.
+The standalone `s5l8920_iop_service_with_gates` entry point requires an explicit
+capability; earlier standalone entry points leave the aperture unavailable.
+All transient bindings are cleared after execution or failure. Endpoint
+reentry, unsupported reset domains and IOP self-reset during execution refuse.
+Gate accesses do not advance time, service NAND chips or count as RAM writes.
+
+The matching IOP reset dispatcher at `0xc01c` maps bank zero/one to gates
+`0x26`/`0x27`. Its original helper at `0x8b28` reads the gate at `0x8b58`,
+asserts bit 31, calls the delay at `0xa174`, and clears bit 31. These writes
+drive the existing attached FMI reset model: assertion cancels controller
+commands and buffered data, preserves diagnostic counters, and requires
+reprogramming after release. It does not reset a separately owned NAND chip.
+The delay reads the supplied 64-bit counter through `0x6dc0` and divides by
+24 through `0x6dfc`. Reads and CPU execution do not supply those ticks.
+This models the observed register path; physical clock/reset latency remains
+unmeasured and no chip response or FTL readiness follows from its completion.
+
 The matching kernel method at `0x80789e10` reads offset `0x78`, sets bit 4
 when its third argument is one, clears it otherwise, and writes the resulting
 word through the original accessor at `0x8078a094`. Its AppleARMPlatform
