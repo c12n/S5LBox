@@ -1,0 +1,16 @@
+S5LBox touchHLE guest launch guard
+
+The launch guard and setup program are MIT licensed. Their source is included
+in tools/guest_hle_springboard.m and tools/guest_hle_setup.c in:
+https://github.com/j0shua-SYSON/S5LBox
+
+The binaries include unmodified crt1.o and dylib1.o startup objects from
+common-3.0-sdk v0.3.7. These contain Apple Csu open-source startup code, not
+Apple firmware. Their APSL 2.0 license is included alongside this notice.
+Original source notices are retained at:
+https://github.com/apple-oss-distributions/Csu/tree/ece0e9db9c1280f3e89671deec77b3562294c45e
+SDK sources and build instructions:
+https://github.com/touchHLE/common-3.0-sdk/tree/v0.3.7
+
+These programs dynamically use the emulated guest's libSystem, libobjc and
+CoreFoundation. Those libraries are not included in the package.

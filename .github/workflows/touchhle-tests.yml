@@ -10,6 +10,10 @@ on:
       - 'tools/guest_hle_launch_guard.*'
       - 'tools/guest_hle_springboard.m'
       - 'tools/guest_hle_cfmessageport.h'
+      - 'tools/guest_hle_setup.c'
+      - 'tools/test_guest_hle_setup.py'
+      - 'tools/build_guest_hle.ps1'
+      - 'tools/package_guest_hle.py'
       - 'tools/test_guest_hle_files.py'
       - 'tools/guest_package_service.c'
       - 'tools/test_guest_package_service.py'
@@ -178,6 +182,10 @@ jobs:
             integrations/touchhle-cpu/fixtures/launch_guard.m \
             -framework Foundation -framework CoreFoundation -o work/hle-launch-tests/launch-guard
           sudo work/hle-launch-tests/launch-guard
+          xcrun clang -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            '-DS5LBOX_HLE_SPRINGBOARD_JOB="work/hle-launch-tests/SpringBoard.plist"' \
+            tools/guest_hle_setup.c -framework CoreFoundation -o work/hle-launch-tests/guest-setup
+          sudo python3 tools/test_guest_hle_setup.py work/hle-launch-tests/guest-setup work/hle-launch-tests/SpringBoard.plist
 
       - name: Fetch the pinned community test SDK
         run: |
@@ -191,6 +199,19 @@ jobs:
         run: |
           $clang=(xcrun --find clang).Trim()
           ./integrations/touchhle-cpu/fixtures/build.ps1 -Clang $clang -SDK work/hle-sdk/common-3.0.sdk -OutputDirectory (Join-Path $PWD 'work/hle-smoke')
+
+      - name: Build the guest launch-guard package
+        shell: pwsh
+        run: |
+          $clang=(xcrun --find clang).Trim()
+          $python=(Get-Command python3).Source
+          ./tools/build_guest_hle.ps1 -Clang $clang -SDK work/hle-sdk/common-3.0.sdk -BuildDirectory (Join-Path $PWD 'work/hle-guest-package') -Python $python
+
+      - name: Preserve the guest launch-guard package
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchhle-guest-launch-package
+          path: work/hle-guest-package/s5lbox-hle-launch.deb
 
       - name: Run a real Mach-O app through the interpreter and frameworks
         working-directory: third_party/touchhle
