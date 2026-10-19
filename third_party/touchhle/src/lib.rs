@@ -50,6 +50,12 @@ mod objc;
 mod options;
 mod paths;
 mod stack;
+pub mod presentation;
+mod window_types;
+#[cfg(not(any(target_os = "ios", feature = "native-window")))]
+mod window;
+#[cfg(any(target_os = "ios", feature = "native-window"))]
+#[path = "window/native.rs"]
 mod window;
 
 // Environment is used very frequently used and used to be in this module, so

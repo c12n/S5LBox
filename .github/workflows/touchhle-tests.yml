@@ -10,6 +10,7 @@ on:
       - 'tools/test_guest_hle_files.py'
       - 'tools/guest_package_service.c'
       - 'tools/test_guest_package_service.py'
+      - 'app/Sources/VMTouchHLESurface.*'
       - '.github/workflows/touchhle-tests.yml'
   workflow_dispatch:
 
@@ -101,8 +102,9 @@ jobs:
             -isysroot "$sdk" -std=c11 -Wall -Wextra -Werror -Dmain=s5lbox_hle_fixture_main \
             -c integrations/touchhle-cpu/fixtures/host_probe.c -o work/ios-hle-app/host-probe.o
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
-            -isysroot "$sdk" -fobjc-arc -Wall -Wextra -Werror \
+            -isysroot "$sdk" -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
             integrations/touchhle-cpu/fixtures/ios_probe.m work/ios-hle-app/host-probe.o \
+            integrations/touchhle-cpu/fixtures/ios_graphics_probe.m app/Sources/VMTouchHLESurface.m \
             work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
             -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
             -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
@@ -112,10 +114,12 @@ jobs:
             -o "$app/HLEProbe"
           cp integrations/touchhle-cpu/fixtures/ios-probe.plist "$app/Info.plist"
           cp -R work/ios-hle-fixture/hle-smoke/InterpreterSmoke.app "$app/"
+          cp -R work/ios-hle-fixture/hle-smoke/HLEVisual.app "$app/"
           cp -R third_party/touchhle/touchHLE_dylibs third_party/touchhle/touchHLE_fonts "$app/"
           cp third_party/touchhle/touchHLE_default_options.txt "$app/"
           xcrun strip -S "$app/HLEProbe"
           codesign --force --sign - --timestamp=none "$app/InterpreterSmoke.app"
+          codesign --force --sign - --timestamp=none "$app/HLEVisual.app"
           codesign --force --sign - --timestamp=none --entitlements app/S5LBox.entitlements "$app"
           codesign --verify --strict "$app"
           cd work/ios-hle-app
@@ -154,6 +158,9 @@ jobs:
       - name: Test the integrated Rust library
         run: cargo +stable test --locked --manifest-path third_party/touchhle/Cargo.toml --lib -- --test-threads=1
 
+      - name: Test embedded viewport and input mapping
+        run: cargo +stable test --locked --manifest-path third_party/touchhle/Cargo.toml --features native-window --lib window::tests -- --test-threads=1
+
       - name: Build the headless runtime
         run: cargo +stable build --locked --manifest-path third_party/touchhle/Cargo.toml --bin touchHLE
 
@@ -187,6 +194,7 @@ jobs:
           path: |
             work/hle-smoke.log
             work/hle-smoke/InterpreterSmoke.app
+            work/hle-smoke/HLEVisual.app
           if-no-files-found: ignore
 
       - name: Reuse one host process after guest exits and faults

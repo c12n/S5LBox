@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <unistd.h>
 int s5lbox_hle_fixture_main(int argc, char **argv);
+void s5lbox_start_graphics(UIViewController *parent);
 
 @interface HLEProbeDelegate : UIResponder <UIApplicationDelegate>
 @property(nonatomic,strong) UIWindow *window;
@@ -43,7 +44,8 @@ int s5lbox_hle_fixture_main(int argc, char **argv);
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.status.text=result?@"S5LBox HLE runtime test\nFAILED — see native-probe.log":
                     @"S5LBox HLE runtime test\nPASS\nLaunch, exit, fault recovery, stop and relaunch";
-                application.idleTimerDisabled=NO;
+                if (!result) s5lbox_start_graphics(controller);
+                else application.idleTimerDisabled=NO;
             });
         }
     });

@@ -29,6 +29,7 @@ struct Session {
     log: File,
     control: Arc<Control>,
     live: Option<(crate::fs::live::LiveFs, String, String)>,
+    presentation: Option<crate::presentation::Presentation>,
 }
 
 thread_local! {
@@ -92,6 +93,10 @@ pub(crate) fn data_path() -> Option<PathBuf> {
 
 pub(crate) fn live_bundle() -> Option<(crate::fs::live::LiveFs, String, String)> {
     SESSION.with(|session| session.borrow().as_ref().and_then(|s| s.live.clone()))
+}
+
+pub(crate) fn presentation() -> Option<crate::presentation::Presentation> {
+    SESSION.with(|session| session.borrow().as_ref().and_then(|s| s.presentation))
 }
 
 pub type FileExchange =
@@ -213,10 +218,16 @@ fn absolute_existing(path: &str, directory: bool) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-unsafe fn run(config: &Config, control: *const Control, live: Option<&LiveConfig>) -> Outcome {
-    // GUI mode is added only when the native presentation adapter is ready.
+unsafe fn run(
+    config: &Config,
+    control: *const Control,
+    live: Option<&LiveConfig>,
+    presentation: Option<&crate::presentation::Presentation>,
+) -> Outcome {
     if config.abi_version != 1
-        || config.flags != HEADLESS
+        || config.flags != if presentation.is_some() { 0 } else { HEADLESS }
+        || presentation.is_some_and(|p| !p.valid())
+        || (presentation.is_some() && !cfg!(any(target_os = "ios", feature = "native-window")))
         || control.is_null()
         || config.argument_count > 128
         || (config.argument_count != 0 && config.arguments.is_null())
@@ -254,7 +265,11 @@ unsafe fn run(config: &Config, control: *const Control, live: Option<&LiveConfig
         };
         let resources = absolute_existing(&unsafe { string(config.resource_directory)? }, true)?;
         let data = absolute_existing(&unsafe { string(config.data_directory)? }, true)?;
-        let mut args = vec!["S5LBox".into(), app, "--headless".into(), "--args".into()];
+        let mut args = vec!["S5LBox".into(), app];
+        if presentation.is_none() {
+            args.push("--headless".into());
+        }
+        args.push("--args".into());
         for i in 0..config.argument_count as usize {
             args.push(unsafe { string(*config.arguments.add(i))? });
         }
@@ -286,6 +301,7 @@ unsafe fn run(config: &Config, control: *const Control, live: Option<&LiveConfig
             log,
             control,
             live,
+            presentation: presentation.copied(),
         })
     });
     poll_control();
@@ -302,7 +318,7 @@ pub unsafe extern "C" fn s5lbox_hle_run(
     control: *const Control,
     result: *mut Outcome,
 ) -> i32 {
-    unsafe { run_boundary(config, control, result, None) }
+    unsafe { run_boundary(config, control, result, None, None) }
 }
 
 /// The host owns the authenticated channel and closes it after this returns.
@@ -321,7 +337,35 @@ pub unsafe extern "C" fn s5lbox_hle_run_live(
         }
         return INVALID;
     }
-    unsafe { run_boundary(config, control, result, Some(&*files)) }
+    unsafe { run_boundary(config, control, result, Some(&*files), None) }
+}
+
+/// Native surface; files may be null to run an ordinary host test bundle.
+#[no_mangle]
+pub unsafe extern "C" fn s5lbox_hle_run_presented(
+    config: *const Config,
+    files: *const LiveConfig,
+    presentation: *const crate::presentation::Presentation,
+    control: *const Control,
+    result: *mut Outcome,
+) -> i32 {
+    if presentation.is_null() {
+        if !result.is_null() {
+            unsafe {
+                result.write(Outcome::new(INVALID, 0, "Missing native surface"));
+            }
+        }
+        return INVALID;
+    }
+    unsafe {
+        run_boundary(
+            config,
+            control,
+            result,
+            files.as_ref(),
+            presentation.as_ref(),
+        )
+    }
 }
 
 unsafe fn run_boundary(
@@ -329,6 +373,7 @@ unsafe fn run_boundary(
     control: *const Control,
     result: *mut Outcome,
     live: Option<&LiveConfig>,
+    presentation: Option<&crate::presentation::Presentation>,
 ) -> i32 {
     if result.is_null() {
         return INVALID;
@@ -340,7 +385,7 @@ unsafe fn run_boundary(
         return INVALID;
     }
     let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        run(&*config, control, live)
+        run(&*config, control, live, presentation)
     })) {
         Ok(result) => result,
         Err(payload) if payload.is::<StopRequested>() => Outcome::new(STOPPED, 0, "Stopped"),

@@ -29,4 +29,13 @@ if ($LASTEXITCODE) { throw 'Thumb fixture compile failed' }
     "$outputRoot/smoke.o" "$outputRoot/thumb.o" -lSystem
 if ($LASTEXITCODE) { throw 'Fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/Info.plist" -Destination "$bundle/Info.plist"
+$visual=Join-Path $outputRoot 'HLEVisual.app'
+New-Item -ItemType Directory -Force -Path $visual | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/visual.m" -o "$outputRoot/visual.o"
+if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$visual/HLEVisual" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/visual.o" -lSystem -lobjc -framework Foundation -framework UIKit
+if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
 Write-Output $bundle

@@ -48,9 +48,17 @@ of `s5lbox-ios-arm64.cmake`. It selects the installed iPhoneOS SDK and avoids
 the pinned CMake helper's incorrect `/` sysroot. The minimum target is iOS 13;
 the library build does not require signing or JIT entitlements.
 
-This integration is unfinished and is not included in S5LBox 1.1.0. Native iOS
-presentation, lifecycle isolation, shared live guest filesystem access, and
-SpringBoard launch routing are not yet connected or device-validated.
+This integration is unfinished and is not included in S5LBox 1.1.0. A separate
+iOS window backend now calls the host for OpenGL ES contexts, frames and input,
+without creating SDL windows or taking over UIKit's event loop. Its first
+native surface uses worker-owned offscreen buffers and one immutable latest
+frame for the main thread. The graphical ARMv6 UIKit fixture tests rendering,
+touch delivery and an app-sandbox write. Graphical device validation, audio,
+launch exclusion, shared live files end to end, and SpringBoard routing remain
+pending. The embedded backend currently reports unknown battery state, uses
+English locale fallback, and refuses external URLs; those are not compatibility
+claims. Native surface input overflow fails the session instead of losing a
+touch-release event silently.
 
 The upstream flat 4 GiB reservation failed with `ENOMEM` in the ordinary UIKit
 test host on an iOS 15 device. The interpreter now backs only allocated guest

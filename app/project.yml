@@ -106,6 +106,7 @@ targets:
       - sdk: CoreGraphics.framework
       - sdk: ImageIO.framework
       - sdk: QuartzCore.framework
+      - sdk: OpenGLES.framework
       - sdk: AVFoundation.framework
       - sdk: libbz2.tbd
       - sdk: libz.tbd

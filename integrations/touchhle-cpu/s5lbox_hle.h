@@ -47,6 +47,35 @@ typedef struct {
  * this API does not itself acquire a SpringBoard launch exclusion. */
 int32_t s5lbox_hle_run_live(const s5lbox_hle_config *, const s5lbox_hle_live_config *,
     const s5lbox_hle_control *, s5lbox_hle_outcome *);
+/* Native callback backend. All callbacks run serially on the runtime worker;
+ * UI work must be marshalled to the main thread by the host. Do not throw.
+ * kind: 1 down, 2 move, 3 up/cancel, 4 UTF-8 text, 5 backspace, 6 return,
+ * 7 resign-active, 8 quit. Coordinates are normalized to the complete surface.
+ * poll_event returns 1 for an event, 0 for none, negative on failure.
+ * The surface, callback targets and GL contexts must outlive the run. */
+typedef struct {
+    uint32_t kind;
+    int64_t finger;
+    float x,y;
+    uint8_t text[32];
+} s5lbox_hle_input_event;
+typedef struct {
+    uint32_t abi_version,width,height;
+    void *context;
+    void *(*create_gl)(void *,bool share_current);
+    void (*destroy_gl)(void *,void *);
+    int32_t (*make_current)(void *,void *);
+    bool (*is_current)(void *,void *);
+    const void *(*get_proc)(void *,const char *);
+    int32_t (*present)(void *);
+    int32_t (*poll_event)(void *,s5lbox_hle_input_event *);
+    void (*text_input)(void *,bool);
+    void (*idle_timer)(void *,bool);
+    void (*acceleration)(void *,float *three_values);
+} s5lbox_hle_presentation;
+/* flags must be zero. files may be null for a host-owned test app. */
+int32_t s5lbox_hle_run_presented(const s5lbox_hle_config *, const s5lbox_hle_live_config *,
+    const s5lbox_hle_presentation *, const s5lbox_hle_control *, s5lbox_hle_outcome *);
 /* One control per run; a stopped control cannot be reset. Stop/pause may be
  * called from another thread. Release only after run and all control calls
  * have finished. Stop wakes a paused/sleeping interpreter; it is cooperative
