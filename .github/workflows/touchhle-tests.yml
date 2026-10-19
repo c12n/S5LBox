@@ -6,6 +6,8 @@ on:
       - 'third_party/touchhle/**'
       - 'integrations/touchhle-cpu/**'
       - 'core/**'
+      - 'tools/guest_hle_files.*'
+      - 'tools/test_guest_hle_files.py'
       - '.github/workflows/touchhle-tests.yml'
   workflow_dispatch:
 
@@ -13,8 +15,23 @@ permissions:
   contents: read
 
 jobs:
+  guest-files:
+    name: Guest-owned live filesystem
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the isolated file-service fixture
+        run: |
+          mkdir -p work/hle-files-tests
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=undefined -g \
+            tools/guest_hle_files.c integrations/touchhle-cpu/fixtures/files_probe.c \
+            -o work/hle-files-tests/files-probe
+      - name: Verify chroot, privilege drop, live writes and real kernel locks
+        run: sudo python3 tools/test_guest_hle_files.py work/hle-files-tests/files-probe
   ios-library:
     name: Interpreter library for iOS arm64
+    needs: interpreter-runtime
     runs-on: macos-14
     timeout-minutes: 35
     env:
@@ -59,6 +76,48 @@ jobs:
         with:
           name: touchhle-ios-host-probe
           path: work/ios-hle-probe/hle-host-probe
+
+      - name: Get the verified guest fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: touchhle-interpreter-smoke
+          path: work/ios-hle-fixture
+
+      - name: Package an ordinary UIKit runtime test host
+        run: |
+          set -euo pipefail
+          app=work/ios-hle-app/Payload/HLEProbe.app
+          mkdir -p "$app"
+          sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
+            -isysroot "$sdk" -std=c11 -Wall -Wextra -Werror -Dmain=s5lbox_hle_fixture_main \
+            -c integrations/touchhle-cpu/fixtures/host_probe.c -o work/ios-hle-app/host-probe.o
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
+            -isysroot "$sdk" -fobjc-arc -Wall -Wextra -Werror \
+            integrations/touchhle-cpu/fixtures/ios_probe.m work/ios-hle-app/host-probe.o \
+            work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
+            -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
+            -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
+            -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics \
+            -framework CoreMotion -framework CoreVideo -framework GameController \
+            -framework OpenGLES -framework QuartzCore -framework UIKit -framework Metal \
+            -o "$app/HLEProbe"
+          cp integrations/touchhle-cpu/fixtures/ios-probe.plist "$app/Info.plist"
+          cp -R work/ios-hle-fixture/hle-smoke/InterpreterSmoke.app "$app/"
+          cp -R third_party/touchhle/touchHLE_dylibs third_party/touchhle/touchHLE_fonts "$app/"
+          cp third_party/touchhle/touchHLE_default_options.txt "$app/"
+          xcrun strip -S "$app/HLEProbe"
+          codesign --force --sign - --timestamp=none "$app/InterpreterSmoke.app"
+          codesign --force --sign - --timestamp=none --entitlements app/S5LBox.entitlements "$app"
+          codesign --verify --strict "$app"
+          cd work/ios-hle-app
+          zip -qry HLEProbe.ipa Payload
+
+      - name: Preserve the UIKit test host
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchhle-ios-test-app
+          path: work/ios-hle-app/HLEProbe.ipa
 
   interpreter-runtime:
     name: Rust frameworks with the C interpreter
