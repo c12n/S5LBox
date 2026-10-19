@@ -31,7 +31,7 @@ Your iPhone doesn't need to be jailbroken.
   and download them straight into your library.
 - **Explore your files.** Browse, preview, import, and export guest files from
   Machine Settings. Full filesystem access is available after guest jailbreak.
-- **Make room for tweaks.** Add Cydia and use the built-in **Packages** browser
+- **Make it your own.** Add Cydia and use the built-in **Packages** browser
   to explore sources, search, install, update, and remove packages. It handles
   required packages and tells you when a restart is needed.
 - **Keep your own collection.** Create separate machines for different apps
