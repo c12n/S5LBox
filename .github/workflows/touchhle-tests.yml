@@ -47,7 +47,7 @@ jobs:
             work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
             -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
             -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
-            -framework CoreAudio -framework CoreGraphics -framework CoreHaptics \
+            -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics \
             -framework CoreMotion -framework CoreVideo -framework GameController \
             -framework OpenGLES -framework QuartzCore -framework UIKit -framework Metal \
             -o work/ios-hle-probe/hle-host-probe
