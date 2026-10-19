@@ -26,6 +26,10 @@ OpenAL's `alc/alu.h` and `core/uhjfilter.h` explicitly include `<cstdint>` for
 newer C++ toolchains. Windows builds with CMake 4 need
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` for SDL, and `CFLAGS=-std=c11` keeps the pinned
 SDL source from being compiled as C23 on newer GCC versions.
+For iOS arm64, set `CMAKE_TOOLCHAIN_FILE_aarch64_apple_ios` to the absolute path
+of `s5lbox-ios-arm64.cmake`. It selects the installed iPhoneOS SDK and avoids
+the pinned CMake helper's incorrect `/` sysroot. The minimum target is iOS 13;
+the library build does not require signing or JIT entitlements.
 
 This integration is unfinished and is not included in S5LBox 1.1.0. Native iOS
 presentation, lifecycle isolation, shared live guest filesystem access, and

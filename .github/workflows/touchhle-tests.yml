@@ -23,6 +23,7 @@ jobs:
       CMAKE_POLICY_VERSION_MINIMUM: '3.5'
       CFLAGS: '-std=c11'
       IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+      CMAKE_TOOLCHAIN_FILE_aarch64_apple_ios: ${{ github.workspace }}/third_party/touchhle/s5lbox-ios-arm64.cmake
     steps:
       - uses: actions/checkout@v4
       - name: Install the iOS Rust target
