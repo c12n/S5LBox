@@ -284,7 +284,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         return nil;
     };
     let paths: Vec<GuestPathBuf> = paths
-        .map(|path| GuestPathBuf::from(GuestPath::new(path)))
+        .map(GuestPathBuf::from)
         .collect();
     log_dbg!("directoryContentsAtPath {}: {:?}", path, paths);
     let path_strings = paths

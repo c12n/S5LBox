@@ -103,7 +103,10 @@ fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> 
     let mut stat = stat::default();
 
     match file.file {
-        GuestFile::File(_) | GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => {
+        GuestFile::File(_)
+        | GuestFile::Live(_)
+        | GuestFile::IpaBundleFile(_)
+        | GuestFile::ResourceFile(_) => {
             stat.st_mode |= S_IFREG;
 
             // TODO: use `std::fs::metadata()` instead

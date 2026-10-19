@@ -24,6 +24,14 @@ it is a test executable, not a user-facing app mode. The upstream fatal
 coroutine-invariant abort paths and blocking native I/O still need separate
 review before treating the runtime as fully isolated.
 
+`s5lbox_hle_run_live` can read the installed app bundle and mount its real guest
+container through a bounded host file-exchange callback. The guest-side file
+component uses a chroot, drops root privileges, and retains real kernel-owned
+descriptors and POSIX locks. The client never retries an uncertain mutation.
+The file protocol, privilege drop and disconnect cleanup are covered by isolated
+CI tests. App transport authentication, launch exclusion and the emulated
+`fcntl` connection are still pending; this is not a user-facing shared-files mode.
+
 Included dependency sources are pinned to OpenAL Soft
 `23c8a35505fe6ab7a5c87754911a133b23ac75cf`, stb
 `9f1776a36d2a3d63c52f705c3a84b372cfed4340`, and the upstream PVRTDecompress tree.

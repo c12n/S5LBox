@@ -39,8 +39,8 @@ mod frameworks;
 mod fs;
 mod gdb;
 mod gles;
-mod image;
 pub mod host;
+mod image;
 mod libc;
 mod licenses;
 mod mach_o;
@@ -232,15 +232,20 @@ fn main_inner<T: Iterator<Item = String>>(mut args: T) -> Result<i32, String> {
         log!("Warning: The bundle path has a trailing quotation mark! This often happens accidentally on Windows when tab-completing, because '\\\"' gets interpreted by Rust in the wrong way. Did you meant to write {:?}?", fixed);
     }
 
-    let bundle_data = fs::BundleData::open_any(&bundle_path)
-        .map_err(|e| format!("Could not open app bundle: {e}"))?;
-    let (bundle, fs) = match bundle::Bundle::new_bundle_and_fs_from_host_path(
-        bundle_data,
-        /* read_only_mode: */ false,
-    ) {
-        Ok(bundle) => bundle,
-        Err(err) => {
-            return Err(format!("Application bundle error: {err}. Check that the path is to an .app directory or an .ipa file."));
+    let live_bundle = host::live_bundle();
+    let (bundle, fs) = if let Some((files, home, directory)) = live_bundle {
+        bundle::Bundle::new_bundle_and_fs_from_live(files, &home, &directory)?
+    } else {
+        let bundle_data = fs::BundleData::open_any(&bundle_path)
+            .map_err(|e| format!("Could not open app bundle: {e}"))?;
+        match bundle::Bundle::new_bundle_and_fs_from_host_path(
+            bundle_data,
+            /* read_only_mode: */ false,
+        ) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                return Err(format!("Application bundle error: {err}. Check that the path is to an .app directory or an .ipa file."));
+            }
         }
     };
 

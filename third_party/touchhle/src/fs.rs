@@ -25,6 +25,7 @@
 //! See also [crate::paths], which has paths for host files used by touchHLE.
 
 mod bundle;
+pub mod live;
 
 pub use bundle::BundleData;
 
@@ -378,6 +379,7 @@ fn handle_open_err<T, E: std::fmt::Display, P: std::fmt::Debug>(
 pub enum GuestFile {
     Directory,
     File(File),
+    Live(live::LiveFile),
     IpaBundleFile(IpaFile),
     ResourceFile(paths::ResourceFile),
     Socket,
@@ -403,6 +405,7 @@ impl GuestFile {
     pub fn sync_all(&self) -> std::io::Result<()> {
         match self {
             GuestFile::File(file) => file.sync_all(),
+            GuestFile::Live(file) => file.sync_all(),
             GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => Ok(()),
             GuestFile::Directory => {
                 log!("Warning: syncing directory as a guest file.");
@@ -417,6 +420,7 @@ impl GuestFile {
     pub fn set_len(&self, len: u64) -> std::io::Result<()> {
         match self {
             GuestFile::File(file) => file.set_len(len),
+            GuestFile::Live(file) => file.set_len(len),
             GuestFile::IpaBundleFile(file) => {
                 panic!("Attempt to resize a read-only file: {file:?}")
             }
@@ -447,6 +451,7 @@ impl Read for GuestFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             GuestFile::File(file) => file.read(buf),
+            GuestFile::Live(file) => file.read(buf),
             GuestFile::IpaBundleFile(file) => file.read(buf),
             GuestFile::ResourceFile(file) => file.get().read(buf),
             GuestFile::Directory => Err(std::io::Error::new(
@@ -462,6 +467,7 @@ impl Write for GuestFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             GuestFile::File(file) => file.write(buf),
+            GuestFile::Live(file) => file.write(buf),
             GuestFile::IpaBundleFile(file) => {
                 panic!("Attempt to write to a read-only file: {file:?}")
             }
@@ -476,6 +482,7 @@ impl Write for GuestFile {
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             GuestFile::File(file) => file.flush(),
+            GuestFile::Live(file) => file.flush(),
             GuestFile::IpaBundleFile(file) => Err(std::io::Error::new(
                 std::io::ErrorKind::ReadOnlyFilesystem,
                 format!("Attempt to flush a read-only file: {file:?}"),
@@ -493,6 +500,7 @@ impl Seek for GuestFile {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         match self {
             GuestFile::File(file) => file.seek(pos),
+            GuestFile::Live(file) => file.seek(pos),
             GuestFile::IpaBundleFile(file) => file.seek(pos),
             GuestFile::ResourceFile(file) => file.get().seek(pos),
             GuestFile::Directory => {
@@ -517,6 +525,7 @@ pub struct Fs {
     root: FsNode,
     working_directory: GuestPathBuf,
     home_directory: GuestPathBuf,
+    live: Option<live::LiveFs>,
 }
 impl Fs {
     /// Construct a filesystem containing a home directory for the app, its
@@ -700,6 +709,7 @@ impl Fs {
             root,
             working_directory,
             home_directory,
+            live: None,
         };
         assert!(fs.lookup_node(&bundle_guest_path).is_some());
         (fs, bundle_guest_path)
@@ -711,6 +721,99 @@ impl Fs {
             root: FsNode::dir(),
             working_directory: GuestPathBuf::from(String::new()),
             home_directory: GuestPathBuf::from(String::new()),
+            live: None,
+        }
+    }
+
+    /// Mount a running guest application's real container. This never creates
+    /// a separate host sandbox or clears the guest's temporary directory.
+    pub fn new_live(fs: live::LiveFs, home: &str) -> Result<Self, String> {
+        let Some(uuid) = home.strip_prefix("/var/mobile/Applications/") else {
+            return Err("Invalid guest application container".into());
+        };
+        if uuid.len() != 36
+            || !uuid.bytes().enumerate().all(|(i, c)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err("Invalid guest application container".into());
+        }
+        if !fs.stat("/").map_err(|e| e.to_string())?.is_dir() {
+            return Err("Guest application container is not a directory".into());
+        }
+        // The overlay contains only bundled, redistributable libraries. App
+        // binaries, resources and writable data all come from the live mount.
+        let mut libraries = FsNode::dir();
+        for (alias, file) in [
+            ("libgcc_s.1.dylib", "libgcc_s.1.dylib"),
+            ("libstdc++.6.dylib", "libstdc++.6.0.9.dylib"),
+            ("libstdc++.6.0.9.dylib", "libstdc++.6.0.9.dylib"),
+            ("libz.1.2.3.dylib", "libz.1.2.3.dylib"),
+            ("libz.1.dylib", "libz.1.2.3.dylib"),
+            ("libz.dylib", "libz.1.2.3.dylib"),
+            ("libz.1.1.3.dylib", "libz.1.2.3.dylib"),
+            ("libsqlite3.dylib", "libsqlite3.dylib"),
+            ("libsqlite3.0.dylib", "libsqlite3.dylib"),
+            ("libxml2.2.dylib", "libxml2.2.dylib"),
+            ("libxml2.dylib", "libxml2.2.dylib"),
+            ("libxml2.2.7.8.dylib", "libxml2.2.dylib"),
+        ] {
+            libraries = libraries.with_child(
+                alias,
+                FsNode::resource_file(format!("{}/{file}", paths::DYLIBS_DIR)),
+            );
+        }
+        let root = FsNode::dir()
+            .with_child(
+                "var",
+                FsNode::dir().with_child(
+                    "mobile",
+                    FsNode::dir().with_child(
+                        "Applications",
+                        FsNode::dir().with_child(uuid, FsNode::dir()),
+                    ),
+                ),
+            )
+            .with_child("usr", FsNode::dir().with_child("lib", libraries));
+        Ok(Self {
+            root,
+            working_directory: GuestPathBuf::from("/".to_string()),
+            home_directory: GuestPathBuf::from(home.to_string()),
+            live: Some(fs),
+        })
+    }
+
+    fn live_path(&self, path: &GuestPath) -> Option<(&live::LiveFs, String)> {
+        let fs = self.live.as_ref()?;
+        let absolute = format!(
+            "/{}",
+            resolve_path(path, Some(&self.working_directory)).join("/")
+        );
+        let absolute = absolute
+            .strip_prefix("/private/var/")
+            .map(|rest| format!("/var/{rest}"))
+            .unwrap_or(absolute);
+        let rest = absolute.strip_prefix(self.home_directory.as_str())?;
+        if rest.is_empty() {
+            return Some((fs, "/".to_string()));
+        }
+        rest.starts_with('/').then(|| (fs, rest.to_string()))
+    }
+
+    fn live_error(error: std::io::Error) -> FsError {
+        match live::guest_errno(&error) {
+            Some(2) => FsError::DoesNotExist,
+            Some(1 | 13) => FsError::AccessDenied,
+            Some(17) => FsError::AlreadyExist,
+            Some(20) => FsError::InvalidParentDir,
+            Some(21) => FsError::IsDirectory,
+            Some(30) => FsError::ReadonlyParentDir,
+            Some(66) => FsError::DirectoryNotEmpty,
+            _ => FsError::IoError(error),
         }
     }
 
@@ -728,10 +831,7 @@ impl Fs {
     /// Attempts to change the working directory.
     pub fn change_working_directory(&mut self, new_path: &GuestPath) -> Result<&GuestPath, ()> {
         let resolved = resolve_path(new_path, Some(&self.working_directory));
-        if !matches!(
-            self.lookup_node_inner(&resolved),
-            Some(FsNode::Directory { .. })
-        ) {
+        if !self.is_dir(new_path) {
             return Err(());
         }
         let new_path = if resolved.is_empty() {
@@ -794,12 +894,30 @@ impl Fs {
 
     /// Like [Path::exists] but for the guest filesystem.
     pub fn exists(&self, path: &GuestPath) -> bool {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).is_ok();
+        }
         self.lookup_node(path).is_some()
     }
 
     /// Returns access information about the file/directory at the path
     /// (exists, read, write, execute)
     pub fn access(&self, path: &GuestPath) -> (bool, bool, bool, bool) {
+        if let Some((fs, path)) = self.live_path(path) {
+            return match fs.stat(&path) {
+                Ok(m) => {
+                    let bits = if m.uid == 501 {
+                        m.mode >> 6
+                    } else if m.gid == 501 {
+                        m.mode >> 3
+                    } else {
+                        m.mode
+                    };
+                    (true, bits & 4 != 0, bits & 2 != 0, bits & 1 != 0)
+                }
+                Err(_) => (false, false, false, false),
+            };
+        }
         match self.lookup_node(path) {
             None => (false, false, false, false),
             Some(node) => match node {
@@ -817,15 +935,24 @@ impl Fs {
 
     /// Like [Path::is_file] but for the guest filesystem.
     pub fn is_file(&self, path: &GuestPath) -> bool {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).is_ok_and(|m| m.is_file());
+        }
         matches!(self.lookup_node(path), Some(FsNode::File { .. }))
     }
 
     /// Like [Path::is_dir] but for the guest dirsystem.
     pub fn is_dir(&self, path: &GuestPath) -> bool {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).is_ok_and(|m| m.is_dir());
+        }
         matches!(self.lookup_node(path), Some(FsNode::Directory { .. }))
     }
 
     pub fn modified(&self, path: &GuestPath) -> Result<i64, ()> {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).map(|m| m.modified).map_err(|_| ());
+        }
         // TODO: error handling
         let node = self.lookup_node(path).ok_or(())?;
         match node {
@@ -862,6 +989,9 @@ impl Fs {
     }
 
     pub fn size(&self, path: &GuestPath) -> Result<u64, ()> {
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.stat(&path).map(|m| m.size).map_err(|_| ());
+        }
         // TODO: error handling
         let node = self.lookup_node(path).ok_or(())?;
         match node {
@@ -880,30 +1010,54 @@ impl Fs {
     pub fn enumerate<P: AsRef<GuestPath>>(
         &self,
         path: P,
-    ) -> Result<impl Iterator<Item = &str>, ()> {
+    ) -> Result<impl Iterator<Item = String>, ()> {
+        if let Some((fs, path)) = self.live_path(path.as_ref()) {
+            return fs.read_dir(&path).map(Vec::into_iter).map_err(|_| ());
+        }
         let Some(FsNode::Directory { children, .. }) = self.lookup_node(path.as_ref()) else {
             return Err(());
         };
-        Ok(children.keys().map(|name| name.as_str()))
+        Ok(children.keys().cloned().collect::<Vec<_>>().into_iter())
     }
 
     /// Similar to [Fs::enumerate], but also returns fs node type.
     pub fn enumerate_with_types<P: AsRef<GuestPath>>(
         &self,
         path: P,
-    ) -> Result<impl Iterator<Item = (&str, FsNodeType)>, ()> {
+    ) -> Result<impl Iterator<Item = (String, FsNodeType)>, ()> {
+        if let Some((fs, path)) = self.live_path(path.as_ref()) {
+            let mut entries = Vec::new();
+            for name in fs.read_dir(&path).map_err(|_| ())? {
+                let metadata = fs
+                    .stat(&format!("{}/{name}", path.trim_end_matches('/')))
+                    .map_err(|_| ())?;
+                entries.push((
+                    name,
+                    if metadata.is_dir() {
+                        FsNodeType::Directory
+                    } else {
+                        FsNodeType::File
+                    },
+                ));
+            }
+            return Ok(entries.into_iter());
+        }
         let Some(FsNode::Directory { children, .. }) = self.lookup_node(path.as_ref()) else {
             return Err(());
         };
-        Ok(children.iter().map(|(name, node)| {
-            (
-                name.as_str(),
-                match node {
-                    FsNode::File { .. } => FsNodeType::File,
-                    FsNode::Directory { .. } => FsNodeType::Directory,
-                },
-            )
-        }))
+        Ok(children
+            .iter()
+            .map(|(name, node)| {
+                (
+                    name.clone(),
+                    match node {
+                        FsNode::File { .. } => FsNodeType::File,
+                        FsNode::Directory { .. } => FsNodeType::Directory,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter())
     }
 
     /// Recursively list the paths of files/directories in a directory.
@@ -912,6 +1066,31 @@ impl Fs {
         &self,
         path: P,
     ) -> Result<Vec<GuestPathBuf>, ()> {
+        if let Some((fs, base)) = self.live_path(path.as_ref()) {
+            let mut result = Vec::new();
+            let mut pending = vec![(base.clone(), String::new())];
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(fs.stat(&base).map_err(|_| ())?.inode);
+            while let Some((path, relative)) = pending.pop() {
+                for name in fs.read_dir(&path).map_err(|_| ())? {
+                    if result.len() >= 100_000 {
+                        return Err(());
+                    }
+                    let full = format!("{}/{name}", path.trim_end_matches('/'));
+                    let relative = if relative.is_empty() {
+                        name
+                    } else {
+                        format!("{relative}/{name}")
+                    };
+                    let metadata = fs.stat(&full).map_err(|_| ())?;
+                    result.push(GuestPathBuf::from(relative.clone()));
+                    if metadata.is_dir() && visited.insert(metadata.inode) {
+                        pending.push((full, relative));
+                    }
+                }
+            }
+            return Ok(result);
+        }
         let Some(FsNode::Directory { children, .. }) = self.lookup_node(path.as_ref()) else {
             return Err(());
         };
@@ -962,6 +1141,9 @@ impl Fs {
     /// Like [File::open] but for the guest filesystem.
     #[allow(dead_code)]
     pub fn open<P: AsRef<GuestPath>>(&self, path: P) -> Result<GuestFile, ()> {
+        if let Some((fs, path)) = self.live_path(path.as_ref()) {
+            return fs.open(&path, 1).map(GuestFile::Live).map_err(|_| ());
+        }
         // it would be nice to delegate to self.open_with_options, but
         // currently it wants a mutable reference to self
         let node = self.lookup_node(path.as_ref()).ok_or(())?;
@@ -982,6 +1164,13 @@ impl Fs {
     }
 
     pub fn rename<P: AsRef<GuestPath> + Copy>(&mut self, from: P, to: P) -> Result<(), FsError> {
+        if let Some((fs, from)) = self.live_path(from.as_ref()) {
+            let (_, to) = self.live_path(to.as_ref()).ok_or(FsError::AccessDenied)?;
+            return fs.rename(&from, &to).map_err(Self::live_error);
+        }
+        if self.live_path(to.as_ref()).is_some() {
+            return Err(FsError::AccessDenied);
+        }
         let from_node = self
             .lookup_node(from.as_ref())
             .ok_or(FsError::DoesNotExist)?;
@@ -1037,6 +1226,21 @@ impl Fs {
         path: P,
         options: GuestOpenOptions,
     ) -> Result<GuestFile, FsError> {
+        if let Some((fs, path)) = self.live_path(path.as_ref()) {
+            let flags = options.read as u32
+                | (options.write as u32) << 1
+                | (options.append as u32) << 2
+                | (options.create as u32) << 3
+                | (options.truncate as u32) << 4
+                | (options.exclusive as u32) << 5;
+            if flags == 1 && fs.stat(&path).is_ok_and(|m| m.is_dir()) {
+                return Ok(GuestFile::Directory);
+            }
+            return fs
+                .open(&path, flags)
+                .map(GuestFile::Live)
+                .map_err(Self::live_error);
+        }
         let GuestOpenOptions {
             read,
             write,
@@ -1162,6 +1366,15 @@ impl Fs {
     /// empty.
     pub fn remove<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
         let path = path.as_ref();
+        if let Some((fs, path)) = self.live_path(path) {
+            // unlink first: a symlink to a directory must not become rmdir.
+            return match fs.unlink(&path) {
+                Err(error) if matches!(live::guest_errno(&error), Some(1 | 21)) => {
+                    fs.rmdir(&path).map_err(Self::live_error)
+                }
+                result => result.map_err(Self::live_error),
+            };
+        }
 
         let (parent_node, node_name) = self
             .lookup_parent_node(path)
@@ -1258,6 +1471,9 @@ impl Fs {
     /// Like [std::fs::create_dir] but for the guest filesystem.
     pub fn create_dir<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
         let path = path.as_ref();
+        if let Some((fs, path)) = self.live_path(path) {
+            return fs.mkdir(&path).map_err(Self::live_error);
+        }
 
         let (parent_node, new_dir_name) = self
             .lookup_parent_node(path)

@@ -25,6 +25,60 @@ pub struct Bundle {
 }
 
 impl Bundle {
+    /// Use the installed bundle in the live guest, without copying its resources
+    /// or redirecting its documents into a host-only sandbox.
+    pub fn new_bundle_and_fs_from_live(
+        files: crate::fs::live::LiveFs,
+        home: &str,
+        directory: &str,
+    ) -> Result<(Bundle, Fs), String> {
+        if !directory.ends_with(".app")
+            || directory.len() > 255
+            || directory.contains(['/', '\\', '\0'])
+            || directory == ".app"
+        {
+            return Err("Invalid installed application directory".into());
+        }
+        let fs = Fs::new_live(files, home)?;
+        let path = GuestPath::new(home).join(directory);
+        let file = fs
+            .open(path.join("Info.plist"))
+            .map_err(|_| "Could not read the installed app's Info.plist")?;
+        // App metadata is bounded independently of potentially large resources.
+        let plist = Value::from_reader(std::io::Cursor::new({
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > 1024 * 1024 {
+                return Err("Application metadata is too large".into());
+            }
+            bytes
+        }))
+        .map_err(|_| "Invalid installed application metadata")?
+        .into_dictionary()
+        .ok_or("Application metadata is not a dictionary")?;
+        for key in [
+            "CFBundleIdentifier",
+            "CFBundleExecutable",
+            "CFBundleVersion",
+        ] {
+            if plist
+                .get(key)
+                .and_then(Value::as_string)
+                .is_none_or(str::is_empty)
+            {
+                return Err(format!("Installed app is missing {key}"));
+            }
+        }
+        let executable = plist["CFBundleExecutable"].as_string().unwrap();
+        if executable.contains(['/', '\\', '\0']) || executable == "." || executable == ".." {
+            return Err("Invalid installed executable name".into());
+        }
+        Ok((Bundle { path, plist }, fs))
+    }
+
     /// See [Fs::new] for meaning of `read_only_mode`.
     pub fn new_bundle_and_fs_from_host_path(
         mut bundle_data: BundleData,

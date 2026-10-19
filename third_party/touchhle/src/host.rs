@@ -28,6 +28,7 @@ struct Session {
     data: PathBuf,
     log: File,
     control: Arc<Control>,
+    live: Option<(crate::fs::live::LiveFs, String, String)>,
 }
 
 thread_local! {
@@ -87,6 +88,49 @@ pub(crate) fn resource_path(path: &str) -> Option<PathBuf> {
 
 pub(crate) fn data_path() -> Option<PathBuf> {
     SESSION.with(|session| session.borrow().as_ref().map(|s| s.data.clone()))
+}
+
+pub(crate) fn live_bundle() -> Option<(crate::fs::live::LiveFs, String, String)> {
+    SESSION.with(|session| session.borrow().as_ref().and_then(|s| s.live.clone()))
+}
+
+pub type FileExchange =
+    unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, u32, *mut u8, u32, *mut u32) -> i32;
+
+#[repr(C)]
+pub struct LiveConfig {
+    pub abi_version: u32,
+    pub context: *mut std::ffi::c_void,
+    pub exchange: Option<FileExchange>,
+    pub home_directory: *const c_char,
+    pub bundle_directory: *const c_char,
+}
+
+struct HostFileExchange {
+    context: *mut std::ffi::c_void,
+    exchange: FileExchange,
+}
+impl crate::fs::live::Exchange for HostFileExchange {
+    fn exchange(&mut self, request: &[u8], response: &mut [u8]) -> std::io::Result<usize> {
+        let mut count = 0u32;
+        let status = unsafe {
+            (self.exchange)(
+                self.context,
+                request.as_ptr(),
+                request.len() as u32,
+                response.as_mut_ptr(),
+                response.len() as u32,
+                &mut count,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                format!("Guest file transport failed ({status})"),
+            ));
+        }
+        Ok(count as usize)
+    }
 }
 
 pub(crate) fn write_log(bytes: &[u8]) -> bool {
@@ -169,7 +213,7 @@ fn absolute_existing(path: &str, directory: bool) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-unsafe fn run(config: &Config, control: *const Control) -> Outcome {
+unsafe fn run(config: &Config, control: *const Control, live: Option<&LiveConfig>) -> Outcome {
     // GUI mode is added only when the native presentation adapter is ready.
     if config.abi_version != 1
         || config.flags != HEADLESS
@@ -180,21 +224,43 @@ unsafe fn run(config: &Config, control: *const Control) -> Outcome {
         return Outcome::new(INVALID, 0, "Invalid host configuration");
     }
     let prepared = (|| -> Result<_, String> {
-        let app = absolute_existing(&unsafe { string(config.app_path)? }, false)?;
+        let live = if let Some(live) = live {
+            if live.abi_version != 1 {
+                return Err("Invalid live-files ABI version".into());
+            }
+            let exchange = live
+                .exchange
+                .ok_or("Missing guest file exchange callback")?;
+            let home = unsafe { string(live.home_directory)? };
+            let directory = unsafe { string(live.bundle_directory)? };
+            Some((
+                crate::fs::live::LiveFs::new(Box::new(HostFileExchange {
+                    context: live.context,
+                    exchange,
+                })),
+                home,
+                directory,
+            ))
+        } else {
+            None
+        };
+        let app = if let Some((_, home, directory)) = &live {
+            format!("{home}/{directory}")
+        } else {
+            absolute_existing(&unsafe { string(config.app_path)? }, false)?
+                .to_str()
+                .ok_or("Invalid app path")?
+                .to_owned()
+        };
         let resources = absolute_existing(&unsafe { string(config.resource_directory)? }, true)?;
         let data = absolute_existing(&unsafe { string(config.data_directory)? }, true)?;
-        let mut args = vec![
-            "S5LBox".into(),
-            app.to_str().ok_or("Invalid app path")?.into(),
-            "--headless".into(),
-            "--args".into(),
-        ];
+        let mut args = vec!["S5LBox".into(), app, "--headless".into(), "--args".into()];
         for i in 0..config.argument_count as usize {
             args.push(unsafe { string(*config.arguments.add(i))? });
         }
-        Ok((resources, data, args))
+        Ok((resources, data, args, live))
     })();
-    let (resources, data, args) = match prepared {
+    let (resources, data, args, live) = match prepared {
         Ok(value) => value,
         Err(error) => return Outcome::new(INVALID, 0, &error),
     };
@@ -219,6 +285,7 @@ unsafe fn run(config: &Config, control: *const Control) -> Outcome {
             data,
             log,
             control,
+            live,
         })
     });
     poll_control();
@@ -235,6 +302,34 @@ pub unsafe extern "C" fn s5lbox_hle_run(
     control: *const Control,
     result: *mut Outcome,
 ) -> i32 {
+    unsafe { run_boundary(config, control, result, None) }
+}
+
+/// The host owns the authenticated channel and closes it after this returns.
+#[no_mangle]
+pub unsafe extern "C" fn s5lbox_hle_run_live(
+    config: *const Config,
+    files: *const LiveConfig,
+    control: *const Control,
+    result: *mut Outcome,
+) -> i32 {
+    if files.is_null() {
+        if !result.is_null() {
+            unsafe {
+                result.write(Outcome::new(INVALID, 0, "Missing live-files configuration"));
+            }
+        }
+        return INVALID;
+    }
+    unsafe { run_boundary(config, control, result, Some(&*files)) }
+}
+
+unsafe fn run_boundary(
+    config: *const Config,
+    control: *const Control,
+    result: *mut Outcome,
+    live: Option<&LiveConfig>,
+) -> i32 {
     if result.is_null() {
         return INVALID;
     }
@@ -245,7 +340,7 @@ pub unsafe extern "C" fn s5lbox_hle_run(
         return INVALID;
     }
     let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        run(&*config, control)
+        run(&*config, control, live)
     })) {
         Ok(result) => result,
         Err(payload) if payload.is::<StopRequested>() => Outcome::new(STOPPED, 0, "Stopped"),

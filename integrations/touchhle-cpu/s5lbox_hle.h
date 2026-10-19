@@ -27,6 +27,26 @@ typedef struct {
  * Errors and guest exits return here; normal Rust panics do not cross the ABI.
  * This is not a security boundary for malicious native host callers. */
 int32_t s5lbox_hle_run(const s5lbox_hle_config *, const s5lbox_hle_control *, s5lbox_hle_outcome *);
+/* One synchronous framed exchange on an authenticated guest file session.
+ * Return zero and the complete response length, or nonzero on I/O failure.
+ * Never reconnect/replay a request. Do not throw exceptions across this ABI.
+ * The channel and context must live until run_live returns, then be closed.
+ * Callback invocation is serial on the runtime worker thread. */
+typedef int32_t (*s5lbox_hle_file_exchange)(void *context, const uint8_t *request,
+    uint32_t request_length, uint8_t *response, uint32_t response_capacity,
+    uint32_t *response_length);
+typedef struct {
+    uint32_t abi_version;
+    void *context;
+    s5lbox_hle_file_exchange exchange;
+    const char *home_directory;   /* /var/mobile/Applications/<UUID> */
+    const char *bundle_directory; /* One installed .app directory component */
+} s5lbox_hle_live_config;
+/* app_path is unused here. Resources/data still refer to the host's own
+ * directories. The selected guest app must not run simultaneously in the VM;
+ * this API does not itself acquire a SpringBoard launch exclusion. */
+int32_t s5lbox_hle_run_live(const s5lbox_hle_config *, const s5lbox_hle_live_config *,
+    const s5lbox_hle_control *, s5lbox_hle_outcome *);
 /* One control per run; a stopped control cannot be reset. Stop/pause may be
  * called from another thread. Release only after run and all control calls
  * have finished. Stop wakes a paused/sleeping interpreter; it is cooperative
