@@ -330,6 +330,26 @@ poll cancellation, reset, selection, counter limits and both board gates.
 Separate FMI sector and CDMA services transfer supplied bytes into guest buffers.
 The command/status services above do not advance those transfers.
 
+An optional `s5l8920_nand` endpoint now provides reusable read-only backing for
+these capabilities. Each selected chip requires explicit ID bytes, sorted
+sparse rows, raw row length, busy/ready status patterns and a separate cache.
+Unlisted rows remain unavailable. Reset cancels a pending read and invalidates
+its stream; a separate service completes reset. A page read becomes ready only
+after explicit service has copied every backed byte into the cache, at most
+16 bytes per quantum. Sampling status does no work. Returning from status mode
+preserves the data cursor; FIFO backpressure preserves it too. Controller reset
+leaves the separately owned chip alone. No image, erased pages or device is
+installed by default, and no filesystem or whole-device allocation is required.
+The owner keeps descriptors and raw bytes immutable for the attachment lifetime.
+
+The endpoint derives readiness bit 6 from its actual work; other status bits
+are explicit owner-supplied patterns. The quanta are functional scheduling,
+not measured physical timing. Raw bytes keep their supplied order: this does
+not infer large-page data/OOB placement, generate ECC, translate FTL sectors,
+or establish physical geometry. Tests cover all eight chip selections, sparse
+row bounds, partial final copies, absent backing, cache aliases, status/data
+mode changes, reset, FIFO backpressure and exact data/spare-lane bytes.
+
 The controller also carries backed events to the IOP. Event-mask bit 5 at
 `0x440` gates FSTATUS bit 5 into INTPND bit 8; `INT_EN` bits 8 and 1 enable
 the status and raw-sector sources. INTPND bit 8 is a live aggregate: masking
@@ -363,6 +383,17 @@ wait list; RAM, caller/task context, vector index, IRQ stack and status samples
 are explicit fixtures. No firmware code is patched. This establishes the
 isolated status interrupt path, not continuous startup, ECC page completion,
 rootfs access or a rendered iOS guest.
+
+An additional witness uses the new endpoint with original page helper
+`0x4880`/`0x3928`, original status setup, and the same original interrupt path.
+The original VIC framework `0x7ae8` also programs its vectors. With explicit
+4,314-byte raw backing, 269 copy quanta leave the chip busy; the final ten-byte
+copy makes it ready, and the next status sample raises the interrupt. All eight
+bank/chip/RAM-pattern cases complete the original 206-step handler and return.
+Caller/task/IRQ-stack context, chip reset, configuration and raw page bytes
+remain explicit inputs. This replaces the supplied ready sample with backed
+cache completion; it does not execute the unresolved ECC page state machine
+or establish a continuous firmware boot.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight
