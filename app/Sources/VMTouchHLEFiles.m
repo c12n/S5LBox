@@ -44,16 +44,17 @@ static int32_t Exchange(void *context,const uint8_t *request,uint32_t length,
     if (ntohl(declared)!=length-4) { [self close]; return -1; }
     [_service setOperationDeadline:NSProcessInfo.processInfo.systemUptime+5];
     NSData *outgoing=[NSData dataWithBytes:request length:length];
-    if (![_service writeData:outgoing error:&_error]) { [self close]; return -1; }
-    NSData *header=[_service readCount:4 error:&_error];
-    if (header.length!=4) { [self close]; return -1; }
+    NSError *error=nil;
+    if (![_service writeData:outgoing error:&error]) { _error=error; [self close]; return -1; }
+    NSData *header=[_service readCount:4 error:&error];
+    if (header.length!=4) { _error=error; [self close]; return -1; }
     memcpy(&declared,header.bytes,4); uint32_t size=ntohl(declared);
     if (size<4 || size>65540 || size>capacity-4) {
         _error=[NSError errorWithDomain:@"S5LBox.HLE.Files" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Invalid guest file response."}];
         [self close]; return -1;
     }
-    NSData *body=[_service readCount:size error:&_error];
-    if (body.length!=size) { [self close]; return -1; }
+    NSData *body=[_service readCount:size error:&error];
+    if (body.length!=size) { _error=error; [self close]; return -1; }
     memcpy(response,header.bytes,4); memcpy(response+4,body.bytes,size);
     *count=size+4;
     return 0;
