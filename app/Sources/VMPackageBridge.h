@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 @class VMUSBTransport;
+@class VMUSBService;
 typedef void (^VMPackageSetupProgress)(NSString *stage, double fraction);
 @interface VMPackageBridge : NSObject
 /* Local preflight only: a capability does not prove that the guest is ready. */
@@ -22,6 +23,9 @@ typedef void (^VMPackageSetupProgress)(NSString *stage, double fraction);
 - (NSData *)install:(NSArray<NSURL *> *)archives status:(NSData *)status error:(NSError **)error;
 - (NSData *)remove:(NSString *)package status:(NSData *)status error:(NSError **)error;
 - (BOOL)performFinish:(NSData *)status error:(NSError **)error;
+// Worker only, for the HLE launch coordinator. Caller owns/closes the result.
+// The app must not also be running natively in the guest. This does not launch it.
+- (VMUSBService *)openLiveFilesForContainer:(NSString *)uuid error:(NSError **)error;
 // Caller must own a stopped machine, have explicit force-off consent, and
 // finish the existing jailbreak builder/recovery before invoking this method.
 + (BOOL)prepareStoppedMachine:(NSString *)directory instanceID:(NSString *)identifier error:(NSError **)error;

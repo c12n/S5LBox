@@ -184,7 +184,7 @@ jobs:
           done
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
             -framework Foundation -framework Security -I app/Sources -I core/include -I tools \
-            app/Sources/VMUSBService.m app/Sources/VMPackageCatalog.m app/Tests/test_vmpackagebridge.m \
+            app/Sources/VMUSBService.m app/Sources/VMTouchHLEFiles.m app/Sources/VMPackageCatalog.m app/Tests/test_vmpackagebridge.m \
             work/package-tests/*.o -o work/package-tests/test_bridge
           work/package-tests/test_bridge "$GITHUB_WORKSPACE/work/package-tests/credentials"
           xcrun clang -fobjc-arc -Wall -Wextra -Werror -framework Foundation \
@@ -193,7 +193,7 @@ jobs:
             work/package-tests/sha256.o -o work/package-tests/test_download
           work/package-tests/test_download "$GITHUB_WORKSPACE/work/package-tests"
           clang -Wall -Wextra -Werror -DS5LBOX_PACKAGE_TEST -I tools \
-            tools/guest_package_service.c tools/sha256.c -o work/package-tests/test_service
+            tools/guest_package_service.c tools/guest_hle_files.c tools/sha256.c -o work/package-tests/test_service
           python3 tools/test_guest_package_service.py work/package-tests/test_service
           clang -Wall -Wextra -Werror -DS5LBOX_BOOTSTRAP_TEST -I app/Tests \
             tools/guest_bootstrap.c -o work/package-tests/test_bootstrap

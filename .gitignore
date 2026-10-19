@@ -64,3 +64,9 @@ uart-console.log
 # Raw uart4 byte stream, written into the CWD by --ppp runs (see UART4 / PPP).
 # The bytes belong to a run, so they are kept beside its manifest under work/.
 uart4-ppp.bin
+
+# Local touchHLE runtime output and user-owned app data.
+/third_party/touchhle/touchHLE_log.txt
+/third_party/touchhle/touchHLE_sandbox/
+/third_party/touchhle/touchHLE_apps/
+/third_party/touchhle/touchHLE_options.txt

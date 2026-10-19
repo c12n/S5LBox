@@ -1,5 +1,6 @@
 """Loopback executor contract tests. Uses only a fake dpkg in a private cwd."""
 import hashlib
+import errno
 import fcntl
 import os
 from pathlib import Path
@@ -91,6 +92,53 @@ def main():
             with connect(b"S", b"x" * 32) as sock:
                 assert sock.recv(1) == b""
             checks += 1
+            with connect(b"H", b"x" * 32, modern=True) as sock:
+                assert sock.recv(1) == b""  # Files use the same capability check.
+            with connect(b"H") as sock:
+                assert sock.recv(1) == b""  # No silent protocol-version upgrade.
+            checks += 2
+            if os.getuid() == 0:
+                # Authenticated end-to-end fork, chroot and mobile uid path.
+                # Only this private fixture is chowned; no installed app data.
+                uuid = b"01234567-89AB-CDEF-0123-456789ABCDEF"
+                container = root / "applications" / uuid.decode()
+                container.mkdir(parents=True, mode=0o700)
+                os.chown(container, 501, 501)
+                def files_connect(identity=uuid):
+                    sock = connect(b"H", modern=True)
+                    sock.sendall(identity)
+                    length, result = struct.unpack("!II", exact(sock, 8))
+                    assert length == 4
+                    return sock, result
+                channel, result = files_connect()
+                assert result == 0
+                try:
+                    other, result = files_connect()
+                    other.close()
+                    assert result == errno.EBUSY
+                    # The parent is still privileged and available for status;
+                    # its cwd, capability and listening socket did not leak.
+                    assert finish_status() == b"\x00\x00"
+                    name = b"/live"
+                    payload = b"\x09" + struct.pack("!I", len(name)) + name
+                    channel.sendall(struct.pack("!I", len(payload)) + payload)
+                    assert struct.unpack("!II", exact(channel, 8)) == (4, 0)
+                    assert (container / "live").stat().st_uid == 501
+                    assert (root / "capability").read_bytes() == token
+                finally:
+                    channel.close()
+                # EOF releases the child's descriptors and lease. Reap it on
+                # the next connection; an early retry is allowed to be busy.
+                for _ in range(100):
+                    reopened, result = files_connect()
+                    reopened.close()
+                    if result == 0:
+                        break
+                    assert result == errno.EBUSY
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("file child failed to release its lease")
+                checks += 6
             # A free dpkg lock does not mean the first-boot finalizer is done.
             # Even status must wait for its durable completion marker, so the
             # UI cannot offer plans that the executor will refuse. A partial

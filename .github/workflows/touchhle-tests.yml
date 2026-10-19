@@ -8,6 +8,8 @@ on:
       - 'core/**'
       - 'tools/guest_hle_files.*'
       - 'tools/test_guest_hle_files.py'
+      - 'tools/guest_package_service.c'
+      - 'tools/test_guest_package_service.py'
       - '.github/workflows/touchhle-tests.yml'
   workflow_dispatch:
 
@@ -29,6 +31,12 @@ jobs:
             -o work/hle-files-tests/files-probe
       - name: Verify chroot, privilege drop, live writes and real kernel locks
         run: sudo python3 tools/test_guest_hle_files.py work/hle-files-tests/files-probe
+      - name: Verify authenticated live files through the package helper
+        run: |
+          cc -Wall -Wextra -Werror -DS5LBOX_PACKAGE_TEST -I tools \
+            tools/guest_package_service.c tools/guest_hle_files.c tools/sha256.c \
+            -o work/hle-files-tests/package-service
+          sudo python3 tools/test_guest_package_service.py work/hle-files-tests/package-service
   ios-library:
     name: Interpreter library for iOS arm64
     needs: interpreter-runtime

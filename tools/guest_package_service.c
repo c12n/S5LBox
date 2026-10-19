@@ -26,6 +26,7 @@
 #include <sys/time.h>
 #endif
 #include "sha256.h"
+#include "guest_hle_files.h"
 
 #ifdef S5LBOX_PACKAGE_TEST
 #define STATE "fixture"
@@ -37,6 +38,7 @@
 #define NOTIFY_CONFIG STATE "/notify.conf"
 #define SETUP_SCRIPT STATE "/install-script"
 #define SETUP_COMPLETE STATE "/setup-complete"
+#define APPLICATIONS STATE "/applications"
 #else
 #define STATE "/private/var/lib/s5lbox-package-manager-v1"
 #define STATUS "/private/var/lib/dpkg/status"
@@ -47,10 +49,12 @@
 #define NOTIFY_CONFIG "/etc/notify.conf"
 #define SETUP_SCRIPT "/usr/libexec/s5lbox-guest-install"
 #define SETUP_COMPLETE "/private/var/lib/s5lbox/complete"
+#define APPLICATIONS "/var/mobile/Applications"
 #endif
 #define MAX_STATUS (4u*1024u*1024u)
 #define MAX_DEB (64u*1024u*1024u)
 static int peer = -1, connected = 1, logfd = -1;
+static pid_t file_child = -1;
 static unsigned char buffer[65536];
 // Cydia's ordered finish vocabulary: return, reopen, restart, reload, reboot.
 // Persistent, boot-scoped state prevents a lost USB response from losing a request.
@@ -353,12 +357,39 @@ static void connection(void) {
     unsigned mismatch = 0; for (unsigned i=0;i<32;i++) mismatch |= token[i]^request[4+i];
     modern=!memcmp(request,"SPM2",4);
     if ((!modern && memcmp(request,"SPM1",4)) || mismatch) return;
+    // A later file-service child drops to mobile. Do not retain its parent's
+    // root-only machine capability in the inherited address space.
+    volatile unsigned char *secret=token, *received=request+4;
+    for (unsigned i=0;i<32;i++) { secret[i]=0; received[i]=0; }
     if (!load_finish()) { failure("Guest finish state is invalid; repair package setup before continuing."); return; }
     if (request[36] == 'S') {
         if (setup_ready()) { send_finish(); send_status('S'); }
     }
     else if (request[36] == 'I' || request[36] == 'R') transaction(request[36]);
     else if (modern && request[36]=='F') apply_finish();
+    else if (modern && request[36]=='H') {
+        // The same machine-specific capability authenticates the file child.
+        // Keep package execution in this parent; never chroot/drop its uid.
+        if (!setup_ready()) return;
+        if (file_child>0) {
+            int status;
+            pid_t result=waitpid(file_child,&status,WNOHANG);
+            if (result==file_child || (result<0 && errno==ECHILD)) file_child=-1;
+        }
+        pid_t child=file_child>0 ? -1 : fork();
+        if (child<0) {
+            uint32_t response[2]={htonl(4),htonl(file_child>0 ? EBUSY : errno)};
+            io(peer,response,sizeof response,1); return;
+        }
+        if (!child) {
+            long maximum=sysconf(_SC_OPEN_MAX);
+            if (maximum<0) _exit(1);
+            for (int fd=0;fd<maximum;fd++) if (fd!=peer) close(fd);
+            int result=s5lbox_hle_files(peer,STATE,APPLICATIONS,501,501);
+            close(peer); _exit(result);
+        }
+        file_child=child;
+    }
 }
 int main(void) {
     umask(0077); signal(SIGPIPE,SIG_IGN);

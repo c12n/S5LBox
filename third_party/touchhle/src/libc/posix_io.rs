@@ -88,6 +88,7 @@ const F_GETFD: FileControlCommand = 1;
 const F_SETFD: FileControlCommand = 2;
 const F_GETLK: FileControlCommand = 7;
 const F_SETLK: FileControlCommand = 8;
+const F_SETLKW: FileControlCommand = 9;
 const F_RDADVISE: FileControlCommand = 44;
 const F_NOCACHE: FileControlCommand = 48;
 
@@ -747,6 +748,37 @@ fn fcntl(
     // TODO: handle errno properly
     set_errno(env, 0);
 
+    if fd < NORMAL_FILENO_BASE || env.libc_state.posix_io.file_for_fd(fd).is_none() {
+        set_errno(env, EBADF);
+        return -1;
+    }
+    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW)
+        && matches!(
+            env.libc_state.posix_io.file_for_fd(fd).unwrap().file,
+            GuestFile::Live(_)
+        )
+    {
+        let pointer: MutPtr<flock> = args.start().next(env);
+        if pointer.is_null() {
+            set_errno(env, EFAULT);
+            return -1;
+        }
+        let mut lock = env.mem.read(pointer);
+        let result = live_record_lock(env, fd, cmd, &mut lock);
+        return match result {
+            Ok(()) => {
+                if cmd == F_GETLK {
+                    env.mem.write(pointer, lock);
+                }
+                0
+            }
+            Err(error) => {
+                set_errno(env, error);
+                -1
+            }
+        };
+    }
+
     if fd >= NORMAL_FILENO_BASE
         && env
             .libc_state
@@ -844,6 +876,100 @@ fn fcntl(
         _ => unimplemented!(),
     }
     0 // success
+}
+
+fn normalized_lock_range(base: u64, start: i64, length: i64) -> Result<(u64, u64), i32> {
+    let base: i64 = base.try_into().map_err(|_| EOVERFLOW)?;
+    let start = base.checked_add(start).ok_or(EOVERFLOW)?;
+    let (start, length) = if length < 0 {
+        (
+            start.checked_add(length).ok_or(EOVERFLOW)?,
+            length.checked_neg().ok_or(EOVERFLOW)?,
+        )
+    } else {
+        (start, length)
+    };
+    if start < 0 {
+        return Err(EINVAL);
+    }
+    start.checked_add(length).ok_or(EOVERFLOW)?;
+    Ok((start as u64, length as u64))
+}
+
+fn live_record_lock(
+    env: &mut Environment,
+    fd: FileDescriptor,
+    cmd: i32,
+    lock: &mut flock,
+) -> Result<(), i32> {
+    let kind = match lock.lock_type {
+        F_RDLCK => 1,
+        F_WRLCK => 2,
+        F_UNLCK => 3,
+        _ => return Err(EINVAL),
+    };
+    let file = env.libc_state.posix_io.file_for_fd(fd).ok_or(EBADF)?;
+    let io_errno = |error: std::io::Error| crate::fs::live::guest_errno(&error).unwrap_or(EIO);
+    let base = match lock.whence as i32 {
+        SEEK_SET => 0,
+        SEEK_CUR => file.file.stream_position().map_err(io_errno)?,
+        SEEK_END => file.file.stream_len().map_err(io_errno)?,
+        _ => return Err(EINVAL),
+    };
+    let (start, length) = normalized_lock_range(base, lock.start, lock.len)?;
+    let GuestFile::Live(file) = &file.file else {
+        return Err(EBADF);
+    };
+    let identity = file.handle_id();
+    if cmd == F_GETLK {
+        let conflict = file.query_lock(kind, start, length).map_err(io_errno)?;
+        lock.lock_type = match conflict.kind {
+            1 => F_RDLCK,
+            2 => F_WRLCK,
+            _ => F_UNLCK,
+        };
+        if conflict.kind != 3 {
+            lock.start = conflict.start.try_into().map_err(|_| EOVERFLOW)?;
+            lock.len = conflict.length.try_into().map_err(|_| EOVERFLOW)?;
+            lock.whence = SEEK_SET as i16;
+            lock.pid = conflict.pid;
+        }
+        return Ok(());
+    }
+    loop {
+        let file = env.libc_state.posix_io.file_for_fd(fd).ok_or(EBADF)?;
+        let GuestFile::Live(file) = &file.file else {
+            return Err(EBADF);
+        };
+        // Another guest thread may close/reuse the fd while this one waits.
+        if file.handle_id() != identity {
+            return Err(EBADF);
+        }
+        match file.lock(kind, start, length).map_err(io_errno) {
+            Err(error)
+                if cmd == F_SETLKW && matches!(error, EACCES | crate::libc::errno::EAGAIN) =>
+            {
+                // Yield the guest thread, not the host UI or the guest broker.
+                // Stop controls remain effective through the scheduler.
+                env.sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_lock_tests {
+    use super::*;
+    #[test]
+    fn lock_ranges_normalize_without_signed_overflow() {
+        assert_eq!(normalized_lock_range(10, -5, 3), Ok((5, 3)));
+        assert_eq!(normalized_lock_range(10, 0, -4), Ok((6, 4)));
+        assert_eq!(normalized_lock_range(0, 1, 0), Ok((1, 0)));
+        assert_eq!(normalized_lock_range(0, -1, 1), Err(EINVAL));
+        assert_eq!(normalized_lock_range(i64::MAX as u64, 1, 0), Err(EOVERFLOW));
+        assert_eq!(normalized_lock_range(0, 0, i64::MIN), Err(EOVERFLOW));
+    }
 }
 
 fn flock(env: &mut Environment, fd: FileDescriptor, operation: FLockFlag) -> i32 {

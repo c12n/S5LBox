@@ -29,8 +29,12 @@ container through a bounded host file-exchange callback. The guest-side file
 component uses a chroot, drops root privileges, and retains real kernel-owned
 descriptors and POSIX locks. The client never retries an uncertain mutation.
 The file protocol, privilege drop and disconnect cleanup are covered by isolated
-CI tests. App transport authentication, launch exclusion and the emulated
-`fcntl` connection are still pending; this is not a user-facing shared-files mode.
+CI tests. The package helper authenticates a forked file-service child without
+giving it the parent's capability or root privileges. The native USB adapter
+uses a deadline per exchange and never reconnects an uncertain operation.
+Emulated `fcntl` record locks reach the guest kernel; blocking locks yield the
+guest thread and remain cancelable. Launch exclusion and end-to-end shared-file
+device validation remain pending; this is not a user-facing shared-files mode.
 
 Included dependency sources are pinned to OpenAL Soft
 `23c8a35505fe6ab7a5c87754911a133b23ac75cf`, stb
@@ -55,7 +59,11 @@ pointers. CPU transfers and `memmove` can cross adjacent regions; borrowed
 native slices must fit a contiguous backing region. Heap coalescing respects
 those boundaries. Partial VM unmaps preserve surviving pointers. No extended
 address-space entitlement, executable memory or host pagefile change is used.
-Physical-device validation of the replacement is required before enabling it.
+The ordinary UIKit test host at `0dd5c11b` passed launch, guest exit, recovery
+after an intentional guest fault, cancellation of busy/sleeping code and relaunch
+on the iOS 15 test device. Its installed entitlement dictionary was checked and
+was empty. This headless physical-device test is not graphics/audio validation,
+nor a test of installation through stock-iOS provisioning.
 
 Preserve upstream copyright notices and component licenses. The upstream
 source license is MPL-2.0; its bundled resources and dependencies have their

@@ -10,6 +10,7 @@
 #include "rootfs_work.h"
 #include "sha256.h"
 #include <arpa/inet.h>
+#include <errno.h>
 
 typedef struct {
     __unsafe_unretained VMPackageSetupProgress progress;
@@ -125,6 +126,27 @@ static void AwaitFirstConnection(NSString *identifier) {
     if (error) *error = VMPackageError(@"The guest operation exceeded thirty minutes. Its outcome is unknown; check Installed before retrying.");
     return nil;
 }
+- (VMUSBService *)openLiveFilesForContainer:(NSString *)uuid error:(NSError **)error {
+    NSUUID *identity=[[NSUUID alloc] initWithUUIDString:uuid];
+    if (uuid.length!=36 || !identity || [identity.UUIDString caseInsensitiveCompare:uuid]!=NSOrderedSame) {
+        if (error) *error=VMPackageError(@"Invalid guest application container."); return nil;
+    }
+    VMUSBService *service=[self connect:'H' error:error];
+    if (!service) return nil;
+    [service setOperationDeadline:NSProcessInfo.processInfo.systemUptime+10];
+    NSData *name=[uuid dataUsingEncoding:NSUTF8StringEncoding];
+    if (![service writeData:name error:error]) { [service close]; return nil; }
+    NSData *reply=[service readCount:8 error:error];
+    uint32_t length=0,status=0;
+    if (reply.length==8) { memcpy(&length,reply.bytes,4); memcpy(&status,(const uint8_t *)reply.bytes+4,4); }
+    if (reply.length!=8 || ntohl(length)!=4 || status) {
+        if (error && !*error) *error=VMPackageError(ntohl(status)==EBUSY ?
+            @"Another app session is using the guest files." : @"Guest app files are unavailable. Update the guest package helper and retry.");
+        [service close]; return nil;
+    }
+    [service setOperationDeadline:0];
+    return service;
+}
 - (NSData *)status:(NSError **)error {
     _finishAction=0; _finishReady=NO; _setupPending=NO;
     VMUSBService *service = [self connect:'S' error:error];
@@ -227,13 +249,13 @@ static void AwaitFirstConnection(NSString *identifier) {
     NSString *root = @"/private/var/lib/s5lbox-package-manager-v1";
     // Immutable executable generations avoid resizing an existing HFS fork.
     // Upgrade only the exact previous launch job in the staged transaction.
-    NSString *program = [root stringByAppendingPathComponent:@"service-finish-v5"];
+    NSString *program = [root stringByAppendingPathComponent:@"service-hle-v6"];
     NSDictionary *job = @{@"Label":@"com.j0shua.s5lbox.packages", @"ProgramArguments":@[program],
         @"RunAtLoad":@YES, @"KeepAlive":@YES, @"ThrottleInterval":@10};
     NSData *plist = [NSPropertyListSerialization dataWithPropertyList:job format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
     if (!plist) return NO;
     NSMutableArray<NSData *> *legacyPlists=[NSMutableArray array];
-    for (NSString *legacy in @[@"service",@"service-finish-v2",@"service-finish-v3",@"service-finish-v4"]) {
+    for (NSString *legacy in @[@"service",@"service-finish-v2",@"service-finish-v3",@"service-finish-v4",@"service-finish-v5"]) {
         NSMutableDictionary *legacyJob=[job mutableCopy]; legacyJob[@"ProgramArguments"]=@[[root stringByAppendingPathComponent:legacy]];
         NSData *bytes=[NSPropertyListSerialization dataWithPropertyList:legacyJob format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
         if (!bytes) return NO; [legacyPlists addObject:bytes];

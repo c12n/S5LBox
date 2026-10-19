@@ -250,6 +250,13 @@ pub struct LiveFile {
     fs: LiveFs,
     handle: u32,
 }
+#[derive(Debug)]
+pub struct LockConflict {
+    pub kind: u32,
+    pub start: u64,
+    pub length: u64,
+    pub pid: i32,
+}
 impl Drop for LiveFile {
     fn drop(&mut self) {
         // Best effort only. A disconnect closes every guest descriptor. Do not
@@ -258,6 +265,9 @@ impl Drop for LiveFile {
     }
 }
 impl LiveFile {
+    pub fn handle_id(&self) -> u32 {
+        self.handle
+    }
     pub fn sync_all(&self) -> io::Result<()> {
         self.fs.0.empty(7, &self.handle.to_be_bytes())
     }
@@ -272,6 +282,26 @@ impl LiveFile {
         request.extend_from_slice(&start.to_be_bytes());
         request.extend_from_slice(&length.to_be_bytes());
         self.fs.0.empty(13, &request)
+    }
+    pub fn query_lock(&self, kind: u32, start: u64, length: u64) -> io::Result<LockConflict> {
+        let mut request = self.handle.to_be_bytes().to_vec();
+        request.extend_from_slice(&kind.to_be_bytes());
+        request.extend_from_slice(&start.to_be_bytes());
+        request.extend_from_slice(&length.to_be_bytes());
+        let reply = self.fs.0.call(16, &request)?;
+        if reply.len() != 24 {
+            return self.fs.0.invalid();
+        }
+        let kind = u32_at(&reply, 0)?;
+        if !(1..=3).contains(&kind) {
+            return self.fs.0.invalid();
+        }
+        Ok(LockConflict {
+            kind,
+            start: u64_at(&reply, 4)?,
+            length: u64_at(&reply, 12)?,
+            pid: u32_at(&reply, 20)? as i32,
+        })
     }
 }
 impl Read for LiveFile {
@@ -380,6 +410,36 @@ mod tests {
             io::ErrorKind::BrokenPipe
         );
         drop(file);
+    }
+    #[test]
+    fn queried_locks_preserve_ranges_and_reject_unknown_kinds() {
+        let mut conflict = 2u32.to_be_bytes().to_vec();
+        conflict.extend_from_slice(&8192u64.to_be_bytes());
+        conflict.extend_from_slice(&17u64.to_be_bytes());
+        conflict.extend_from_slice(&42u32.to_be_bytes());
+        let mut invalid = conflict.clone();
+        invalid[..4].copy_from_slice(&4u32.to_be_bytes());
+        let fs = scripted(vec![
+            (2, reply(0, &7u32.to_be_bytes())),
+            (16, reply(0, &conflict)),
+            (13, reply(35, &[])),
+            (16, reply(0, &invalid)),
+        ]);
+        let file = fs.open("/Documents/database", 3).unwrap();
+        let lock = file.query_lock(2, 0, 0).unwrap();
+        assert_eq!(
+            (lock.kind, lock.start, lock.length, lock.pid),
+            (2, 8192, 17, 42)
+        );
+        assert_eq!(guest_errno(&file.lock(2, 0, 0).unwrap_err()), Some(35));
+        assert_eq!(
+            file.query_lock(2, 0, 0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            file.query_lock(2, 0, 0).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
     #[test]
     fn malformed_reply_poisoning_is_sticky() {

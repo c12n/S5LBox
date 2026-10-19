@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import "../Sources/VMPackageBridge.m"
+#import "VMTouchHLEFiles.h"
 
 static NSURL *testDirectory;
 @interface NSFileManager (PackageTestPaths)
@@ -21,6 +22,9 @@ static unsigned checks, failures;
 // Exercise status framing without a device, sockets or a mutable guest disk.
 @interface PackageStatusFixture : VMUSBService
 @property(nonatomic, strong) NSMutableData *bytes;
+@property(nonatomic, strong) NSData *sent;
+@property(nonatomic) NSUInteger writes, closes;
+@property(nonatomic) BOOL failWrite;
 @end
 @implementation PackageStatusFixture
 - (NSData *)readCount:(NSUInteger)count error:(NSError **)error {
@@ -32,8 +36,66 @@ static unsigned checks, failures;
     [self.bytes replaceBytesInRange:NSMakeRange(0,count) withBytes:NULL length:0];
     return part;
 }
-- (void)close {}
+- (BOOL)writeData:(NSData *)data error:(NSError **)error {
+    self.writes++; self.sent=data;
+    if (self.failWrite && error) *error=VMPackageError(@"Lost file reply.");
+    return !self.failWrite;
+}
+- (void)close { self.closes++; }
 @end
+@interface PackageFilesBridge : VMPackageBridge
+@property(nonatomic,strong) PackageStatusFixture *fixture;
+@end
+@implementation PackageFilesBridge
+- (VMUSBService *)connect:(char)operation error:(NSError **)error {
+    (void)error; CHECK(operation=='H'); return self.fixture;
+}
+@end
+static PackageStatusFixture *FileReply(uint32_t length, uint32_t error) {
+    PackageStatusFixture *fixture=[PackageStatusFixture new];
+    uint32_t reply[2]={htonl(length),htonl(error)};
+    fixture.bytes=[NSMutableData dataWithBytes:reply length:sizeof reply];
+    return fixture;
+}
+static void TestLiveFiles(void) {
+    NSString *uuid=@"01234567-89AB-CDEF-0123-456789ABCDEF";
+    PackageFilesBridge *bridge=[PackageFilesBridge new];
+    bridge.fixture=FileReply(4,0);
+    NSError *error=nil;
+    CHECK([bridge openLiveFilesForContainer:@"../invalid" error:&error]==nil);
+    CHECK(bridge.fixture.writes==0 && error!=nil);
+    error=nil;
+    CHECK([bridge openLiveFilesForContainer:uuid error:&error]==bridge.fixture);
+    CHECK(error==nil && bridge.fixture.writes==1 && bridge.fixture.closes==0);
+    CHECK([bridge.fixture.sent isEqual:[uuid dataUsingEncoding:NSUTF8StringEncoding]]);
+    for (unsigned test=0;test<3;test++) {
+        bridge.fixture=FileReply(test==1?5:4,test==0?EBUSY:0);
+        if (test==2) [bridge.fixture.bytes setLength:7];
+        error=nil;
+        CHECK([bridge openLiveFilesForContainer:uuid error:&error]==nil);
+        CHECK(bridge.fixture.closes==1 && error!=nil);
+    }
+    const uint8_t request[]={0,0,0,1,7}; uint8_t response[16]; uint32_t count=99;
+    for (unsigned test=0;test<5;test++) {
+        PackageStatusFixture *fixture=FileReply(test==2?65541:4,0);
+        if (test==1) fixture.failWrite=YES;
+        if (test==3) [fixture.bytes setLength:7];
+        if (test==4) [fixture.bytes setLength:3];
+        VMTouchHLEFiles *files=[[VMTouchHLEFiles alloc] initWithService:fixture
+            homeDirectory:[@"/var/mobile/Applications/" stringByAppendingString:uuid] bundleDirectory:@"Fixture.app"];
+        s5lbox_hle_live_config config=files.configuration;
+        CHECK(config.abi_version==1 && !strcmp(config.bundle_directory,"Fixture.app"));
+        int result=config.exchange(config.context,request,sizeof request,response,sizeof response,&count);
+        if (!test) { CHECK(result==0 && count==8 && !memcmp(response,FileReply(4,0).bytes.bytes,8)); }
+        else {
+            CHECK(result!=0 && count==0 && files.error!=nil && fixture.closes==1);
+            CHECK(config.exchange(config.context,request,sizeof request,response,sizeof response,&count)!=0);
+            CHECK(fixture.writes==1); // Never reconnect/replay an uncertain mutation.
+        }
+        [files close];
+        CHECK(fixture.closes==1);
+    }
+}
 @interface PackageStatusBridge : VMPackageBridge
 @property(nonatomic, strong) PackageStatusFixture *fixture;
 @end
@@ -75,6 +137,7 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc != 2) return 2;
         TestFirstBootReadiness();
+        TestLiveFiles();
         testDirectory = [NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]] isDirectory:YES];
         method_exchangeImplementations(class_getInstanceMethod(NSFileManager.class,@selector(URLsForDirectory:inDomains:)),
             class_getInstanceMethod(NSFileManager.class,@selector(packageTestURLs:inDomains:)));
