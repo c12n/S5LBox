@@ -7,6 +7,9 @@ on:
       - 'integrations/touchhle-cpu/**'
       - 'core/**'
       - 'tools/guest_hle_files.*'
+      - 'tools/guest_hle_launch_guard.*'
+      - 'tools/guest_hle_springboard.m'
+      - 'tools/guest_hle_cfmessageport.h'
       - 'tools/test_guest_hle_files.py'
       - 'tools/guest_package_service.c'
       - 'tools/test_guest_package_service.py'
@@ -163,6 +166,18 @@ jobs:
 
       - name: Build the headless runtime
         run: cargo +stable build --locked --manifest-path third_party/touchhle/Cargo.toml --bin touchHLE
+
+      - name: Verify native launch exclusion with a live file lease
+        run: |
+          set -euo pipefail
+          mkdir -p work/hle-launch-tests
+          xcrun clang -Wall -Wextra -Werror -fblocks -DS5LBOX_HLE_GUARD_TEST \
+            '-DS5LBOX_HLE_GUARD_PATH="work/hle-launch-tests/lease"' \
+            '-DS5LBOX_HLE_GUARD_PORT="com.j0shua.s5lbox.hle-launch-fixture"' \
+            tools/guest_hle_springboard.m tools/guest_hle_launch_guard.c \
+            integrations/touchhle-cpu/fixtures/launch_guard.m \
+            -framework Foundation -framework CoreFoundation -o work/hle-launch-tests/launch-guard
+          sudo work/hle-launch-tests/launch-guard
 
       - name: Fetch the pinned community test SDK
         run: |
