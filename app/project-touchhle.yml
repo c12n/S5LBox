@@ -14,7 +14,8 @@ targets:
       - path: ../work/hle-guest-package/s5lbox-hle-launch.deb
         buildPhase: resources
     dependencies:
-      - library: ../work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
+      - framework: ../work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
+        embed: false
       - sdk: libc++.tbd
       - sdk: libiconv.tbd
       - sdk: SystemConfiguration.framework
