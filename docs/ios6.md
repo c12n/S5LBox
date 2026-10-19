@@ -316,12 +316,12 @@ endpoint mode switch; it does not initiate another array read. The vendor's
 [status description, section 3.9](https://www.skyhighmemory.com/download/ONFI_S34SL01G2_02_04_Page_2KB_002_99252.pdf)
 corroborates this separation between status mode and page-data mode.
 
-This path requires explicit zero masks at `0x440` and `INT_EN` (`0x10`),
-PIO programming and IFCTRL bit 20 clear. The observed low-four-bit INTPND
-acknowledgement at `0x0c` is accepted after those mask writes. INTPND readback
-then reports actual sector-completion bit 1, with a separate W1C of value 2.
-Other INTPND sources, nonzero interrupt enables and controller interrupt
-delivery remain unavailable. FSTATUS supports
+This path requires explicit masks at `0x440` and `INT_EN` (`0x10`), zero
+PIO programming and IFCTRL bit 20 clear. Zero masks select polling without
+interrupts. The observed low-four-bit INTPND acknowledgement at `0x0c` is
+accepted after both mask writes. INTPND reports backed sector-completion
+bit 1, with a separate W1C of value 2, and the enabled status aggregate below.
+FSTATUS supports
 W1C for the implemented flags and the firmware's broad `0x0031ffff` clear.
 The sampled-status flag does not block subsequent command delivery.
 Unit tests copy explicit backing into an endpoint cache in separate work steps,
@@ -329,6 +329,40 @@ prove that readiness follows completion, and cover refused/missing callbacks,
 poll cancellation, reset, selection, counter limits and both board gates.
 Separate FMI sector and CDMA services transfer supplied bytes into guest buffers.
 The command/status services above do not advance those transfers.
+
+The controller also carries backed events to the IOP. Event-mask bit 5 at
+`0x440` gates FSTATUS bit 5 into INTPND bit 8; `INT_EN` bits 8 and 1 enable
+the status and raw-sector sources. INTPND bit 8 is a live aggregate: masking
+its FSTATUS source or acknowledging FSTATUS deasserts it, whereas low-bit
+INTPND W1C leaves that source intact. Mask and acknowledgement writes work
+during pending commands, status strobes and buffered sector transfers without
+advancing them. All other enable bits, including `0x2000`, remain refused.
+This bounded functional policy is corroborated by the
+[older H2FMI implementation](https://github.com/samhenrigold/qemu-ios/blob/35483a99196229aa25767e8b55d35372f9379bdf/hw/arm/s5l8930_h2fmi.c)
+and the original target's programming and acknowledgement sequence; it is
+not a complete silicon register or timing specification.
+
+Original IOP initialization at `0x3ff0` registers the common handler `0x47e0`
+on VIC0 sources 31 and 30 for FMI0 and FMI1. The board now drives those inputs
+after successful controller writes/services and between IOP instructions.
+It never changes the IOP during a borrowed register callback. Closing a
+controller clock pauses work while retaining already latched interrupt levels;
+FMI reset clears its events and deasserts its input. CPU reset preserves the
+separately configured VIC state. AP interrupt routing is not inferred.
+
+An isolated original-firmware witness first refused the event-mask write at
+`0x455c`, after starting the status poll. With this path enabled, the complete
+`0x453c`/`0x40b0` setup returns in 62 instructions. Missing/refused samples
+and a supplied busy byte do not assert IRQ. A supplied ready byte reaches the
+original vector at `0x18`, wrapper `0xa22c`, dispatcher `0x7d30`, registered
+handler `0x47e0` and mode-zero status handler `0x483c`. The 206-step exception
+path records pending `0x100`, masks and acknowledges it, signals the original
+event, performs VIC EOI and restores the interrupted registers/CPSR. The
+original initialization supplies callback registration and the empty event
+wait list; RAM, caller/task context, vector index, IRQ stack and status samples
+are explicit fixtures. No firmware code is patched. This establishes the
+isolated status interrupt path, not continuous startup, ECC page completion,
+rootfs access or a rendered iOS guest.
 
 Isolated original firmware now executes reset at `0x4ff0370c` and READID at
 `0x4ff03768`, including its polling, acknowledgements, timebase reads, eight

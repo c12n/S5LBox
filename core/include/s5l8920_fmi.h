@@ -1,4 +1,4 @@
-/* Partial S5L8920 polled NAND controller.
+/* Partial S5L8920 NAND command, status and sector controller.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #ifndef S5LBOX_S5L8920_FMI_H
 #define S5LBOX_S5L8920_FMI_H
@@ -110,16 +110,20 @@ typedef struct {
  * queues with control 0xb only for one selected chip, explicitly programmed
  * timing, zero column, all three address fields and ANUM=4.
  * RBB_CFG 0x44c supports the observed 0x4040 status-bit6 predicate. Explicit
- * zero interrupt-mask writes at0x440/0x10 select the supported polled path;
- * nonzero interrupt enables remain unavailable. INTPND0x0c accepts the observed
- * low-four-bit W1C acknowledgement and sector bit1 W1C. INTPND readback
- * requires explicit zero masks; only backed sector work produces bit1.
- * Nonzero interrupt enables, ECC sources and other INTPND bits are unavailable.
+ * event-mask bit5 at0x440 gates FSTATUSbit5 into the live INTPNDbit8 aggregate.
+ * INT_EN0x10 supports bit8 and backed raw-sector bit1. Masks and low-four-bit
+ * or sector-bit1 W1C at INTPND0x0c remain writable during command/data work;
+ * they do not advance it. INTPND readback requires both masks programmed.
+ * Its low-bit W1C does not clear the status aggregate: clear FSTATUS or mask
+ * its source. Other mask/enable bits, including bit13, are unavailable.
  * Reentrant init/reset/configuration refuses without altering a transaction. */
 bool s5l8920_fmi_init(s5l8920_fmi_t *f);
 bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted);
 bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value);
 bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value);
+/* Pure query of backed pending events AND explicitly programmed enables.
+ * No sampling, command/data progress, default status or elapsed-time effect. */
+bool s5l8920_fmi_irq(const s5l8920_fmi_t *f);
 
 /* Optional functional ECC result-buffer policy. Select disjoint owner storage
  * before guest programming; identical repetition preserves state. Storage stays
@@ -171,9 +175,10 @@ bool s5l8920_fmi_ecc_pending_supply(s5l8920_fmi_t *f,uint32_t events);
  * The latest supplied byte is readable while the strobe is high; lowering it
  * cancels an unfinished poll, invalidates the byte, and leaves W1C flags alone.
  * Returning to page data requires a serviced page request on the selected chip.
- * Status polling requires explicit zero masks/PIO and IFCTRLbit20 clear.
- * These command services do not clock sector data or perform DMA. No IRQ
- * delivery, ECC processing, multiple-chip selection, physical timing model
+ * Status polling requires explicit masks, zero PIO and IFCTRLbit20 clear.
+ * These command services do not clock sector data or perform DMA. IRQ level
+ * is queried separately by the board. No ECC processing, multiple-chip
+ * selection, physical timing model
  * or default endpoint is provided. Timing 0x408 retains
  * configuration; PIO ID strobes require its value zero and register 0x424=0.
  * Counters are diagnostic effects, not measured physical time or capacity. */
@@ -205,7 +210,7 @@ bool s5l8920_fmi_service_io(s5l8920_fmi_t *f,const s5l8920_fmi_endpoint_t *endpo
  * Receive consumes only previously clocked FIFO bytes, preserving output/state
  * on WAIT/refusal. Reprogramming commands/chip/timing while pending/buffered
  * refuses. Reset discards staged bytes but does not reset the NAND endpoint.
- * No physical transfer latency, NAND geometry, ECC or IRQ delivery is inferred. */
+ * No physical transfer latency, NAND geometry or ECC is inferred. */
 bool s5l8920_fmi_data_configure(s5l8920_fmi_t *f,unsigned data_depth,unsigned spare_depth);
 bool s5l8920_fmi_data_service(s5l8920_fmi_t *f,s5l8920_fmi_data_fn receive,void *owner);
 s5l8920_fmi_data_result_t s5l8920_fmi_data_receive(s5l8920_fmi_t *f,unsigned lane,

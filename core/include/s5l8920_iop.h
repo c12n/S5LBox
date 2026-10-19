@@ -230,4 +230,10 @@ bool s5l8920_iop_cache_configure(s5l8920_iop_t *i,
 bool s5l8920_iop_vic_configure(s5l8920_iop_t *i);
 bool s5l8920_iop_vic_read(s5l8920_iop_t *i,uint32_t offset,uint32_t *value);
 bool s5l8920_iop_vic_write(s5l8920_iop_t *i,uint32_t offset,uint32_t value);
+/* Original FMI initialization registers banks0/1 on VIC0 sources31/30.
+ * Supply their independently backed levels between instructions, never from
+ * a borrowed register callback. Requires explicit VIC configuration. Updates
+ * only the selected input and IRQ/FIQ aggregation, without advancing work.
+ * CPU reset preserves the separately configured VIC and external levels. */
+bool s5l8920_iop_fmi_input(s5l8920_iop_t *i,unsigned bank,bool level);
 #endif

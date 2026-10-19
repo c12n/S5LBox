@@ -385,7 +385,7 @@ static void test_status_polling(void) {
         CHECK(!memcmp(&device_before,&status_fixture,sizeof device_before) && !memcmp(&before,&fmi,sizeof before));
         CHECK(rd(0x448)==0x80 && rd(0x444)==0);status_fixture.refuse_sample=false;
         reject(0x40c,0);reject(0x414,0);reject(0x408,0);reject(0x44c,0x4040);
-        reject(0x440,0);reject(0x10,0);reject(0xc,0xf);reject(0x410,0x50);
+        wr(0x440,0);wr(0x10,0);wr(0xc,0xf);reject(0x410,0x50);
         for(unsigned block=0;block<4;block++) {
             before=fmi;status_progress();
             for(unsigned n=0;n<3;n++)CHECK(rd(0x444)==0 && rd(0x448)==0x80);
@@ -411,7 +411,7 @@ static void test_status_guards(void) {
     init();status_init(0);reject(0x44c,0x4040);reject(0x440,0);reject(0x10,0);reject(0xc,0xf);
     wr(0x400,1);reject_read(0x44c);reject_read(0x440);reject_read(0x10);reject_read(0xc);
     reject(0x44c,0);reject(0x44c,0x40);reject(0x44c,0x8080);reject(0x44c,0x14040);
-    reject(0x440,0x20);reject(0x10,0x100);reject(0xc,0);reject(0xc,0xf);
+    reject(0x440,0x40);reject(0x10,0x2000);reject(0xc,0);reject(0xc,0xf);
     wr(0x440,0);reject(0xc,0xf);wr(0x10,0);wr(0xc,0xf);reject(0xc,0x100);
     wr(0x444,0x31ffff);reject(0x444,0x32ffff);CHECK(!fmi.commands && !fmi.status_samples);
     wr(0x408,0x11111);wr(0x40c,1);status_setup(&fmi);wr(0x410,0x50);
@@ -541,7 +541,7 @@ static void test_board(void) {
     CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&before,&fmi,sizeof before));
     s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x40d),0);
     CHECK(board.bus_failure.reason==S5L8920_BUS_ACCESS_UNIMPLEMENTED && !memcmp(&before,&fmi,sizeof before));
-    s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x440),0x20);
+    s5l8920_clear_bus_failure(&board);board.bus.write32(&board,reg(0,0x440),0x40);
     CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&fmi,sizeof before));
     s5l8920_clear_bus_failure(&board);board.bus.write32(&board,gate(0),31);
     CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED && !memcmp(&before,&fmi,sizeof before));

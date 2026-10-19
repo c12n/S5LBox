@@ -95,6 +95,13 @@ static bool endpoint_servicing(const s5l8920_t *m) {
         if(m->fmi[bank] && m->fmi[bank]->servicing)return true;
     return false;
 }
+static void refresh_iop_fmi_interrupts(s5l8920_t *m) {
+    if(!m->iop || !m->iop->vic_configured || m->iop->servicing || endpoint_servicing(m))return;
+    /* Closed clocks pause producers, not already latched event levels. */
+    for(unsigned bank=0;bank<S5L8920_FMI_COUNT;bank++)
+        if(m->fmi[bank])
+            (void)s5l8920_iop_fmi_input(m->iop,bank,s5l8920_fmi_irq(m->fmi[bank]));
+}
 /* Shared control semantics, without either CPU's bus-failure side effects.
  * Validate before resetting a peer; publish the word only after acceptance. */
 static bool clock_gate_write(s5l8920_t *m,unsigned index,uint32_t value) {
@@ -109,7 +116,7 @@ static bool clock_gate_write(s5l8920_t *m,unsigned index,uint32_t value) {
        ((value&15u)!=0u && (value&15u)!=15u) ||
        (iop_reset && !s5l8920_iop_reset_line(m->iop,(value>>31)!=0u)) ||
        (fmi && !s5l8920_fmi_reset_line(fmi,(value>>31)!=0u)))return false;
-    gate->value=value;return true;
+    gate->value=value;refresh_iop_fmi_interrupts(m);return true;
 }
 
 static bool dsim_address(uint32_t address) {
@@ -668,6 +675,7 @@ static void write_value(s5l8920_t *m, uint32_t address, unsigned size, uint32_t 
         else if(!fmi_enabled(m,fmi_bank) || ((fmi_offset==0u || fmi_offset==0x808u || fmi_offset==0x80cu || fmi_offset==0x810u) && endpoint_servicing(m)) ||
                 !s5l8920_fmi_write(m->fmi[fmi_bank],fmi_offset,value))
             fail(m,S5L8920_BUS_REGISTER_REFUSED,address,size,true,value);
+        else refresh_iop_fmi_interrupts(m);
         return;
     }
     if(iop_address(address)) {
@@ -1641,7 +1649,7 @@ bool s5l8920_iop_attach(s5l8920_t *m,s5l8920_iop_t *iop) {
     if(m->iop)return m->iop==iop;
     if(iop->reset_seen || iop->servicing ||
        (m->clock_gate[S5L8920_IOP_RESET_GATE].value&0x80000000u))return false;
-    m->iop=iop;return true;
+    m->iop=iop;refresh_iop_fmi_interrupts(m);return true;
 }
 
 bool s5l8920_sdhc_attach(s5l8920_t *m,s5l8920_sdhc_t *sdhc) {
@@ -1677,7 +1685,7 @@ bool s5l8920_fmi_attach(s5l8920_t *m,unsigned bank,s5l8920_fmi_t *fmi) {
     for(unsigned n=0;n<S5L8920_FMI_COUNT;n++)if(m->fmi[n]==fmi)return false;
     if(fmi->enabled || fmi->pending || fmi->reset_asserted ||
        (m->clock_gate[S5L8920_FMI_GATE+bank].value&0x80000000u))return false;
-    m->fmi[bank]=fmi;return true;
+    m->fmi[bank]=fmi;refresh_iop_fmi_interrupts(m);return true;
 }
 bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
                                 const s5l8920_fmi_endpoint_t *endpoint,
@@ -1687,7 +1695,8 @@ bool s5l8920_fmi_board_service_io(s5l8920_t *m,unsigned bank,
     uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
     if((gate&15u)!=0u && (gate&15u)!=15u)return false;
     if(!(gate&15u) || (gate&0x80000000u))return true;
-    return s5l8920_fmi_service_io(m->fmi[bank],endpoint,status,owner);
+    if(!s5l8920_fmi_service_io(m->fmi[bank],endpoint,status,owner))return false;
+    refresh_iop_fmi_interrupts(m);return true;
 }
 bool s5l8920_fmi_board_service_endpoint(s5l8920_t *m,unsigned bank,
                                       const s5l8920_fmi_endpoint_t *endpoint,void *owner) {
@@ -1705,7 +1714,8 @@ bool s5l8920_fmi_data_board_service(s5l8920_t *m,unsigned bank,
     uint32_t gate=m->clock_gate[S5L8920_FMI_GATE+bank].value;
     if((gate&15u)!=0u && (gate&15u)!=15u)return false;
     if(!(gate&15u) || (gate&0x80000000u))return true;
-    return s5l8920_fmi_data_service(m->fmi[bank],receive,owner);
+    if(!s5l8920_fmi_data_service(m->fmi[bank],receive,owner))return false;
+    refresh_iop_fmi_interrupts(m);return true;
 }
 typedef struct { s5l8920_t *board;unsigned bank,lane; } fmi_dma_input_t;
 static s5l8920_cdma_input_t fmi_dma_receive(void *owner,uint32_t peripheral,uint8_t *bytes,unsigned count) {
@@ -1764,19 +1774,24 @@ static bool iop_gate(void *owner,unsigned index,bool write,uint32_t *value) {
     *value=m->clock_gate[index].value;return true;
 }
 arm_status_t s5l8920_iop_board_service(s5l8920_t *m) {
-    if(!m || !m->ram || !m->iop || access_failed(m) || endpoint_servicing(m) ||
+    if(!m || !m->ram || !m->iop || m->iop->servicing || access_failed(m) || endpoint_servicing(m) ||
        !m->clock_gate[S5L8920_IOP_RESET_GATE].configured ||
        !m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].configured)return ARM_HALT;
     unsigned a=m->clock_gate[S5L8920_IOP_RESET_GATE].value&15u;
     unsigned b=m->clock_gate[S5L8920_IOP_DEPENDENCY_GATE].value&15u;
     if((a && a!=15u) || (b && b!=15u))return ARM_HALT;
     if(!a || !b)return ARM_OK;
+    if(!m->iop->initialized || !m->iop->reset_seen)return ARM_HALT;
+    if(!m->iop->running || m->iop->reset_asserted)return ARM_OK;
+    if(m->iop->failure.reason)return ARM_HALT;
+    refresh_iop_fmi_interrupts(m);
     uint64_t before=m->iop->bytes_written;
     arm_status_t result=s5l8920_iop_service_with_gates(m->iop,iop_ram,iop_signal_ap,iop_timebase,
         iop_fmi,m->sdhc?iop_sdhc:NULL,iop_gate,m);
     if(before!=m->iop->bytes_written) {
         m->cpu.excl_valid=false;m->cpu.a8_excl_size=0u;
     }
+    if(result==ARM_OK)refresh_iop_fmi_interrupts(m);
     return result;
 }
 

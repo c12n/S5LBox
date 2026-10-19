@@ -1,4 +1,4 @@
-/* Partial S5L8920 polled NAND controller.
+/* Partial S5L8920 NAND command, status and sector controller.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "s5l8920_fmi.h"
 #include <string.h>
@@ -29,6 +29,15 @@ bool s5l8920_fmi_reset_line(s5l8920_fmi_t *f,bool asserted) {
 }
 static bool usable(const s5l8920_fmi_t *f) {
     return f && f->initialized && !f->reset_asserted && !f->servicing;
+}
+static uint32_t pending_interrupts(const s5l8920_fmi_t *f) {
+    /* The status aggregate is a level, not a second W1C event latch. */
+    return f->interrupt_pending|((f->status&f->status_interrupt_mask&0x20u)?0x100u:0u);
+}
+bool s5l8920_fmi_irq(const s5l8920_fmi_t *f) {
+    const unsigned required=STATUS_MASK|INTERRUPT_ENABLE;
+    return usable(f) && f->enabled && (f->programmed&required)==required &&
+        (pending_interrupts(f)&f->interrupt_enable)!=0u;
 }
 static unsigned selected_chip(const s5l8920_fmi_t *f) {
     if(!f->selected)return S5L8920_FMI_NO_CHIP;
@@ -84,7 +93,7 @@ bool s5l8920_fmi_read(s5l8920_fmi_t *f,uint32_t offset,uint32_t *value) {
     switch(offset) {
     case 0xcu:
         if((f->programmed&(STATUS_MASK|INTERRUPT_ENABLE))!=(STATUS_MASK|INTERRUPT_ENABLE))return false;
-        *value=f->interrupt_pending;return true;
+        *value=pending_interrupts(f);return true;
     case 0x10u:
         if(!(f->programmed&INTERRUPT_ENABLE))return false;
         *value=f->interrupt_enable;return true;
@@ -143,12 +152,22 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
         if((value&~0x2bu) && value!=0x31ffffu)return false;
         f->status&=~value;return true;
     }
-    if(f->pending && !(f->pending==STATUS_POLL && offset==0x410u && !value))return false;
-    if(offset==0xcu && f->control!=0x50u) {
+    /* Masks and acknowledgements are independent of command/data progress.
+     * Original status setup enables them after raising the polling strobe. */
+    if(offset==0x10u) {
+        if(value&~0x102u)return false;
+        f->interrupt_enable=value;f->programmed|=INTERRUPT_ENABLE;return true;
+    }
+    if(offset==0x440u) {
+        if(value&~0x20u)return false;
+        f->status_interrupt_mask=value;f->programmed|=STATUS_MASK;return true;
+    }
+    if(offset==0xcu) {
         if((value!=2u && value!=0xfu) ||
            (f->programmed&(STATUS_MASK|INTERRUPT_ENABLE))!=(STATUS_MASK|INTERRUPT_ENABLE))return false;
         f->interrupt_pending&=~value;return true;
     }
+    if(f->pending && !(f->pending==STATUS_POLL && offset==0x410u && !value))return false;
     if(offset==0u) {
         bool raw=raw_sector_configuration(value);
         if(f->sector_pending || f->control==0x50u ||
@@ -212,9 +231,6 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     }
     if(f->control==0x50u)return false;
     switch(offset) {
-    case 0x10u:
-        if(value)return false;
-        f->interrupt_enable=value;f->programmed|=INTERRUPT_ENABLE;return true;
     case 0x40cu:
         if(value>0xffu || (value && (value&(value-1u))))return false;
         if(f->selected!=value) {
@@ -237,9 +253,6 @@ bool s5l8920_fmi_write(s5l8920_fmi_t *f,uint32_t offset,uint32_t value) {
     case 0x424u:
         if(value)return false;
         f->programmed|=PIO;return true;
-    case 0x440u:
-        if(value)return false;
-        f->status_interrupt_mask=value;f->programmed|=STATUS_MASK;return true;
     case 0x44cu:
         if(value!=0x4040u)return false;
         f->rbb_config=value;f->programmed|=RBB;return true;

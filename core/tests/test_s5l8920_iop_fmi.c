@@ -11,8 +11,9 @@ static s5l8920_fmi_t fmi[S5L8920_FMI_COUNT];
 static unsigned passed,failed;
 #define CHECK(x) do { if(x)passed++;else {failed++;printf("FAIL %s:%d: %s\n",__func__,__LINE__,#x);} } while(0)
 static void wr(uint32_t a,uint32_t v) { board.bus.write32(&board,a,v); }
-static void init(void) {
+static void init_with_vic(bool vic) {
     s5l8920_free(&board);CHECK(s5l8920_init(&board));s5l8920_iop_init(&iop);
+    if(vic) {CHECK(s5l8920_iop_vic_configure(&iop));CHECK(s5l8920_iop_timer_configure(&iop));}
     CHECK(s5l8920_clock_gate_configure(&board,S5L8920_IOP_RESET_GATE,15));
     CHECK(s5l8920_clock_gate_configure(&board,S5L8920_IOP_DEPENDENCY_GATE,15));
     CHECK(s5l8920_iop_attach(&board,&iop));
@@ -32,6 +33,7 @@ static void init(void) {
     wr(BASE+20,0xe1c010b0u);wr(BASE+24,0xe1d010b0u); /* STRH/LDRH. */
     CHECK(!board.bus_failure.reason && iop.running);
 }
+static void init(void) {init_with_vic(false);}
 static void bindings_cleared(void) {
     CHECK(!iop.servicing && !iop.memory && !iop.signal_ap && !iop.timebase &&
           !iop.fmi && !iop.sdhc && !iop.gate && !iop.memory_owner);
@@ -134,6 +136,7 @@ static bool capability(void *owner,unsigned bank,uint32_t offset,bool write,uint
     capability_calls++;s5l8920_iop_t before=iop;
     CHECK(s5l8920_iop_service_with_fmi(&iop,memory,NULL,NULL,capability,owner)==ARM_HALT);
     CHECK(!s5l8920_iop_reset_line(&iop,true) && !s5l8920_iop_ram_configure(&iop,0x1000));
+    CHECK(!s5l8920_iop_fmi_input(&iop,bank,true));
     CHECK(!memcmp(&before,&iop,sizeof iop));
     if(capability_refuse)return false;
     return write?s5l8920_fmi_write(&fmi[bank],offset,*value):s5l8920_fmi_read(&fmi[bank],offset,value);
@@ -387,10 +390,120 @@ static void test_gate_fifo_reset(void) {
         store(GATE(S5L8920_FMI_GATE+bank),15);CHECK(!f->reset_asserted && !f->enabled);
     }
 }
+static unsigned status_calls;
+static uint8_t status_byte;
+static bool status_refuse;
+static bool irq_command(void *owner,unsigned chip,uint8_t command) {
+    CHECK(owner==&board && chip==0 && command==0x70);return true;
+}
+static bool irq_sample(void *owner,unsigned chip,uint8_t *value) {
+    CHECK(owner==&board && chip==0);status_calls++;
+    s5l8920_iop_t before=iop;
+    CHECK(s5l8920_iop_board_service(&board)==ARM_HALT && !memcmp(&before,&iop,sizeof iop));
+    *value=status_refuse?0xff:status_byte;return !status_refuse;
+}
+static const s5l8920_fmi_status_device_t irq_status={irq_command,irq_sample};
+static void start_status(unsigned bank) {
+    uint32_t a=S5L8920_FMI_BASE+bank*S5L8920_FMI_STRIDE;
+    store(a+0x400,1);store(a+0x408,0x11111);store(a+0x40c,1);
+    store(a+0x44c,0x4040);store(a+0x414,0x70);store(a+0x410,1);
+    CHECK(s5l8920_fmi_board_service_io(&board,bank,NULL,&irq_status,&board));
+    store(a+0x444,1);store(a+0x440,0);store(a+0x10,0);store(a+0x424,0);
+    store(a+0x410,0x50);store(a+0x440,0x20);store(a+0x10,0x100);
+}
+static void test_status_interrupts(void) {
+    init_with_vic(true);status_calls=0;status_refuse=false;status_byte=0x80;
+    CHECK(!s5l8920_fmi_irq(NULL) && !s5l8920_fmi_irq(&fmi[0]));
+    s5l8920_iop_t cold=iop;
+    CHECK(!s5l8920_iop_fmi_input(NULL,0,true) && !s5l8920_iop_fmi_input(&iop,2,true));
+    CHECK(!memcmp(&cold,&iop,sizeof iop));
+    iop.servicing=true;cold=iop;
+    CHECK(!s5l8920_iop_fmi_input(&iop,0,true) && !memcmp(&cold,&iop,sizeof iop));iop.servicing=false;
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTENABLE,0xc0000000u));
+    for(unsigned bank=0;bank<2;bank++)start_status(bank);
+    CHECK(!iop.cpu.irq_line && !iop.vic[0].input);
+    for(unsigned bank=0;bank<2;bank++) {
+        s5l8920_fmi_t pending=fmi[bank];s5l8920_iop_t saved=iop;
+        CHECK(!s5l8920_fmi_board_service_io(&board,bank,NULL,NULL,NULL));
+        status_refuse=true;
+        CHECK(!s5l8920_fmi_board_service_io(&board,bank,NULL,&irq_status,&board));
+        CHECK(!memcmp(&pending,&fmi[bank],sizeof pending) && !memcmp(&saved,&iop,sizeof saved));
+        status_refuse=false;
+        CHECK(s5l8920_fmi_board_service_io(&board,bank,NULL,&irq_status,&board));
+        CHECK(fmi[bank].pending && fmi[bank].data==0x80 && !s5l8920_fmi_irq(&fmi[bank]));
+        uint32_t a=S5L8920_FMI_BASE+bank*S5L8920_FMI_STRIDE;
+        for(unsigned n=0;n<3;n++)CHECK(load(a+0xc)==0 && !iop.cpu.irq_line);
+    }
+    status_byte=0xc0;
+    wr(GATE(S5L8920_FMI_GATE),0);unsigned calls=status_calls;
+    CHECK(s5l8920_fmi_board_service_io(&board,0,NULL,&irq_status,&board) && status_calls==calls);
+    CHECK(!s5l8920_fmi_irq(&fmi[0]) && fmi[0].pending);
+    wr(GATE(S5L8920_FMI_GATE),15);
+    for(unsigned bank=0;bank<2;bank++) {
+        CHECK(s5l8920_fmi_board_service_io(&board,bank,NULL,&irq_status,&board));
+        CHECK(s5l8920_fmi_irq(&fmi[bank]) && !fmi[bank].pending && fmi[bank].status==0x20);
+    }
+    CHECK(iop.cpu.irq_line && iop.vic[0].input==0xc0000000u);
+    uint32_t a=S5L8920_FMI_BASE,b=a+S5L8920_FMI_STRIDE;
+    CHECK(load(a+0xc)==0x100 && load(b+0xc)==0x100);
+    store(a+0xc,0xf);CHECK(load(a+0xc)==0x100 && s5l8920_fmi_irq(&fmi[0]));
+    /* FMI mask, controller enable, and VIC enable each gate distinct state. */
+    store(a+0x440,0);CHECK(load(a+0xc)==0 && fmi[0].status==0x20 && iop.vic[0].input==0x40000000u);
+    store(a+0x440,0x20);wr(a+0x10,0);
+    CHECK(load(a+0xc)==0x100 && iop.vic[0].input==0x40000000u);
+    wr(a+0x10,0x102);CHECK(iop.vic[0].input==0xc0000000u && load(a+0x10)==0x102);
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTENCLEAR,0xc0000000u));
+    CHECK(!iop.cpu.irq_line && iop.vic[0].input==0xc0000000u);
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTENABLE,0xc0000000u));
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTSELECT,0x80000000u));
+    CHECK(iop.cpu.irq_line && iop.cpu.fiq_line);
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTSELECT,0));
+    wr(GATE(S5L8920_FMI_GATE),0);CHECK(iop.vic[0].input==0xc0000000u && iop.cpu.irq_line);
+    wr(GATE(S5L8920_FMI_GATE),15);
+    /* Unrelated software and timer sources survive FMI masking and reset. */
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_SOFTINT,8));
+    CHECK(s5l8920_iop_vic_write(&iop,PL192_INTENABLE,0x28));
+    store(0xbf10020c,1);store(0xbf100224,1);CHECK(s5l8920_iop_timer_clock(&iop,1));
+    store(a+0x444,0x31ffff);CHECK(!s5l8920_fmi_irq(&fmi[0]) && iop.vic[0].input==0x40000020u);
+    wr(GATE(S5L8920_IOP_RESET_GATE),0x8000000fu);
+    CHECK(iop.cpu.irq_line && iop.vic[0].input==0x40000020u && iop.vic[0].soft==8);
+    wr(GATE(S5L8920_IOP_RESET_GATE),15);
+    wr(GATE(S5L8920_FMI_GATE+1),0x8000000fu);
+    CHECK(!s5l8920_fmi_irq(&fmi[1]) && iop.vic[0].input==0x20 && iop.vic[0].soft==8 && iop.cpu.irq_line);
+    CHECK(!board.cpu.irq_line && !board.cpu.fiq_line && !board.bus_failure.reason && !board.timebase_ticks);
+    /* Unknown events remain refused atomically, including former bit13 stop. */
+    const uint32_t offsets[]={0x10,0x440,0xc},values[]={0x2000,0x40,0x100};
+    for(unsigned n=0;n<3;n++) {
+        s5l8920_fmi_t saved=fmi[0];s5l8920_iop_t saved_iop=iop;
+        wr(a+offsets[n],values[n]);CHECK(board.bus_failure.reason==S5L8920_BUS_REGISTER_REFUSED);
+        CHECK(!memcmp(&saved,&fmi[0],sizeof saved) && !memcmp(&saved_iop,&iop,sizeof saved_iop));
+        s5l8920_clear_bus_failure(&board);
+    }
+}
+static void test_sector_interrupt(void) {
+    init_with_vic(true);CHECK(s5l8920_iop_vic_write(&iop,PL192_INTENABLE,0x80000000u));
+    uint32_t a=S5L8920_FMI_BASE;CHECK(s5l8920_fmi_data_configure(&fmi[0],512,32));
+    page_calls=stream_calls=0;
+    store(a+0x400,1);store(a+0x408,0x11111);store(a+0x40c,1);store(a+0x414,0x3000);
+    store(a+0x418,0x10000);store(a+0x41c,0);store(a+0x420,4);store(a+0x410,0xb);
+    const s5l8920_fmi_endpoint_t cap={NULL,gate_page};
+    CHECK(s5l8920_fmi_board_service_endpoint(&board,0,&cap,&board));
+    store(a+0x444,0xb);store(a+0x814,0);store(a+0x440,0);store(a+0x10,2);
+    store(a,0xaa083);store(a+4,3);
+    for(unsigned n=0;n<34;n++) {
+        CHECK(s5l8920_fmi_data_board_service(&board,0,gate_stream,&board));
+        CHECK(s5l8920_fmi_irq(&fmi[0])==(n==33) && iop.cpu.irq_line==(n==33));
+    }
+    CHECK(fmi[0].stream_bytes==544 && fmi[0].sectors_completed==1 && load(a+0xc)==2);
+    store(a+0x10,0);CHECK(!iop.cpu.irq_line && load(a+0xc)==2);
+    store(a+0x10,2);CHECK(iop.cpu.irq_line);store(a+0xc,2);
+    CHECK(!iop.cpu.irq_line && !load(a+0xc) && fmi[0].fifo_count[0]==512 && fmi[0].fifo_count[1]==32);
+    CHECK(!board.bus_failure.reason && !iop.failure.reason);
+}
 int main(void) {
     test_original_enable();test_shared_controllers();test_refusals();test_borrowed_lifetime();
     test_bus_alignment();test_reset_and_reentry();test_shared_reset_gates();test_gate_guards();
-    test_gate_lifetime();test_gate_fifo_reset();s5l8920_free(&board);
+    test_gate_lifetime();test_gate_fifo_reset();test_status_interrupts();test_sector_interrupt();s5l8920_free(&board);
     printf("s5l8920_iop_fmi: %u passed, %u failed\n",passed,failed);
     return failed?1:0;
 }

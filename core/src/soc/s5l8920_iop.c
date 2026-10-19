@@ -30,6 +30,12 @@ static void refresh_interrupts(s5l8920_iop_t *i) {
     }
     i->cpu.irq_line=irq;i->cpu.fiq_line=fiq;
 }
+bool s5l8920_iop_fmi_input(s5l8920_iop_t *i,unsigned bank,bool level) {
+    if(!i || !i->initialized || !i->vic_configured || i->servicing ||
+       bank>=S5L8920_FMI_COUNT)return false;
+    (void)pl192_set_line(&i->vic[0],31u-bank,level);
+    refresh_interrupts(i);return true;
+}
 bool s5l8920_iop_timer_configure(s5l8920_iop_t *i) {
     if(!i || !i->initialized || i->servicing || !i->vic_configured)return false;
     if(i->timer.configured)return true;
