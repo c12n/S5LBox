@@ -87,11 +87,11 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 - (void)frame {
     NSData *data=[self.surface takeFrame]; if (!data) return;
     const uint8_t *sample=(const uint8_t *)data.bytes+(10*320+10)*4;
-    unsigned color=(abs((int)sample[0]-64)<4 && abs((int)sample[1]-31)<4 && abs((int)sample[2]-15)<4)?1:
+    unsigned matchedColor=(abs((int)sample[0]-64)<4 && abs((int)sample[1]-31)<4 && abs((int)sample[2]-15)<4)?1:
         (abs((int)sample[0]-56)<4 && abs((int)sample[1]-82)<4 && abs((int)sample[2]-13)<4)?2:0;
-    if (color && !(self.verifiedColors&color)) {
-        self.verifiedColors|=color;
-        printf("S5LBOX-HLE-VISUAL PIXELS %s PASS\n",color==1?"initial":"touch");
+    if (matchedColor && !(self.verifiedColors&matchedColor)) {
+        self.verifiedColors|=matchedColor;
+        printf("S5LBOX-HLE-VISUAL PIXELS %s PASS\n",matchedColor==1?"initial":"touch");
     }
     void *retained=(__bridge_retained void *)data;
     CGDataProviderRef provider=CGDataProviderCreateWithData(retained,data.bytes,data.length,ReleaseFrame);
