@@ -1478,13 +1478,15 @@ bool s5l8920_pmu_config_service(s5l8920_t *m,uint64_t sequence) {
         c->control=0x2au;c->control_programmed=true;
         return true;
     }
-    if (i->subaddress>=0x50u && i->subaddress<=0x57u && i->length==1u) {
-        unsigned pin=i->subaddress-0x50u;uint8_t bit=(uint8_t)(1u<<pin);
-        if (!i->write) return (c->pins_programmed&bit)!=0u &&
-            s5l8920_i2c_complete(m,0u,sequence,true,c->pins+pin,1u);
-        uint8_t value=i->tx[0];
+    if (i->subaddress>=0x50u && i->subaddress<=0x57u &&
+        (i->length==1u || (i->subaddress==0x50u && i->length==8u))) {
+        unsigned pin=i->subaddress-0x50u,length=i->length;
+        uint8_t mask=(uint8_t)(((1u<<length)-1u)<<pin);
+        if (!i->write) return (c->pins_programmed&mask)==mask &&
+            s5l8920_i2c_complete(m,0u,sequence,true,c->pins+pin,length);
+        uint8_t value[8];memcpy(value,i->tx,length);
         if (!s5l8920_i2c_complete(m,0u,sequence,true,NULL,0u)) return false;
-        c->pins[pin]=value;c->pins_programmed|=bit;
+        memcpy(c->pins+pin,value,length);c->pins_programmed|=mask;
         return true;
     }
     if (i->subaddress<0x59u || i->subaddress>0x5bu ||

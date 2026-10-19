@@ -1448,12 +1448,23 @@ Reads remain pending until their byte is known.
 
 The existing configuration service also supports independent pin bytes
 `0x50..0x57`. Exact byte writes establish their retained configuration, including
-the LLB's `0x50=0x11`; reads require prior programming. Burst accesses and
-neighboring registers remain unimplemented. These bytes are separate from
+the LLB's `0x50=0x11`. The kernel's eight-byte reads and writes starting at `0x50`
+are also supported. Reads require every requested byte to have been programmed;
+a complete image write commits all eight bytes after successful I2C completion.
+Partial and shifted bursts and neighboring registers remain unimplemented.
+These bytes are separate from
 the packed selectors at `0x59..0x5b` and the explicit live status at `0x05..0x08`.
 Neither LDO nor pin configuration creates electrical pin samples, voltage
 readiness, settling, power transitions or spontaneous events. Functional SoC
 reset retains the external PMU state; free/init clears it.
+
+The original GPIO-default routine at `0x80ae6bbc` reads the independent status
+image and all eight pin bytes, applies the device tree's eight mask/value pairs,
+then writes the complete pin image. The matching activation property does not
+use the conditional status-bit merge; the quiesce property uses status bits
+for pins 4 and 6. Supporting these transfers supplies no initial status or pin
+values. Unknown inputs still stop the original request. This is configuration
+support, not evidence of physical pin behavior or completed kernel startup.
 
 The complete original kernel LDO method at `0x80ae8a74` passed 3,522 calls
 against the production service, exercising the rail table, flags, enables,

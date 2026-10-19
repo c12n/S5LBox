@@ -2523,7 +2523,8 @@ static void test_pmu_pins(s5l8920_t *m) {
         CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==255u,"reset lost PMU pin configuration");
     }
     const unsigned bad[][3]={{0x75u,0x50u,1u},{0x74u,0x4fu,1u},{0x74u,0x58u,1u},
-        {0x74u,0x50u,2u},{0x74u,0x50u,8u},{0x74u,0x57u,2u}};
+        {0x74u,0x50u,2u},{0x74u,0x51u,8u},{0x74u,0x57u,2u},
+        {0x75u,0x50u,8u},{0x74u,0x57u,8u}};
     for (unsigned n=0;n<sizeof bad/sizeof bad[0];n++) for (unsigned wr=0;wr<2u;wr++) {
         uint64_t seq=pmu_request(m,bad[n][0],bad[n][1],wr!=0u,bad[n][2],0u);memcpy(&before,m,sizeof before);
         CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported pin configuration shape");
@@ -2540,6 +2541,99 @@ static void test_pmu_pins(s5l8920_t *m) {
     s5l8920_bus_failure_t failure=m->bus_failure;
     CHECK(failure.reason && s5l8920_pmu_config_service(m,seq) &&
           !memcmp(&failure,&m->bus_failure,sizeof failure),"pin read repaired bus failure");
+}
+
+static uint64_t pmu_pin_image_request(s5l8920_t *m,const uint8_t image[8]) {
+    const uint32_t offsets[]={8u,12u,0u,16u,20u,24u};
+    const uint32_t values[]={0xf0u,0x37u,0x74u,0x50u,0u,8u};
+    for(unsigned n=0;n<6u;n++)m->bus.write32(m,S5L8920_I2C_BASE+offsets[n],values[n]);
+    for(unsigned n=0;n<8u;n++)m->bus.write32(m,S5L8920_I2C_BASE+32u,image[n]);
+    m->bus.write32(m,S5L8920_I2C_BASE+36u,5u);
+    CHECK(!m->bus_failure.reason && m->i2c[0].active,"pin image request staging");
+    return m->i2c[0].sequence;
+}
+
+static void test_pmu_pin_image(s5l8920_t *m) {
+    static s5l8920_t before;
+    CHECK(s5l8920_init(m),"pin image board initialization");
+    if(!m->ram)return;
+    uint8_t image[8];
+    for(unsigned n=0;n<8u;n++) {
+        uint64_t seq=pmu_request(m,0x74u,0x50u,false,8u,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),
+              "partial pin knowledge fabricated a complete image");
+        CHECK(s5l8920_reset(m),"cancel partial pin image read");
+        image[n]=(uint8_t)(0x11u+29u*n);
+        seq=pmu_request(m,0x74u,0x50u+n,true,1u,image[n]);
+        CHECK(s5l8920_pmu_config_service(m,seq),"program individual pin for image read");
+    }
+    uint64_t seq=pmu_request(m,0x74u,0x50u,false,8u,0u);
+    bool accepted=s5l8920_pmu_config_service(m,seq);
+    CHECK(accepted,"original eight-byte PMU pin read refused");
+    if(!accepted){s5l8920_free(m);return;}
+    for(unsigned n=0;n<8u;n++)
+        CHECK(m->bus.read32(m,S5L8920_I2C_BASE+32u)==image[n],"scalar programming/burst read byte order");
+    m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+    for(unsigned pattern=0;pattern<3u;pattern++) {
+        for(unsigned n=0;n<8u;n++)image[n]=(uint8_t)(pattern==0u?0u:pattern==1u?255u:0xd3u^(37u*n));
+        vic_write(m,0u,PL192_INTENABLE,1u<<19);
+        seq=pmu_pin_image_request(m,image);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq-1u) && !s5l8920_pmu_config_service(m,seq+1u) &&
+              !s5l8920_pmu_events_service(m,seq) && !s5l8920_pmu_ldo_service(m,seq) &&
+              !memcmp(&before,m,sizeof before),"pin image token/service isolation");
+        CHECK(s5l8920_pmu_config_service(m,seq) && m->cpu.irq_line &&
+              m->pmu_config.pins_programmed==255u && !memcmp(m->pmu_config.pins,image,8u),
+              "complete original pin image programming/IRQ");
+        before.cpu.irq_line=m->cpu.irq_line;
+        memcpy(before.pmu_config.pins,image,8u);before.pmu_config.pins_programmed=255u;
+        CHECK(!memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && !memcmp(before.gpio,m->gpio,sizeof m->gpio) &&
+              !memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events) &&
+              !memcmp(&before.pmu_ldo,&m->pmu_ldo,sizeof m->pmu_ldo) &&
+              !memcmp(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config) &&
+              before.timebase_ticks==m->timebase_ticks,"pin image invented unrelated effects");
+        memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"replayed pin image committed");
+        CHECK(s5l8920_reset(m),"pin image retention reset");
+        seq=pmu_request(m,0x74u,0x50u,false,8u,0u);
+        CHECK(s5l8920_pmu_config_service(m,seq),"reset retained complete pin image");
+        for(unsigned n=0;n<8u;n++)
+            CHECK(m->bus.read32(m,S5L8920_I2C_BASE+32u)==image[n],"burst programming/burst read byte order");
+        m->bus.write32(m,S5L8920_I2C_BASE+12u,0x10u);
+        for(unsigned n=0;n<8u;n++) {
+            seq=pmu_request(m,0x74u,0x50u+n,false,1u,0u);
+            CHECK(s5l8920_pmu_config_service(m,seq) && pmu_read_bytes(m,1u)==image[n],
+                  "burst programming/scalar read coherence");
+        }
+    }
+    s5l8920_pmu_config_t saved=m->pmu_config;image[7]^=0xffu;
+    seq=pmu_pin_image_request(m,image);
+    CHECK(s5l8920_i2c_complete(m,0u,seq,false,NULL,0u) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_config,sizeof saved),"NACK committed pin image");
+    CHECK(s5l8920_reset(m),"clear pin image NACK");
+    seq=pmu_pin_image_request(m,image);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&saved,&m->pmu_config,sizeof saved),"reset committed pending pin image");
+    for(unsigned length=2u;length<=9u;length++)if(length!=8u)for(unsigned wr=0;wr<2u;wr++) {
+        seq=pmu_request(m,0x74u,0x50u,wr!=0u,length,0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_config_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported partial pin image");
+        CHECK(s5l8920_reset(m),"cancel unsupported pin image");
+    }
+    seq=pmu_request(m,0x74u,0x50u,false,8u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t failure=m->bus_failure;
+    CHECK(failure.reason && s5l8920_pmu_config_service(m,seq) &&
+          !memcmp(&failure,&m->bus_failure,sizeof failure),"pin image service repaired bus failure");
+    s5l8920_free(m);
+    CHECK(!m->ram && !m->pmu_config.pins_programmed,"free retained pin image");
+    CHECK(s5l8920_init(m),"fresh pin image board");
+    if(!m->ram)return;
+    seq=pmu_pin_image_request(m,image);
+    CHECK(s5l8920_pmu_config_service(m,seq) && m->pmu_config.pins_programmed==255u &&
+          !memcmp(m->pmu_config.pins,image,8u),"complete write establishes previously unknown pin image");
+    seq=pmu_request(m,0x74u,0x50u,false,8u,0u);
+    CHECK(s5l8920_pmu_config_service(m,seq),"fresh complete pin image readback");
+    for(unsigned n=0;n<8u;n++)
+        CHECK(m->bus.read32(m,S5L8920_I2C_BASE+32u)==image[n],"fresh pin image byte order");
+    s5l8920_free(m);
 }
 
 static void test_dmc_refresh(s5l8920_t *m) {
@@ -4319,6 +4413,7 @@ int main(void) {
     test_empty_nvram_proxy();
     s5l8920_t m = {0};
     if (!test_cpu_idle_gate(&m)) return 1;
+    test_pmu_pin_image(&m);
     CHECK(s5l8920_init(&m), "initialization");
     if (!m.ram) return 1;
     test_geometry_and_refusals(&m);

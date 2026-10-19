@@ -552,7 +552,9 @@ bool s5l8920_pmu_adc_complete(s5l8920_t *m, uint64_t sequence, uint8_t low, uint
  * Registers59..5b hold eight packed three-bit fields: exact byte accesses or
  * a three-byte transfer beginning at59. Every read requires prior programming
  * of all requested bytes. Registers50..57 are independent pin configuration
- * bytes, supporting exact byte writes and retained reads after programming.
+ * bytes, supporting exact byte accesses or the original kernel's eight-byte
+ * image at50. Reads require every requested byte to have been programmed;
+ * successful image writes establish all eight bytes atomically.
  * The separate LDO suspend image at12/13 accepts only the matching board's
  * complete two-byte write00/40. It stages that requested configuration without
  * changing live LDO fields. Readback, partial or different images, and applying
