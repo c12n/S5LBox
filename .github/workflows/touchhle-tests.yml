@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           archive=work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
           test -s "$archive"
-          xcrun lipo -verify_arch arm64 "$archive"
+          xcrun lipo "$archive" -verify_arch arm64
 
   interpreter-runtime:
     name: Rust frameworks with the C interpreter
