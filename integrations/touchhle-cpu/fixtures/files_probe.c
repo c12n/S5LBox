@@ -6,5 +6,5 @@ int main(int argc, char **argv) {
     if (argc!=3 || getuid()!=0) return 2;
     long maximum=sysconf(_SC_OPEN_MAX);
     for (int fd=3;fd<maximum;fd++) close(fd);
-    return s5lbox_hle_files(0,argv[1],argv[2],65534,65534);
+    return s5lbox_hle_files(0,argv[1],argv[2],65534,65534,0);
 }

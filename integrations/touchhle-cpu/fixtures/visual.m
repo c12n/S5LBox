@@ -54,6 +54,7 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     _window=[[UIWindow alloc] initWithFrame:(CGRect){{0,0},{320,480}}];
     [_window setBackgroundColor:[UIColor colorWithRed:0.06f green:0.12f blue:0.25f alpha:1]];
     _label=[[UILabel alloc] initWithFrame:(CGRect){{12,130},{296,60}}];
+    [_label setBackgroundColor:[UIColor colorWithRed:0 green:0 blue:0 alpha:0]];
     [_label setText:@"ARMv6 UIKit is running"];
     [_label setTextColor:[UIColor whiteColor]];
     [_label setTextAlignment:1];

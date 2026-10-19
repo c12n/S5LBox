@@ -6,5 +6,5 @@
  * selected application's chroot and permanently drops root. Never call in
  * the package-service parent or on the physical host's app filesystem. */
 int s5lbox_hle_files(int peer, const char *state, const char *applications,
-                     uid_t mobile_uid, gid_t mobile_gid);
+                     uid_t mobile_uid, gid_t mobile_gid, int guard_launches);
 #endif

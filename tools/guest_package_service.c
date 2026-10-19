@@ -367,7 +367,7 @@ static void connection(void) {
     }
     else if (request[36] == 'I' || request[36] == 'R') transaction(request[36]);
     else if (modern && request[36]=='F') apply_finish();
-    else if (modern && request[36]=='H') {
+    else if (modern && (request[36]=='H' || request[36]=='L')) {
         // The same machine-specific capability authenticates the file child.
         // Keep package execution in this parent; never chroot/drop its uid.
         if (!setup_ready()) return;
@@ -385,7 +385,7 @@ static void connection(void) {
             long maximum=sysconf(_SC_OPEN_MAX);
             if (maximum<0) _exit(1);
             for (int fd=0;fd<maximum;fd++) if (fd!=peer) close(fd);
-            int result=s5lbox_hle_files(peer,STATE,APPLICATIONS,501,501);
+            int result=s5lbox_hle_files(peer,STATE,APPLICATIONS,501,501,request[36]=='L');
             close(peer); _exit(result);
         }
         file_child=child;

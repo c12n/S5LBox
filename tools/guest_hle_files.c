@@ -4,6 +4,9 @@
  * mutations. See integrations/touchhle-cpu/files-protocol.md. */
 #define _DEFAULT_SOURCE
 #include "guest_hle_files.h"
+#if defined(__APPLE__) && !defined(S5LBOX_PACKAGE_TEST)
+#include "guest_hle_launch_guard.h"
+#endif
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -191,9 +194,9 @@ static int request(handle *items, uint32_t *next, unsigned op, cursor c,
     return ENOSYS;
 }
 int s5lbox_hle_files(int peer, const char *state, const char *applications,
-                     uid_t mobile_uid, gid_t mobile_gid) {
+                     uid_t mobile_uid, gid_t mobile_gid, int guard_launches) {
     unsigned char uuid[37]; char root[PATH_MAX],lease[PATH_MAX]; struct stat st;
-    int leasefd=-1,rootfd=-1,error=0;
+    int leasefd=-1,rootfd=-1,guardfd=-1,error=0;
     /* Length is fixed: no path, command or arbitrary root from the client. */
     if (!transfer(peer,uuid,36,0,0)) return 1;
     uuid[36]=0;
@@ -210,6 +213,14 @@ int s5lbox_hle_files(int peer, const char *state, const char *applications,
     if (leasefd<0) { error=errno; goto rejected; }
     if (fstat(leasefd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=0 || (st.st_mode&0077)) { error=EACCES; goto rejected; }
     if (flock(leasefd,LOCK_EX|LOCK_NB)) { error=EBUSY; goto rejected; }
+    if (guard_launches) {
+#if defined(__APPLE__) && !defined(S5LBOX_PACKAGE_TEST)
+        guardfd=s5lbox_hle_launch_acquire((const char *)uuid);
+        if (guardfd<0) { error=errno; goto rejected; }
+#else
+        error=ENOTSUP; goto rejected;
+#endif
+    }
     rootfd=open(root,O_RDONLY|O_NOFOLLOW);
     if (rootfd<0) { error=errno; goto rejected; }
     if (fstat(rootfd,&st) || !S_ISDIR(st.st_mode) || st.st_uid!=mobile_uid) { error=EACCES; goto rejected; }
@@ -220,10 +231,10 @@ int s5lbox_hle_files(int peer, const char *state, const char *applications,
     }
     /* Only the socket and a non-directory lease fd survive the jail entry.
      * A caller must close other inherited fds before calling this function. */
-    if (!reply(peer,0,NULL,0)) { close(leasefd); return 1; }
+    if (!reply(peer,0,NULL,0)) { if (guardfd>=0) close(guardfd); close(leasefd); return 1; }
     unsigned char *input=malloc(LIMIT),*output=malloc(LIMIT);
     handle items[HANDLES]; memset(items,0,sizeof items); uint32_t next=1;
-    if (!input || !output) { free(input); free(output); close(leasefd); return 1; }
+    if (!input || !output) { free(input); free(output); if (guardfd>=0) close(guardfd); close(leasefd); return 1; }
     for (;;) {
         unsigned char header[4];
         if (!transfer(peer,header,4,0,1)) break;
@@ -234,10 +245,11 @@ int s5lbox_hle_files(int peer, const char *state, const char *applications,
         if (!reply(peer,error,output,error?0:size)) break;
     }
     for (unsigned i=0;i<HANDLES;i++) if (items[i].id) close_handle(items+i);
-    free(input); free(output); close(leasefd); return 0;
+    free(input); free(output); if (guardfd>=0) close(guardfd); close(leasefd); return 0;
 rejected:
     reply(peer,error,NULL,0);
     if (rootfd>=0) close(rootfd);
+    if (guardfd>=0) close(guardfd);
     if (leasefd>=0) close(leasefd);
     return 1;
 }

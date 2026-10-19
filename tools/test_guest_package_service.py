@@ -104,8 +104,8 @@ def main():
                 container = root / "applications" / uuid.decode()
                 container.mkdir(parents=True, mode=0o700)
                 os.chown(container, 501, 501)
-                def files_connect(identity=uuid):
-                    sock = connect(b"H", modern=True)
+                def files_connect(identity=uuid, operation=b"H"):
+                    sock = connect(operation, modern=True)
                     sock.sendall(identity)
                     length, result = struct.unpack("!II", exact(sock, 8))
                     assert length == 4
@@ -138,6 +138,15 @@ def main():
                     time.sleep(0.02)
                 else:
                     raise AssertionError("file child failed to release its lease")
+                # This fixture has no SpringBoard hook. A production launch
+                # request must fail closed, never downgrade to raw H access.
+                for _ in range(100):
+                    guarded, result = files_connect(operation=b"L")
+                    guarded.close()
+                    if result != errno.EBUSY:
+                        break
+                    time.sleep(0.02)
+                assert result == errno.ENOTSUP
                 checks += 6
             # A free dpkg lock does not mean the first-boot finalizer is done.
             # Even status must wait for its durable completion marker, so the

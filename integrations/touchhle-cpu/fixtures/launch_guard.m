@@ -67,7 +67,7 @@ static NSTask *client(NSString *executable,NSString *uuid,int expected,NSPipe **
     CHECK([task launchAndReturnError:NULL]);
     NSData *reply=nil; pumpUntil(out.fileHandleForReading,task,&reply);
     NSString *text=[[[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding] autorelease];
-    CHECK([text isEqualToString:[NSString stringWithFormat:@"%d\n",expected]]);
+    CHECK(([text isEqualToString:[NSString stringWithFormat:@"%d\n",expected]]));
     return task;
 }
 static void finish(NSTask *task,NSPipe *input) {

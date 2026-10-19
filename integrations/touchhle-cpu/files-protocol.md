@@ -7,12 +7,17 @@ back into a running disk image.
 
 The authenticated package helper forks a child, closes inherited file
 descriptors except its connection, then calls `s5lbox_hle_files`. Launch
-coordination must be connected before exposing it to the app.
+coordination must be installed and device-verified before exposing it to users.
 The child reads a 36-byte application-container UUID, takes a single-session
 lease, enters that installed application's directory with `chroot`, and drops
 all supplementary groups and root privileges. It replies with an empty result
 on success. It must exit after returning; it cannot rejoin the privileged
-package-service loop. The lease is not yet a SpringBoard launch exclusion.
+package-service loop. The `H` test channel has only the single-file-session
+lease. The app uses `L` instead: it additionally requires an exclusive kernel
+launch lock and a live SpringBoard quiescence reply before opening any app
+files. There is no fallback from `L` to `H`. Missing hooks, active/pending
+native user apps, or a retained launchd job reject the launch. Both locks live
+until the broker closes the app files or its process exits.
 
 All integers are big-endian. A request is `u32 length, u8 operation, payload`.
 The length includes the operation byte and is limited to 65,536. A response is

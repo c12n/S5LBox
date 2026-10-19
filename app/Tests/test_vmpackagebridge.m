@@ -48,7 +48,7 @@ static unsigned checks, failures;
 @end
 @implementation PackageFilesBridge
 - (VMUSBService *)connect:(char)operation error:(NSError **)error {
-    (void)error; CHECK(operation=='H'); return self.fixture;
+    (void)error; CHECK(operation=='L'); return self.fixture;
 }
 @end
 static PackageStatusFixture *FileReply(uint32_t length, uint32_t error) {
