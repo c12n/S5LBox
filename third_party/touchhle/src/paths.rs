@@ -72,7 +72,8 @@ impl ResourceFile {
             file: {
                 let base_path = get_macos_bundled_resources_path();
                 // When not in a bundle, look in the current directory.
-                let path = base_path.as_deref().unwrap_or(Path::new(".")).join(path);
+                let path = crate::host::resource_path(path)
+                    .unwrap_or_else(|| base_path.as_deref().unwrap_or(Path::new(".")).join(path));
                 std::fs::File::open(path).map_err(|e| e.to_string())?
             },
         })
@@ -113,6 +114,9 @@ pub const SANDBOX_DIR: &str = "touchHLE_sandbox";
 /// Get a platform-specific base path needed for accessing touchHLE's
 /// user-modifiable files. This is empty on platforms other than Android.
 pub fn user_data_base_path() -> Cow<'static, Path> {
+    if let Some(path) = crate::host::data_path() {
+        return Cow::Owned(path);
+    }
     #[cfg(target_os = "android")]
     unsafe {
         // This is an exception to the rule that SDL2 should only be used

@@ -1411,6 +1411,12 @@ impl Environment {
                         return *status;
                     }
 
+                    if e.is::<crate::host::StopRequested>() {
+                        env.threads[env.current_thread].host_context = Some(curr_host_context);
+                        drop(env);
+                        std::panic::resume_unwind(e);
+                    }
+
                     echo!("Register state immediately after panic:");
                     env.dump_all_regs();
                     env.stack_trace_all();
@@ -1495,6 +1501,11 @@ impl Environment {
             match res {
                 Ok(_) => {}
                 Err(e) => {
+                    if e.is::<crate::host::StopRequested>() {
+                        self.threads[self.current_thread].host_context = old_context.take();
+                        drop(self);
+                        std::panic::resume_unwind(e);
+                    }
                     if let Some(window) = self.window.as_mut() {
                         window.on_main_stack = true;
                     };
@@ -1670,6 +1681,7 @@ impl Environment {
         assert!(self.threads[initial_thread].guest_context.is_none());
 
         loop {
+            crate::host::poll_control();
             while self
                 .remaining_ticks
                 .is_none_or(|remaining_ticks| remaining_ticks > 0)
@@ -1742,6 +1754,7 @@ impl Environment {
         // we make sure that this works by immediately fufilling conditions
         // (relocking mutexes, decrementing semaphores, etc.)!
         loop {
+            crate::host::poll_control();
             // Try to find a new thread to execute, starting with the thread
             // following the one currently executing.
             let mut next_awakening: Option<Instant> = None;
@@ -1882,7 +1895,7 @@ impl Environment {
             if let Some(next_awakening) = next_awakening {
                 let duration = next_awakening.duration_since(Instant::now());
                 log_dbg!("All threads blocked/asleep, sleeping for {:?}.", duration);
-                std::thread::sleep(duration);
+                crate::host::sleep(duration);
                 // Try again, there should be some thread awake now (or
                 // there will be soon, since timing is approximate).
                 continue;

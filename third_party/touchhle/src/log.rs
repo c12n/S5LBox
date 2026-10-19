@@ -21,6 +21,13 @@ pub fn get_log_file() -> &'static File {
     &LOG_FILE
 }
 
+pub fn write_log(bytes: &[u8]) {
+    use std::io::Write;
+    if !crate::host::write_log(bytes) {
+        let _ = get_log_file().write_all(bytes);
+    }
+}
+
 /// Prints a log message unconditionally. Use this for errors or warnings.
 ///
 /// The message is prefixed with the module path, so it is clear where it comes
@@ -78,10 +85,8 @@ macro_rules! echo {
             #[cfg(not(target_os = "android"))]
             eprintln!("{}", formatted_str);
 
-            use std::io::Write;
-            let mut log_file = $crate::log::get_log_file();
-            let _ = log_file.write_all(formatted_str.as_bytes());
-            let _ = log_file.write_all(b"\n");
+            $crate::log::write_log(formatted_str.as_bytes());
+            $crate::log::write_log(b"\n");
         }
     };
     () => {
@@ -93,8 +98,7 @@ macro_rules! echo {
             #[cfg(not(target_os = "android"))]
             eprintln!("");
 
-            use std::io::Write;
-            let _ = $crate::log::get_log_file().write_all(b"\n");
+            $crate::log::write_log(b"\n");
         }
     }
 }

@@ -40,6 +40,7 @@ mod fs;
 mod gdb;
 mod gles;
 mod image;
+pub mod host;
 mod libc;
 mod licenses;
 mod mach_o;

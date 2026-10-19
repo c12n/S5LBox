@@ -29,6 +29,12 @@ static void *thread_park(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--spin") == 0) {
+        for (;;) __asm__ volatile("nop");
+    }
+    if (argc > 1 && strcmp(argv[1], "--sleep") == 0) {
+        for (;;) sleep(60);
+    }
     if (argc > 1 && strcmp(argv[1], "--exit") == 0) exit(23);
     if (argc > 1 && strcmp(argv[1], "--thread-exit") == 0) {
         pthread_t thread;

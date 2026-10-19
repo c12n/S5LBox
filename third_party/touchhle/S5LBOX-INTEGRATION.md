@@ -16,8 +16,13 @@ instead of terminating the host process. The environment singleton is released
 after failed construction and after owned resources have been dropped. The
 headless lifecycle test covers repeated launches, nonzero exits, exiting from a
 worker, cleanup of a sleeping worker, and restarting after a CPU fault.
-This is not yet a safe native C embedding API: unexpected Rust panics and the
-upstream fatal coroutine-invariant abort paths still require containment.
+The headless C host API is declared in `integrations/touchhle-cpu/s5lbox_hle.h`.
+It returns ordinary runtime errors and Rust panics to its caller, uses explicit
+resource/data directories without changing the process working directory, and
+supports cooperative stop/pause controls. The native probe exercises this ABI;
+it is a test executable, not a user-facing app mode. The upstream fatal
+coroutine-invariant abort paths and blocking native I/O still need separate
+review before treating the runtime as fully isolated.
 
 Included dependency sources are pinned to OpenAL Soft
 `23c8a35505fe6ab7a5c87754911a133b23ac75cf`, stb

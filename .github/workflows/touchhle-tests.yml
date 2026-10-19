@@ -37,6 +37,29 @@ jobs:
           test -s "$archive"
           xcrun lipo "$archive" -verify_arch arm64
 
+      - name: Link a native iPhone host-boundary probe
+        run: |
+          set -euo pipefail
+          mkdir -p work/ios-hle-probe
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c11 -Wall -Wextra -Werror \
+            integrations/touchhle-cpu/fixtures/host_probe.c \
+            work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
+            -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
+            -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
+            -framework CoreAudio -framework CoreGraphics -framework CoreHaptics \
+            -framework CoreMotion -framework CoreVideo -framework GameController \
+            -framework OpenGLES -framework QuartzCore -framework UIKit -framework Metal \
+            -o work/ios-hle-probe/hle-host-probe
+          xcrun strip -S work/ios-hle-probe/hle-host-probe
+          codesign --force --sign - --timestamp=none work/ios-hle-probe/hle-host-probe
+
+      - name: Preserve the native test executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchhle-ios-host-probe
+          path: work/ios-hle-probe/hle-host-probe
+
   interpreter-runtime:
     name: Rust frameworks with the C interpreter
     runs-on: macos-14
@@ -94,7 +117,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: touchhle-interpreter-smoke
-          path: work/hle-smoke.log
+          path: |
+            work/hle-smoke.log
+            work/hle-smoke/InterpreterSmoke.app
           if-no-files-found: ignore
 
       - name: Reuse one host process after guest exits and faults
@@ -108,10 +133,23 @@ jobs:
           cat ../../work/hle-lifecycle.log
           grep -F 'S5LBOX-HLE-LIFECYCLE PASS' ../../work/hle-lifecycle.log
 
+      - name: Verify the host ABI and responsive stop controls
+        working-directory: third_party/touchhle
+        timeout-minutes: 3
+        env:
+          S5LBOX_HLE_SMOKE_APP: ${{ github.workspace }}/work/hle-smoke/InterpreterSmoke.app
+        run: |
+          set -euo pipefail
+          cargo +stable test --locked --test host_boundary -- --ignored --nocapture --test-threads=1 > ../../work/hle-host.log 2>&1
+          cat ../../work/hle-host.log
+          grep -F 'S5LBOX-HLE-HOST PASS' ../../work/hle-host.log
+
       - name: Preserve lifecycle-test output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: touchhle-interpreter-lifecycle
-          path: work/hle-lifecycle.log
+          path: |
+            work/hle-lifecycle.log
+            work/hle-host.log
           if-no-files-found: ignore
