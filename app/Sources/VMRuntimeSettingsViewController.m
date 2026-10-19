@@ -6,6 +6,9 @@
 #import "VMIPAInstallViewController.h"
 #import "VMPackageManagerViewController.h"
 #import "VMGuestFilesViewController.h"
+#if S5LBOX_TOUCHHLE
+#import "VMTouchHLEViewController.h"
+#endif
 
 typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     VMRuntimeSectionSession,
@@ -103,7 +106,12 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
     (void)tableView;
     switch ([self sectionAt:section]) {
         case VMRuntimeSectionSession: return 2;
-        case VMRuntimeSectionApps: return 3;
+        case VMRuntimeSectionApps:
+#if S5LBOX_TOUCHHLE
+            return 4;
+#else
+            return 3;
+#endif
         case VMRuntimeSectionSnapshots: return 1;
         case VMRuntimeSectionPower: return 4;
         case VMRuntimeSectionAdvanced: return 1;
@@ -201,6 +209,12 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
             cell.accessibilityIdentifier = @"s5lbox.machine-settings.packages";
         }
         if (path.row == 2) cell.accessibilityIdentifier = @"s5lbox.machine-settings.files";
+#if S5LBOX_TOUCHHLE
+        if (path.row == 3) {
+            cell.textLabel.text=@"touchHLE";
+            cell.accessibilityIdentifier=@"s5lbox.machine-settings.touchhle";
+        }
+#endif
     } else if (section == VMRuntimeSectionSnapshots) {
         cell.textLabel.text = @"Snapshots";
         enabled = enabled && self.snapshotsDirectory.length > 0;
@@ -287,6 +301,12 @@ typedef NS_ENUM(NSInteger, VMRuntimeSection) {
         [self.navigationController pushViewController:advanced animated:YES];
     } else if (section == VMRuntimeSectionApps) {
         if (!self.usbTransport || ![self.runtimeDelegate runtimeCanControlGuest] || [self.runtimeDelegate runtimePaused]) return;
+#if S5LBOX_TOUCHHLE
+        if (path.row == 3) {
+            VMTouchHLEAppsViewController *apps=[[VMTouchHLEAppsViewController alloc] initWithTransport:self.usbTransport instanceID:self.instanceID];
+            [self.navigationController pushViewController:apps animated:YES]; return;
+        }
+#endif
         if (path.row == 2) {
             VMGuestFilesViewController *files = [[VMGuestFilesViewController alloc] initWithTransport:self.usbTransport instanceID:self.instanceID];
             [self.navigationController pushViewController:files animated:YES]; return;

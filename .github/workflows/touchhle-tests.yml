@@ -18,6 +18,9 @@ on:
       - 'tools/guest_package_service.c'
       - 'tools/test_guest_package_service.py'
       - 'app/Sources/VMTouchHLESurface.*'
+      - 'app/Sources/VMTouchHLEViewController.*'
+      - 'app/Sources/VMRuntimeSettingsViewController.m'
+      - 'app/project-touchhle.yml'
       - '.github/workflows/touchhle-tests.yml'
   workflow_dispatch:
 
@@ -137,6 +140,45 @@ jobs:
         with:
           name: touchhle-ios-test-app
           path: work/ios-hle-app/HLEProbe.ipa
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: touchhle-guest-launch-package
+          path: work/hle-guest-package
+
+      - name: Build the integrated separate-container S5LBox test app
+        run: |
+          set -euo pipefail
+          mkdir -p work/hle-xcodegen app/Generated
+          curl -fsSL --retry 3 https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip -o work/hle-xcodegen.zip
+          unzip -q work/hle-xcodegen.zip -d work/hle-xcodegen
+          python3 tools/gen_a64_static.py app/Generated/a64_static_handlers.S
+          work/hle-xcodegen/xcodegen/bin/xcodegen generate --spec app/project-touchhle.yml
+          xcodebuild -project app/S5LBox.xcodeproj -target S5LBox -configuration Release \
+            -sdk iphoneos -arch arm64 CONFIGURATION_BUILD_DIR="$PWD/work/hle-integrated" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build \
+            > work/hle-integrated-build.log 2>&1 || { tail -100 work/hle-integrated-build.log; exit 1; }
+          app=work/hle-integrated/S5LBox.app
+          codesign --force --sign - --timestamp=none --entitlements app/S5LBox.entitlements "$app"
+          codesign --verify --strict "$app"
+          mkdir -p work/hle-integrated-package/Payload
+          cp -R "$app" work/hle-integrated-package/Payload/
+          cd work/hle-integrated-package
+          zip -qry S5LBox-touchHLE.ipa Payload
+
+      - name: Preserve the integrated S5LBox test app
+        uses: actions/upload-artifact@v4
+        with:
+          name: S5LBox-touchHLE-test-app
+          path: work/hle-integrated-package/S5LBox-touchHLE.ipa
+
+      - name: Preserve integrated build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchhle-integrated-build-log
+          path: work/hle-integrated-build.log
+          if-no-files-found: ignore
 
   interpreter-runtime:
     name: Rust frameworks with the C interpreter
