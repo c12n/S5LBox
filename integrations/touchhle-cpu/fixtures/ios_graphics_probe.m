@@ -1,5 +1,6 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 #import <UIKit/UIKit.h>
+#include <stdlib.h>
 #import "../../../app/Sources/VMTouchHLESurface.h"
 #include <stdio.h>
 @interface HLEProbeDisplay : UIView
@@ -29,6 +30,7 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 @property(nonatomic,strong) VMTouchHLESurface *surface;
 @property(nonatomic,strong) CADisplayLink *link;
 @property(nonatomic) const s5lbox_hle_control *control;
+@property(nonatomic) unsigned verifiedColors;
 @end
 @implementation HLEGraphicsProbe
 - (void)viewDidLoad {
@@ -57,6 +59,7 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 - (void)toggle {
     if (self.control) { s5lbox_hle_control_stop(self.control); return; }
     self.surface=[[VMTouchHLESurface alloc] initWithWidth:320 height:480]; self.display.surface=self.surface;
+    self.verifiedColors=0;
     self.control=s5lbox_hle_control_create();
     const s5lbox_hle_control *control=self.control; VMTouchHLESurface *surface=self.surface;
     [self.button setTitle:@"Stop graphics test" forState:UIControlStateNormal]; self.status.text=@"Native graphics starting";
@@ -83,6 +86,13 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 }
 - (void)frame {
     NSData *data=[self.surface takeFrame]; if (!data) return;
+    const uint8_t *sample=(const uint8_t *)data.bytes+(10*320+10)*4;
+    unsigned color=(abs((int)sample[0]-64)<4 && abs((int)sample[1]-31)<4 && abs((int)sample[2]-15)<4)?1:
+        (abs((int)sample[0]-56)<4 && abs((int)sample[1]-82)<4 && abs((int)sample[2]-13)<4)?2:0;
+    if (color && !(self.verifiedColors&color)) {
+        self.verifiedColors|=color;
+        printf("S5LBOX-HLE-VISUAL PIXELS %s PASS\n",color==1?"initial":"touch");
+    }
     void *retained=(__bridge_retained void *)data;
     CGDataProviderRef provider=CGDataProviderCreateWithData(retained,data.bytes,data.length,ReleaseFrame);
     if (!provider) { CFRelease(retained); return; }

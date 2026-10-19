@@ -17,8 +17,8 @@ use crate::gles::{create_gles1_ctx_no_parent_stack, GLESContext, GLES};
 use crate::image::Image;
 use crate::matrix::Matrix;
 use crate::options::Options;
-use crate::Environment;
 pub use crate::window_types::*;
+use crate::Environment;
 use sdl2::mouse::MouseButton;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::surface::Surface;
@@ -75,7 +75,6 @@ fn set_sdl2_orientation(orientation: DeviceOrientation) {
     );
 }
 
-
 struct DpadState {
     left: bool,
     right: bool,
@@ -83,7 +82,6 @@ struct DpadState {
     down: bool,
     active: bool,
 }
-
 
 pub struct GLContext(sdl2::video::GLContext);
 
@@ -1128,6 +1126,7 @@ impl Window {
             let mut texture = 0;
             gl_ctx.GenTextures(1, &mut texture);
             gl_ctx.BindTexture(gles11::TEXTURE_2D, texture);
+            crate::gles::present::configure_frame_texture(gl_ctx.as_mut());
             let (width, height) = image.dimensions();
             gl_ctx.TexImage2D(
                 gles11::TEXTURE_2D,

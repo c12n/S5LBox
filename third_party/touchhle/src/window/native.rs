@@ -93,6 +93,7 @@ impl Window {
             let mut texture = 0;
             graphics.GenTextures(1, &mut texture);
             graphics.BindTexture(gl::TEXTURE_2D, texture);
+            crate::gles::present::configure_frame_texture(graphics.as_mut());
             let (width, height) = image.dimensions();
             graphics.TexImage2D(
                 gl::TEXTURE_2D,

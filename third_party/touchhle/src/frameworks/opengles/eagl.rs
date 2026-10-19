@@ -590,6 +590,7 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     let mut texture: GLuint = 0;
     gles.GenTextures(1, &mut texture);
     gles.BindTexture(gles11::TEXTURE_2D, texture);
+    crate::gles::present::configure_frame_texture(gles);
     gles.CopyTexImage2D(
         gles11::TEXTURE_2D,
         0,
@@ -612,6 +613,9 @@ unsafe fn present_renderbuffer(env: &mut Environment) {
     // This also sets the framebuffer bindings back to zero, so rendering
     // will go to the default framebuffer (the window).
     gles.DeleteFramebuffersOES(1, &src_framebuffer);
+    // Embedded iOS surfaces map default framebuffer zero to an owned target.
+    // Deletion resets the driver's raw binding, so bind through the adapter.
+    gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
 
     // Reset various things that could affect the quad or virtual cursor we're
     // going to draw. Back up the old state while doing so, so it can be

@@ -171,6 +171,7 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         unsafe {
             gles.GenTextures(1, &mut texture);
             gles.BindTexture(gles11::TEXTURE_2D, texture);
+            crate::gles::present::configure_frame_texture(gles.as_mut());
             gles.TexImage2D(
                 gles11::TEXTURE_2D,
                 0,
@@ -707,6 +708,7 @@ unsafe fn upload_slice<T: SafeWrite>(
 }
 
 unsafe fn upload_rgba8_pixels(gles: &mut dyn GLES, pixels: &[u8], dimensions: (u32, u32)) {
+    crate::gles::present::configure_frame_texture(gles);
     gles.TexImage2D(
         gles11::TEXTURE_2D,
         0,

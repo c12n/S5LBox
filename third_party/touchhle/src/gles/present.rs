@@ -11,6 +11,18 @@ use super::GLES;
 use crate::matrix::Matrix;
 use std::time::{Duration, Instant};
 
+/// Settings for runtime-owned screen/layer textures, not guest GL textures.
+/// Apple's limited-NPOT ES 1.1 path treats a 320x480 texture with the default
+/// REPEAT wrap as incomplete: drawing it becomes an untextured white quad.
+pub unsafe fn configure_frame_texture(gles: &mut dyn GLES) {
+    for name in [gles11::TEXTURE_WRAP_S, gles11::TEXTURE_WRAP_T] {
+        gles.TexParameteri(gles11::TEXTURE_2D, name, gles11::CLAMP_TO_EDGE as _);
+    }
+    for name in [gles11::TEXTURE_MIN_FILTER, gles11::TEXTURE_MAG_FILTER] {
+        gles.TexParameteri(gles11::TEXTURE_2D, name, gles11::LINEAR as _);
+    }
+}
+
 pub struct FpsCounter {
     time: std::time::Instant,
     frames: u32,
