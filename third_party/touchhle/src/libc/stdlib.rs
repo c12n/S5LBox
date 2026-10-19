@@ -318,8 +318,8 @@ fn exit(env: &mut Environment, exit_code: i32) {
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    echo!("App called exit(), exiting.");
-    std::process::exit(exit_code);
+    echo!("App called exit({}), returning to host.", exit_code);
+    crate::environment::exit_guest(exit_code);
 }
 
 fn bsearch(

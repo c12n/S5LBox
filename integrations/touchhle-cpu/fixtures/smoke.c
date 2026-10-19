@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
 
 extern unsigned thumb_sum(unsigned, unsigned);
 static unsigned failures;
@@ -17,7 +18,34 @@ static void *thread_main(void *arg) {
     return (void *)(unsigned long)thumb_sum((unsigned long)arg, 1);
 }
 
-int main(void) {
+static void *thread_exit_app(void *arg) {
+    exit((int)(unsigned long)arg);
+    return NULL;
+}
+static void *thread_park(void *arg) {
+    (void)arg;
+    for (;;) sleep(10);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--exit") == 0) exit(23);
+    if (argc > 1 && strcmp(argv[1], "--thread-exit") == 0) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, thread_exit_app, (void *)29)) return 99;
+        pthread_join(thread, NULL);
+        return 98; /* exit() in the worker must stop the entire guest app. */
+    }
+    if (argc > 1 && strcmp(argv[1], "--parked-exit") == 0) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, thread_park, NULL)) return 99;
+        usleep(1000);
+        exit(31); /* Host cleanup must unwind the sleeping worker. */
+    }
+    if (argc > 1 && strcmp(argv[1], "--fault") == 0) {
+        __asm__ volatile(".long 0xe7f000f0"); /* ARM undefined instruction. */
+        return 97;
+    }
     CHECK(thumb_sum(19, 23) == 42);
     volatile float a = 1.5f, b = 2.0f;
     CHECK(a * b + 0.25f == 3.25f);

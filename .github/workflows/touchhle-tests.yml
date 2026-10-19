@@ -72,3 +72,22 @@ jobs:
           name: touchhle-interpreter-smoke
           path: work/hle-smoke.log
           if-no-files-found: ignore
+
+      - name: Reuse one host process after guest exits and faults
+        working-directory: third_party/touchhle
+        timeout-minutes: 3
+        env:
+          S5LBOX_HLE_SMOKE_APP: ${{ github.workspace }}/work/hle-smoke/InterpreterSmoke.app
+        run: |
+          set -euo pipefail
+          cargo +stable test --locked --test runtime_lifecycle -- --ignored --nocapture --test-threads=1 > ../../work/hle-lifecycle.log 2>&1
+          cat ../../work/hle-lifecycle.log
+          grep -F 'S5LBOX-HLE-LIFECYCLE PASS' ../../work/hle-lifecycle.log
+
+      - name: Preserve lifecycle-test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchhle-interpreter-lifecycle
+          path: work/hle-lifecycle.log
+          if-no-files-found: ignore

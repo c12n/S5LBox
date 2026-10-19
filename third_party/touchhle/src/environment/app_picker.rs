@@ -251,7 +251,7 @@ const CLASSES: ClassExports = objc_classes! {
                 echo!("Couldn't open file manager at {:?}: {}", url, e);
             } else {
                 echo!("Opened file manager at {:?}, exiting.", url);
-                std::process::exit(0);
+                crate::environment::exit_guest(0);
             }
         },
         Err(e) => echo!("Couldn't open file manager: {}", e),

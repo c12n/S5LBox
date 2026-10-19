@@ -11,6 +11,14 @@ The original backend is retained at `src/cpu/dynarmic.rs` for reference, but
 Dynarmic is not a build dependency. The library is built as a static library;
 no runtime code generation or executable memory is added by the CPU adapter.
 
+Guest `exit()` and UIKit termination return an exit status to the Rust caller
+instead of terminating the host process. The environment singleton is released
+after failed construction and after owned resources have been dropped. The
+headless lifecycle test covers repeated launches, nonzero exits, exiting from a
+worker, cleanup of a sleeping worker, and restarting after a CPU fault.
+This is not yet a safe native C embedding API: unexpected Rust panics and the
+upstream fatal coroutine-invariant abort paths still require containment.
+
 Included dependency sources are pinned to OpenAL Soft
 `23c8a35505fe6ab7a5c87754911a133b23ac75cf`, stb
 `9f1776a36d2a3d63c52f705c3a84b372cfed4340`, and the upstream PVRTDecompress tree.

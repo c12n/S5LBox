@@ -126,6 +126,8 @@ pub struct Environment {
     // Sadly, setting ticks to 1 does not step properly, so Option is required.
     remaining_ticks: Option<u64>,
     panic_cell: Rc<Cell<Option<Environment>>>,
+    // Last field: release the singleton only after all owned resources drop.
+    _instance: Option<EnvironmentInstance>,
 }
 
 /// What to do next when executing this thread.
@@ -294,6 +296,33 @@ fn generate_binary_load_order(graph: &[BinaryDependencyNode]) -> Result<Vec<usiz
 static ENVIRONMENT_INSTANCE_EXISTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+struct EnvironmentInstance;
+
+impl EnvironmentInstance {
+    fn acquire() -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+        ENVIRONMENT_INSTANCE_EXISTS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| Self)
+            .map_err(|_| "Only one (real) Environment can exist at a time!".to_string())
+    }
+}
+
+impl Drop for EnvironmentInstance {
+    fn drop(&mut self) {
+        ENVIRONMENT_INSTANCE_EXISTS.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Private control-flow payload, never allowed to cross a C ABI boundary.
+/// Unlike panic!(), resume_unwind does not invoke the host's panic hook.
+#[derive(Debug)]
+pub(crate) struct GuestExit(pub i32);
+
+pub(crate) fn exit_guest(status: i32) -> ! {
+    std::panic::resume_unwind(Box::new(GuestExit(status)))
+}
+
 impl Environment {
     /// Loads the binary and sets up the emulator.
     pub fn new(
@@ -306,9 +335,7 @@ impl Environment {
 
         // Enforces the one (real) Environment limit. See `with_yielder` for
         // why this is needed.
-        if ENVIRONMENT_INSTANCE_EXISTS.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return Err("Only one (real) Environment can exist at a time!".to_string());
-        }
+        let instance = EnvironmentInstance::acquire()?;
 
         // Certain apps need to launch in a non-portrait orientation, and this
         // should be handled before creating the window because handling of
@@ -687,6 +714,7 @@ impl Environment {
             yielder: std::ptr::null(),
             remaining_ticks: None,
             panic_cell: Rc::new(Cell::new(None)),
+            _instance: Some(instance),
         };
 
         if env.options.dumping_options.any() {
@@ -743,10 +771,7 @@ impl Environment {
     ) -> Result<Environment, String> {
         // Enforces a one (real) Environment limit. See `with_yielder` for
         // why this is needed.
-        if ENVIRONMENT_INSTANCE_EXISTS.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err("Only one (real) Environment can exist at a time!".to_string());
-        }
-        ENVIRONMENT_INSTANCE_EXISTS.store(true, std::sync::atomic::Ordering::Relaxed);
+        let instance = EnvironmentInstance::acquire()?;
         let bundle = bundle::Bundle::new_fake_bundle();
         let fs = fs::Fs::new_fake_fs();
 
@@ -819,6 +844,7 @@ impl Environment {
             yielder: std::ptr::null(),
             remaining_ticks: None,
             panic_cell: Rc::new(Cell::new(None)),
+            _instance: Some(instance),
         };
 
         env.set_up_initial_env_vars();
@@ -878,6 +904,7 @@ impl Environment {
             yielder: std::ptr::null(),
             remaining_ticks: None,
             panic_cell: Rc::new(Cell::new(None)),
+            _instance: None,
         }
     }
 
@@ -1274,6 +1301,7 @@ impl Environment {
         R: 'static,
     {
         let panic_cell = Rc::new(Cell::new(None));
+        let returned_env = panic_cell.clone();
         let mut app_picker_coroutine = Coroutine::new(move |yielder, mut env: Environment| {
             env.panic_cell = panic_cell.clone();
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1302,9 +1330,12 @@ impl Environment {
                     }
                 },
                 Err(e) => {
-                    log_no_panic!("Crash in app picker!");
-                    // No need to get the environment back - It's local to this
-                    // function anyways.
+                    // Recover and drop the environment outside its coroutine.
+                    // Otherwise the panic cell retains it and its singleton.
+                    drop(returned_env.take());
+                    if !e.is::<GuestExit>() {
+                        log_no_panic!("Crash in app picker!");
+                    }
                     std::panic::resume_unwind(e);
                 }
             };
@@ -1329,8 +1360,8 @@ impl Environment {
     }
 
     /// Run the emulator. This is the main loop and won't return until app exit.
-    /// Only `main.rs` should call this.
-    pub fn run(mut self) {
+    /// Returns the guest exit status without terminating the host process.
+    pub fn run(mut self) -> i32 {
         let mut curr_host_context = self.threads[0].host_context.take().unwrap();
         let panic_cell = self.panic_cell.clone();
         if let Some(mut gdb_server) = self.gdb_server.take() {
@@ -1371,6 +1402,14 @@ impl Environment {
                     if let Some(window) = env.window.as_mut() {
                         window.on_main_stack = true;
                     };
+
+                    if let Some(GuestExit(status)) = e.downcast_ref::<GuestExit>() {
+                        // The coroutine has unwound, but its stack object still
+                        // belongs to the environment. Restore it so Drop can
+                        // also unwind any other suspended guest threads.
+                        env.threads[env.current_thread].host_context = Some(curr_host_context);
+                        return *status;
+                    }
 
                     echo!("Register state immediately after panic:");
                     env.dump_all_regs();
@@ -1536,20 +1575,8 @@ impl Environment {
     /// connected. Returns [true] if the CPU should step and then resume
     /// debugging, or [false] if it should resume normal execution.
     fn debug_cpu_error(&mut self, error: cpu::CpuError) {
-        if matches!(error, cpu::CpuError::UndefinedInstruction)
-            || matches!(error, cpu::CpuError::Breakpoint)
-        {
-            // Rewind the PC so that it's at the instruction where the error
-            // occurred, rather than the next instruction. This is necessary for
-            // GDB to detect its software breakpoints. For some reason this
-            // isn't correct for memory errors however.
-            let instruction_len = if (self.cpu.cpsr() & cpu::Cpu::CPSR_THUMB) != 0 {
-                2
-            } else {
-                4
-            };
-            self.cpu.regs_mut()[cpu::Cpu::PC] -= instruction_len;
-        }
+        // The interpreter preserves the faulting PC for all error kinds.
+        // Dynarmic's old post-instruction PC rewind must not be applied here.
 
         if self.gdb_server.is_none() {
             panic!("Error during CPU execution: {error:?}");
@@ -1954,7 +1981,6 @@ impl Drop for Environment {
                 .iter()
                 .all(|thread| thread.host_context.is_none())
         {
-            ENVIRONMENT_INSTANCE_EXISTS.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
         unsafe {
@@ -1974,7 +2000,24 @@ impl Drop for Environment {
             }
             *self = env;
         }
-        ENVIRONMENT_INSTANCE_EXISTS.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{exit_guest, EnvironmentInstance, GuestExit};
+
+    #[test]
+    fn instance_claim_is_exclusive_and_released_on_unwind() {
+        let instance = EnvironmentInstance::acquire().unwrap();
+        assert!(EnvironmentInstance::acquire().is_err());
+        drop(instance);
+        let result = std::panic::catch_unwind(|| {
+            let _instance = EnvironmentInstance::acquire().unwrap();
+            exit_guest(23);
+        });
+        assert_eq!(result.unwrap_err().downcast::<GuestExit>().unwrap().0, 23);
+        drop(EnvironmentInstance::acquire().unwrap());
     }
 }
 

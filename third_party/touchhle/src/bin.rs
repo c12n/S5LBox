@@ -7,6 +7,12 @@
 // This also allows items in the crate to have non-snake-case names.
 #![allow(non_snake_case)]
 
-fn main() -> Result<(), String> {
-    touchHLE::main(std::env::args())
+fn main() -> std::process::ExitCode {
+    match touchHLE::run_app(std::env::args()) {
+        Ok(status) => std::process::ExitCode::from(status as u8),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
