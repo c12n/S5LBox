@@ -184,6 +184,10 @@ static int request(handle *items, uint32_t *next, unsigned op, cursor c,
         }
         return 0;
     }
+    if (op==17) {
+        if (!take32(&c,&flags) || c.n || flags<1 || flags>3) return EINVAL;
+        return flock(item->fd,(flags==1?LOCK_SH:flags==2?LOCK_EX:LOCK_UN)|LOCK_NB)?errno:0;
+    }
     return ENOSYS;
 }
 int s5lbox_hle_files(int peer, const char *state, const char *applications,

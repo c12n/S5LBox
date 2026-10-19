@@ -283,6 +283,11 @@ impl LiveFile {
         request.extend_from_slice(&length.to_be_bytes());
         self.fs.0.empty(13, &request)
     }
+    pub fn flock(&self, kind: u32) -> io::Result<()> {
+        let mut request = self.handle.to_be_bytes().to_vec();
+        request.extend_from_slice(&kind.to_be_bytes());
+        self.fs.0.empty(17, &request)
+    }
     pub fn query_lock(&self, kind: u32, start: u64, length: u64) -> io::Result<LockConflict> {
         let mut request = self.handle.to_be_bytes().to_vec();
         request.extend_from_slice(&kind.to_be_bytes());
@@ -423,6 +428,8 @@ mod tests {
             (2, reply(0, &7u32.to_be_bytes())),
             (16, reply(0, &conflict)),
             (13, reply(35, &[])),
+            (17, reply(35, &[])),
+            (17, reply(0, &[])),
             (16, reply(0, &invalid)),
         ]);
         let file = fs.open("/Documents/database", 3).unwrap();
@@ -432,6 +439,8 @@ mod tests {
             (2, 8192, 17, 42)
         );
         assert_eq!(guest_errno(&file.lock(2, 0, 0).unwrap_err()), Some(35));
+        assert_eq!(guest_errno(&file.flock(2).unwrap_err()), Some(35));
+        file.flock(3).unwrap();
         assert_eq!(
             file.query_lock(2, 0, 0).unwrap_err().kind(),
             io::ErrorKind::InvalidData

@@ -121,6 +121,17 @@ def main():
                 assert struct.unpack("!I", query[:4])[0] == 2
                 assert struct.unpack("!I", query[20:])[0] == os.getpid()
             # 64-bit offsets remain intact; this is a sparse file, not 8 GiB I/O.
+            request(sock, 17, opened + u32(2))
+            with (home / "Documents/save").open("r+b") as native:
+                try:
+                    fcntl.flock(native, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    raise AssertionError("flock was not held")
+                except OSError as error:
+                    assert error.errno in (errno.EACCES, errno.EAGAIN)
+                request(sock, 17, opened + u32(3))
+                fcntl.flock(native, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                request(sock, 17, opened + u32(1), errno.EAGAIN)
+            request(sock, 17, opened + u32(4), errno.EINVAL)
             position = 8 * 1024**3
             assert request(sock, 6, opened + u32(0) + u64(position)) == u64(position)
             assert request(sock, 5, opened + b"end") == u32(3)

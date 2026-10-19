@@ -5,9 +5,9 @@ It operates **inside the emulated guest**, never against the physical iPhone's
 filesystem. The guest kernel remains the sole HFS writer. No mirror is copied
 back into a running disk image.
 
-The authenticated package helper will fork a child, close inherited file
-descriptors except its connection, then call `s5lbox_hle_files`. Authentication
-and launch coordination must be connected before exposing it to the app.
+The authenticated package helper forks a child, closes inherited file
+descriptors except its connection, then calls `s5lbox_hle_files`. Launch
+coordination must be connected before exposing it to the app.
 The child reads a 36-byte application-container UUID, takes a single-session
 lease, enters that installed application's directory with `chroot`, and drops
 all supplementary groups and root privileges. It replies with an empty result
@@ -40,12 +40,15 @@ Never automatically replay a mutation after losing its response.
 | 14 opendir | u32 zero, path | u32 directory handle |
 | 15 rmdir | path | empty |
 | 16 query lock | same as lock | u32 kind, u64 start/length, u32 pid |
+| 17 flock | handle, u32 kind | empty |
 
 Open flags: read=1, write=2, append=4, create=8, truncate=16, exclusive=32.
 Whence: start=0, current=1, end=2. Lock kind: shared=1, exclusive=2, unlock=3.
 Locks are real, nonblocking POSIX byte-range locks, with ordinary process/fd
 lifetime semantics, including release on disconnect. A zero lock length means
-through EOF. Directory batches contain up to 128 names; zero means EOF.
+through EOF. `flock` uses nonblocking whole-file BSD locks; waiting is handled
+by the interpreter's cancelable scheduler, never inside the file broker.
+Directory batches contain up to 128 names; zero means EOF.
 
 The chroot deliberately prevents symlinks from reaching outside the selected
 container. Absolute symlinks using the original full container path are not

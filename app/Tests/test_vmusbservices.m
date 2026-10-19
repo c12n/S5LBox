@@ -8,6 +8,7 @@
 #include "VMGuestFilesService.h"
 #import "VMGuestFiles.h"
 #import "VMUSBLockdown.h"
+#import "VMGuestApplications.h"
 #import <dispatch/dispatch.h>
 #include <math.h>
 #include <sys/socket.h>
@@ -452,10 +453,55 @@ static void testPairing(NSURL *folder) {
     for (NSDictionary *record in records) CHECK([record isEqual:records[0]]);
     CFRelease(publicKey); CFRelease(key);
 }
+@interface AppsService : ClockService
+@property(nonatomic) BOOL closed;
+@end
+@implementation AppsService
+- (BOOL)sendPlist:(NSDictionary *)query error:(NSError **)error { (void)error; [self.queries addObject:query]; return YES; }
+- (NSDictionary *)receivePlist:(NSError **)error { (void)error;
+    if (!self.replies.count) return nil; NSDictionary *reply=self.replies.firstObject;
+    [self.replies removeObjectAtIndex:0]; return reply;
+}
+- (void)close { self.closed=YES; }
+@end
+@interface AppsFixture : VMGuestApplications
+@property(nonatomic,strong) AppsService *service;
+@end
+@implementation AppsFixture
+- (VMUSBService *)connect:(NSError **)error { (void)error; return self.service; }
+@end
+static void testGuestApps(void) {
+    NSString *home=@"/var/mobile/Applications/01234567-89AB-CDEF-0123-456789ABCDEF";
+    NSDictionary *record=@{@"CFBundleIdentifier":@"org.s5lbox.fixture",@"CFBundleDisplayName":@"Fixture",
+        @"CFBundleVersion":@"1",@"Path":[home stringByAppendingString:@"/Actual Name.app"]};
+    VMGuestApplication *app=[VMGuestApplication fromInstallationRecord:record];
+    CHECK([app.name isEqual:@"Fixture"] && [app.homeDirectory isEqual:home]);
+    CHECK([app.bundleDirectory isEqual:@"Actual Name.app"] && [app.version isEqual:@"1"]);
+    for (NSString *path in @[@"/Applications/Cydia.app",[home stringByAppendingString:@"/../Outside.app"],
+        [home stringByAppendingString:@"/One.app/Other.app"],@"/var/mobile/Applications/invalid/One.app",
+        [home stringByAppendingString:@"/One.app/"],@"/var/mobile/Applications//One.app"]) {
+        NSMutableDictionary *bad=[record mutableCopy]; bad[@"Path"]=path;
+        CHECK([VMGuestApplication fromInstallationRecord:bad]==nil);
+    }
+    NSMutableDictionary *alias=[record mutableCopy]; alias[@"Path"]=[@"/private" stringByAppendingString:record[@"Path"]];
+    CHECK([[VMGuestApplication fromInstallationRecord:alias].homeDirectory isEqual:home]);
+    AppsFixture *fixture=[AppsFixture new]; fixture.service=[AppsService new];
+    [fixture.service.replies addObjectsFromArray:@[@{@"CurrentList":@[record],@"CurrentAmount":@1},@{@"Status":@"Complete"}]];
+    NSArray *apps=[fixture installedApplications:NULL];
+    CHECK(apps.count==1 && fixture.service.closed);
+    CHECK([fixture.service.queries[0][@"Command"] isEqual:@"Browse"]);
+    for (NSDictionary *bad in @[@{@"CurrentList":@[record],@"CurrentAmount":@2},
+        @{@"CurrentList":@[record,record],@"Status":@"Complete"},@{@"CurrentList":@"invalid"},@{@"Error":@"Failed"}]) {
+        fixture.service=[AppsService new]; [fixture.service.replies addObject:bad]; NSError *error=nil;
+        CHECK([fixture installedApplications:&error]==nil && error!=nil && fixture.service.closed);
+    }
+    fixture.service=[AppsService new]; fixture.canceled=YES; NSError *error=nil;
+    CHECK([fixture installedApplications:&error]==nil && error!=nil && fixture.service.closed);
+}
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc != 2) return 2;
-        testAFC(); testBrowserAFC(); testService(); testClock(); testTimeZone();
+        testAFC(); testBrowserAFC(); testService(); testClock(); testTimeZone(); testGuestApps();
         testPairing([NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]] isDirectory:YES]);
         testGuestFiles([NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]] isDirectory:YES]);
         printf("Native USB services: %u checks, %u failures\n", checks, failures);

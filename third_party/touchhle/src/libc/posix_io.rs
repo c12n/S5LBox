@@ -76,6 +76,7 @@ pub const O_ACCMODE: OpenFlag = O_RDWR | O_WRONLY | O_RDONLY;
 pub const O_NONBLOCK: OpenFlag = 0x4;
 pub const O_APPEND: OpenFlag = 0x8;
 pub const O_SHLOCK: OpenFlag = 0x10;
+pub const O_EXLOCK: OpenFlag = 0x20;
 pub const O_NOFOLLOW: OpenFlag = 0x100;
 pub const O_CREAT: OpenFlag = 0x200;
 pub const O_TRUNC: OpenFlag = 0x400;
@@ -142,6 +143,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
                 | O_NONBLOCK
                 | O_APPEND
                 | O_SHLOCK
+                | O_EXLOCK
                 | O_NOFOLLOW
                 | O_CREAT
                 | O_TRUNC
@@ -233,9 +235,19 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             -1
         }
     };
-    if res != -1 && (flags & O_SHLOCK) != 0 {
-        // TODO: Handle possible errors
-        flock(env, res, LOCK_SH);
+    if res != -1 && (flags & (O_SHLOCK | O_EXLOCK)) != 0 {
+        let kind = if flags & O_EXLOCK != 0 {
+            LOCK_EX
+        } else {
+            LOCK_SH
+        };
+        let nonblocking = if flags & O_NONBLOCK != 0 { LOCK_NB } else { 0 };
+        if flock(env, res, kind | nonblocking) != 0 {
+            let error = crate::libc::errno::get_errno(env);
+            close(env, res);
+            set_errno(env, error);
+            return -1;
+        }
     }
     log_dbg!(
         "open({:?} {:?}, {:#x}) => {:?}",
@@ -973,11 +985,51 @@ mod live_lock_tests {
 }
 
 fn flock(env: &mut Environment, fd: FileDescriptor, operation: FLockFlag) -> i32 {
-    // TODO: handle errno properly
-    set_errno(env, 0);
-
-    log!("TODO: flock({:?}, {:?})", fd, operation);
-    0
+    let result = (|| -> Result<(), i32> {
+        if fd < NORMAL_FILENO_BASE {
+            return Err(EBADF);
+        }
+        let kind = match operation & !LOCK_NB {
+            LOCK_SH => 1,
+            LOCK_EX => 2,
+            LOCK_UN => 3,
+            _ => return Err(EINVAL),
+        };
+        let file = env.libc_state.posix_io.file_for_fd(fd).ok_or(EBADF)?;
+        let GuestFile::Live(file) = &file.file else {
+            log!("TODO: flock on a host-backed file");
+            return Ok(());
+        };
+        let identity = file.handle_id();
+        loop {
+            let file = env.libc_state.posix_io.file_for_fd(fd).ok_or(EBADF)?;
+            let GuestFile::Live(file) = &file.file else {
+                return Err(EBADF);
+            };
+            if file.handle_id() != identity {
+                return Err(EBADF);
+            }
+            match file
+                .flock(kind)
+                .map_err(|error| crate::fs::live::guest_errno(&error).unwrap_or(EIO))
+            {
+                Err(error)
+                    if operation & LOCK_NB == 0
+                        && matches!(error, EACCES | crate::libc::errno::EAGAIN) =>
+                {
+                    env.sleep(std::time::Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            set_errno(env, error);
+            -1
+        }
+    }
 }
 
 fn fsync(env: &mut Environment, fd: FileDescriptor) -> i32 {
