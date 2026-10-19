@@ -48,11 +48,14 @@ This integration is unfinished and is not included in S5LBox 1.1.0. Native iOS
 presentation, lifecycle isolation, shared live guest filesystem access, and
 SpringBoard launch routing are not yet connected or device-validated.
 
-The upstream Windows allocator commits a flat 4 GiB address space. A host with
-insufficient commit capacity cannot run the full library's memory tests; this
-does not affect the standalone C/Rust bridge tests. The full-runtime CI uses
-macOS. No host pagefile settings are changed. Stock-iOS address-space and
-lifecycle behavior still need separate device validation.
+The upstream flat 4 GiB reservation failed with `ENOMEM` in the ordinary UIKit
+test host on an iOS 15 device. The interpreter now backs only allocated guest
+VM regions, keeping the original 32-bit guest addresses and stable native
+pointers. CPU transfers and `memmove` can cross adjacent regions; borrowed
+native slices must fit a contiguous backing region. Heap coalescing respects
+those boundaries. Partial VM unmaps preserve surviving pointers. No extended
+address-space entitlement, executable memory or host pagefile change is used.
+Physical-device validation of the replacement is required before enabling it.
 
 Preserve upstream copyright notices and component licenses. The upstream
 source license is MPL-2.0; its bundled resources and dependencies have their

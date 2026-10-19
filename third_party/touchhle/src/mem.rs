@@ -15,6 +15,7 @@
 //! * [Memory Usage Performance Guidelines](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/ManagingMemory.html)
 
 mod allocator;
+mod backing;
 mod host;
 
 pub use allocator::{HeapAllocator, VMAllocError};
@@ -207,35 +208,14 @@ unsafe impl<T, const MUT: bool> SafeRead for Ptr<T, MUT> {}
 pub trait SafeWrite: Sized {}
 impl<T: SafeRead> SafeWrite for T {}
 
-type Bytes = [u8; 1 << 32];
-
 pub const PAGE_SIZE: GuestUSize = 4096;
 pub const PAGE_SIZE_ALIGN_MASK: GuestUSize = 0xfff;
 
 /// The type that owns the guest memory and provides accessors for it.
 pub struct Mem {
-    /// This array is 4GiB in size so that it can cover the entire 32-bit
-    /// virtual address space, but it should not use that much physical memory,
-    /// assuming that the host OS backs it with lazily-allocated pages and we
-    /// are careful to avoid accessing most of it.
-    ///
-    /// iPhone OS devices only had 128MiB or 256MiB of RAM total, with no swap
-    /// space, so less than 6.25% of this array should be used, assuming no
-    /// fragmentation.
-    ///
-    /// This is a raw pointer because inevitably we will have to hand out
-    /// pointers to memory sometimes, and being able to hold a `&mut` on this
-    /// array simultaneously seems like an undefined behavior trap. This also
-    /// means that the underlying memory should never be moved, and therefore
-    /// the array can't be growable.
-    ///
-    /// One advantage of `[u8; 1 << 32]` over `[u8]` is that it might help rustc
-    /// optimize away bounds checks for `memory.bytes[ptr_32bit as usize]`.
-    ///
-    /// Note that unless direct memory access is disabled, the CPU emulation
-    /// (dynarmic) accesses memory via this pointer directly except when a page
-    /// fault occurs.
-    bytes: *mut Bytes,
+    /// Stable host mappings for allocated guest regions only. A flat 4 GiB
+    /// reservation exceeds ordinary iOS address-space limits on older devices.
+    backing: backing::Backing,
 
     /// The size of the __PAGE_ZERO segment, where pointer accesses are trapped
     /// to prevent null pointer derefrences.
@@ -255,14 +235,6 @@ pub struct Mem {
     pub(super) zero_memory_on_free: bool,
 }
 
-impl Drop for Mem {
-    fn drop(&mut self) {
-        unsafe {
-            crate::mem::host::free_memory(self.bytes.cast(), std::mem::size_of::<Bytes>()).unwrap();
-        }
-    }
-}
-
 impl Mem {
     /// [According to Apple](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/CreatingThreads/CreatingThreads.html)
     /// among others, the iPhone OS main thread stack size is 1MiB.
@@ -279,22 +251,18 @@ impl Mem {
 
     /// Create a fresh instance of guest memory.
     pub fn new() -> Mem {
-        let size = std::mem::size_of::<Bytes>();
-
-        let ptr = unsafe { crate::mem::host::allocate_memory(size).unwrap() };
-
-        assert_eq!(
-            ptr as usize & PAGE_SIZE_ALIGN_MASK as usize,
-            0,
-            "Failed to align host memory with guest memory"
-        );
-
-        let bytes = ptr as *mut Bytes;
+        let mut backing = backing::Backing::default();
+        backing
+            .map(
+                Self::MAIN_THREAD_STACK_LOW_END,
+                Self::MAIN_THREAD_STACK_SIZE,
+            )
+            .expect("Could not allocate the guest main-thread stack");
 
         let vm_allocator = VMAllocator::new(0, Self::MAIN_THREAD_STACK_LOW_END);
 
         Mem {
-            bytes,
+            backing,
             null_segment_size: 0,
             vm_allocator,
             heap_allocator: None,
@@ -303,7 +271,9 @@ impl Mem {
     }
 
     pub fn create_heap(&mut self, size: GuestUSize) -> HeapAllocator {
-        HeapAllocator::new(&mut self.vm_allocator, size)
+        let heap = HeapAllocator::new(&mut self.vm_allocator, size);
+        self.sync_backing();
+        heap
     }
 
     pub fn destroy_heap(&mut self, heap: HeapAllocator) {
@@ -327,27 +297,23 @@ impl Mem {
             .allocate(Some(0), new_null_segment_size)
             .unwrap();
         self.null_segment_size = new_null_segment_size;
+        // The zero page is reserved virtually but never backed by host memory.
+        self.sync_backing();
     }
 
-    pub fn null_segment_size(&self) -> VAddr {
-        self.null_segment_size
-    }
-
-    /// Get a pointer to the full 4GiB of memory. This is only for use when
-    /// setting up the CPU, never call this otherwise.
-    ///
-    /// Safety: You must ensure that this pointer does not outlive the instance
-    /// of [Mem]. You must not use it while a `&mut` is held on some region of
-    /// guest memory.
-    pub unsafe fn direct_memory_access_ptr(&mut self) -> *mut std::ffi::c_void {
-        self.bytes.cast()
-    }
-
-    fn bytes(&self) -> &Bytes {
-        unsafe { &*self.bytes }
-    }
-    fn bytes_mut(&mut self) -> &mut Bytes {
-        unsafe { &mut *self.bytes }
+    fn sync_backing(&mut self) {
+        for (allocate, chunk) in self.vm_allocator.take_mapping_changes() {
+            if allocate {
+                if chunk.base == 0 && chunk.size.get() == self.null_segment_size {
+                    continue;
+                }
+                self.backing
+                    .map(chunk.base, chunk.size.get())
+                    .expect("Could not back guest memory allocation");
+            } else {
+                self.backing.unmap(chunk.base, chunk.size.get());
+            }
+        }
     }
 
     // the performance characteristics of this hasn't been profiled, but it
@@ -363,9 +329,7 @@ impl Mem {
         if addr.to_bits() < self.null_segment_size {
             return None;
         }
-        self.bytes()
-            .get(addr.to_bits() as usize..)?
-            .get(..count as usize)
+        self.backing.bytes(addr.to_bits(), count)
     }
     /// Special version of [Self::bytes_at_mut] that returns [None] rather than
     /// panicking on failure. Only for use by [crate::gdb::GdbServer].
@@ -377,9 +341,15 @@ impl Mem {
         if addr.to_bits() < self.null_segment_size {
             return None;
         }
-        self.bytes_mut()
-            .get_mut(addr.to_bits() as usize..)?
-            .get_mut(..count as usize)
+        self.backing.bytes_mut(addr.to_bits(), count)
+    }
+
+    /// Interpreter transfers can cross adjacent VM mapping boundaries.
+    pub(crate) fn interpreter_read(&self, address: u32, bytes: &mut [u8]) -> bool {
+        address >= self.null_segment_size && self.backing.read(address, bytes)
+    }
+    pub(crate) fn interpreter_write(&mut self, address: u32, bytes: &[u8]) -> bool {
+        address >= self.null_segment_size && self.backing.write(address, bytes)
     }
 
     /// Get a slice for reading `count` bytes. This is the basic primitive for
@@ -393,7 +363,9 @@ impl Mem {
         if ptr.to_bits() < self.null_segment_size {
             Self::null_check_fail(ptr.to_bits(), count)
         }
-        &self.bytes()[ptr.to_bits() as usize..][..count as usize]
+        self.backing
+            .bytes(ptr.to_bits(), count)
+            .expect("Unmapped or non-contiguous guest memory read")
     }
     /// Get a slice for reading `count` bytes without a null-page check.
     ///
@@ -405,7 +377,9 @@ impl Mem {
         ptr: Ptr<u8, MUT>,
         count: GuestUSize,
     ) -> &[u8] {
-        &self.bytes()[ptr.to_bits() as usize..][..count as usize]
+        self.backing
+            .bytes(ptr.to_bits(), count)
+            .expect("Unmapped or non-contiguous guest pointer")
     }
     /// Get a slice for reading or writing `count` bytes. This is the basic
     /// primitive for safe read-write memory access.
@@ -418,7 +392,9 @@ impl Mem {
         if ptr.to_bits() < self.null_segment_size {
             Self::null_check_fail(ptr.to_bits(), count)
         }
-        &mut self.bytes_mut()[ptr.to_bits() as usize..][..count as usize]
+        self.backing
+            .bytes_mut(ptr.to_bits(), count)
+            .expect("Unmapped or non-contiguous guest memory write")
     }
 
     /// Get a pointer for reading an array of `count` elements of type `T`.
@@ -480,11 +456,11 @@ impl Mem {
     ///
     /// Panics if the host pointer is not addressing a location in guest memory.
     pub fn host_ptr_to_guest_ptr(&self, host_ptr: *const std::ffi::c_void) -> ConstVoidPtr {
-        let host_ptr = host_ptr.cast::<u8>();
-        let guest_mem_range = self.bytes().as_ptr_range();
-        assert!(guest_mem_range.contains(&host_ptr));
-        let guest_addr = host_ptr as usize - guest_mem_range.start as usize;
-        Ptr::from_bits(u32::try_from(guest_addr).unwrap())
+        Ptr::from_bits(
+            self.backing
+                .guest_pointer(host_ptr)
+                .expect("Pointer is not in live guest memory"),
+        )
     }
 
     /// Read a value for memory. This is the preferred way to read memory in
@@ -516,11 +492,35 @@ impl Mem {
 
     /// C-style `memmove`.
     pub fn memmove(&mut self, dest: MutVoidPtr, src: ConstVoidPtr, size: GuestUSize) {
-        let src = src.to_bits() as usize;
-        let dest = dest.to_bits() as usize;
-        let size = size as usize;
-        self.bytes_mut()
-            .copy_within(src..src.checked_add(size).unwrap(), dest)
+        if size == 0 {
+            return;
+        }
+        let src = src.to_bits();
+        let dest = dest.to_bits();
+        assert!(src >= self.null_segment_size && dest >= self.null_segment_size);
+        assert!(
+            self.backing.is_mapped(src, size as usize)
+                && self.backing.is_mapped(dest, size as usize)
+        );
+        if self.backing.copy_contiguous(src, dest, size) {
+            return;
+        }
+        let mut scratch = vec![0u8; (size as usize).min(65536)];
+        let backwards = dest > src && (dest as u64) < src as u64 + size as u64;
+        let mut remaining = size as usize;
+        while remaining != 0 {
+            let count = remaining.min(scratch.len());
+            let offset = if backwards {
+                remaining - count
+            } else {
+                size as usize - remaining
+            };
+            assert!(self
+                .backing
+                .read(src + offset as u32, &mut scratch[..count]));
+            assert!(self.backing.write(dest + offset as u32, &scratch[..count]));
+            remaining -= count;
+        }
     }
 
     /// Allocate `size` bytes in the default heap.
@@ -543,6 +543,8 @@ impl Mem {
         };
         let ptr = Ptr::from_bits(alloc.base);
 
+        self.sync_backing();
+
         if !self.zero_memory_on_free && alloc.size.get() <= HeapAllocator::HEAP_ALLOCATION_THRESHOLD
         {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
@@ -559,6 +561,8 @@ impl Mem {
         size: GuestUSize,
     ) -> Result<MutVoidPtr, VMAllocError> {
         let allocation = self.vm_allocator.allocate(address, size)?;
+
+        self.sync_backing();
 
         let ptr = Ptr::from_bits(allocation.base);
 
@@ -588,6 +592,7 @@ impl Mem {
         let alloc_size = alloc.size.get();
         assert!(alloc_size.is_multiple_of(PAGE_SIZE));
         let ptr = Ptr::from_bits(alloc.base);
+        self.sync_backing();
         self.bytes_at_mut(ptr.cast(), alloc_size).fill(0);
         log_dbg!(
             "Vallocated {:?} ({:#x} bytes requested, {:#x} bytes allocated)",
@@ -660,16 +665,14 @@ impl Mem {
         }
 
         log_dbg!("Freed {:?} ({:#x} bytes)", ptr, size);
+        self.sync_backing();
     }
 
     /// Free an allocation made with `vm_alloc` or `reserve`. All allocations
     /// within the provided range are freed.
     pub fn vm_free(&mut self, ptr: MutVoidPtr, size: GuestUSize) {
-        let freed = self.vm_allocator.deallocate(ptr.to_bits(), size);
-        // VM allocations are always 0 initialized.
-        // TODO: Can this be done with vm_advise/equivalents
-        self.bytes_at_mut(Ptr::from_bits(freed.base), freed.size.get())
-            .fill(0);
+        self.vm_allocator.deallocate(ptr.to_bits(), size);
+        self.sync_backing();
     }
 
     /// Allocate memory large enough for a value of type `T` and write the value
@@ -727,6 +730,7 @@ impl Mem {
     /// memory allocator.
     pub fn reserve(&mut self, base: VAddr, size: GuestUSize) {
         self.vm_allocator.allocate(Some(base), size).unwrap();
+        self.sync_backing();
     }
 
     /// Returns a mutable references to the vm allocator and either the
@@ -742,5 +746,70 @@ impl Mem {
         });
 
         (vm, heap)
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+
+    #[test]
+    fn heap_growth_free_and_realloc_keep_contiguous_objects() {
+        let mut memory = Mem::new();
+        memory.set_null_segment_size(PAGE_SIZE);
+        let mut heap = memory.create_heap(PAGE_SIZE);
+        let first = memory.alloc_in_heap(Some(&mut heap), PAGE_SIZE);
+        let second = memory.alloc_in_heap(Some(&mut heap), 16);
+        memory.free_in_heap(Some(&mut heap), second);
+        memory.free_in_heap(Some(&mut heap), first);
+        let joined = memory.alloc_in_heap(Some(&mut heap), PAGE_SIZE * 2);
+        memory.bytes_at_mut(joined.cast(), PAGE_SIZE * 2).fill(7);
+        let bigger = memory.realloc_in_heap(Some(&mut heap), joined, 20_000);
+        assert!(memory
+            .bytes_at(bigger.cast(), PAGE_SIZE * 2)
+            .iter()
+            .all(|b| *b == 7));
+        memory.destroy_heap(heap);
+        assert!(memory.get_bytes_fallible(bigger.cast_const(), 1).is_none());
+    }
+
+    #[test]
+    fn partial_vm_free_reuse_and_whole_range_deallocation() {
+        let mut memory = Mem::new();
+        memory.set_null_segment_size(PAGE_SIZE);
+        let start = memory.vm_alloc(Some(0x30000000), PAGE_SIZE * 3).unwrap();
+        let right = Ptr::<u8, true>::from_bits(0x30002000);
+        memory.write(right, 42);
+        let native = memory.ptr_at(right, 1);
+        memory.vm_free(Ptr::from_bits(0x30001000), PAGE_SIZE);
+        assert!(memory
+            .get_bytes_fallible(Ptr::from_bits(0x30001000), 1)
+            .is_none());
+        let middle = memory.vm_alloc(Some(0x30001000), PAGE_SIZE).unwrap();
+        assert_eq!(memory.read(middle.cast::<u8>()), 0);
+        assert_eq!(memory.ptr_at(right, 1), native);
+        assert_eq!(memory.read(right), 42);
+        memory.vm_free(start, PAGE_SIZE * 3);
+        assert!(memory.get_bytes_fallible(start.cast_const(), 1).is_none());
+    }
+
+    #[test]
+    fn memmove_crosses_regions_with_overlap_in_both_directions() {
+        let mut memory = Mem::new();
+        memory.set_null_segment_size(PAGE_SIZE);
+        memory.reserve(0x1000, PAGE_SIZE);
+        memory.reserve(0x2000, PAGE_SIZE);
+        let data: Vec<u8> = (0..8192).map(|n| (n % 251) as u8).collect();
+        assert!(memory.interpreter_write(0x1000, &data));
+        let mut expected = data.clone();
+        expected.copy_within(0..8000, 100);
+        memory.memmove(Ptr::from_bits(0x1064), Ptr::from_bits(0x1000), 8000);
+        let mut actual = vec![0; 8192];
+        assert!(memory.interpreter_read(0x1000, &mut actual));
+        assert_eq!(actual, expected);
+        expected.copy_within(100..8100, 0);
+        memory.memmove(Ptr::from_bits(0x1000), Ptr::from_bits(0x1064), 8000);
+        assert!(memory.interpreter_read(0x1000, &mut actual));
+        assert_eq!(actual, expected);
     }
 }

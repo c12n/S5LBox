@@ -2,6 +2,7 @@
  * Ordinary UIKit test host. No JIT or private entitlements. */
 #import <UIKit/UIKit.h>
 #include <stdio.h>
+#include <unistd.h>
 int s5lbox_hle_fixture_main(int argc, char **argv);
 
 @interface HLEProbeDelegate : UIResponder <UIApplicationDelegate>
@@ -32,7 +33,7 @@ int s5lbox_hle_fixture_main(int argc, char **argv);
             NSString *guest=[resources stringByAppendingPathComponent:@"InterpreterSmoke.app"];
             NSString *log=[documents stringByAppendingPathComponent:@"native-probe.log"];
             freopen(log.fileSystemRepresentation,"w",stdout);
-            freopen(log.fileSystemRepresentation,"a",stderr);
+            dup2(fileno(stdout),fileno(stderr));
             setvbuf(stdout,NULL,_IONBF,0); setvbuf(stderr,NULL,_IONBF,0);
             puts("S5LBOX-HLE-UIKIT START");
             char *args[]={"hle-host-probe",(char *)guest.fileSystemRepresentation,

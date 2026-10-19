@@ -513,8 +513,18 @@ impl HeapAllocator {
             .remove_with_base(freed.last_byte() + 1)
             .or_else(|| self.unused_chunks.remove_with_end(freed.base))
         {
-            let combined = adjacent.merge(freed);
-            self.unused_chunks.insert(combined);
+            // Adjacent guest addresses may have separate stable host backing.
+            // Keep every malloc allocation inside a single VM backing chunk.
+            if self.backing_chunks.iter().any(|chunk| {
+                chunk.contains(freed.base)
+                    && chunk.contains(adjacent.base)
+                    && chunk.contains(adjacent.last_byte())
+            }) {
+                self.unused_chunks.insert(adjacent.merge(freed));
+            } else {
+                self.unused_chunks.insert(adjacent);
+                self.unused_chunks.insert(freed);
+            }
         } else {
             self.unused_chunks.insert(freed);
         }
@@ -550,6 +560,7 @@ pub enum VMAllocError {
 pub struct VMAllocator {
     used_chunks: ChunkMap,
     unused_chunks: SizeBucketedChunkMap,
+    mapping_changes: Vec<(bool, Chunk)>,
 }
 
 impl VMAllocator {
@@ -562,6 +573,7 @@ impl VMAllocator {
         VMAllocator {
             used_chunks: Default::default(),
             unused_chunks,
+            mapping_changes: Vec::new(),
         }
     }
 
@@ -571,13 +583,19 @@ impl VMAllocator {
         size: GuestUSize,
     ) -> Result<Chunk, VMAllocError> {
         let size = size.next_multiple_of(PAGE_SIZE);
-        match address {
+        let chunk = match address {
             Some(address) => {
                 let address = address & !(PAGE_SIZE - 1);
                 self.allocate_at(address, size)
             }
             None => self.allocate_any(size),
-        }
+        }?;
+        self.mapping_changes.push((true, chunk));
+        Ok(chunk)
+    }
+
+    pub(super) fn take_mapping_changes(&mut self) -> Vec<(bool, Chunk)> {
+        std::mem::take(&mut self.mapping_changes)
     }
 
     pub fn deallocate(&mut self, address: VAddr, size: GuestUSize) -> Chunk {
@@ -587,6 +605,7 @@ impl VMAllocator {
         let size = size.next_multiple_of(PAGE_SIZE);
         let address = address & !(PAGE_SIZE - 1);
         let freed = Chunk::new(address, size);
+        self.mapping_changes.push((false, freed));
 
         self.used_chunks.remove_range(freed);
         self.unused_chunks.remove_range(freed);

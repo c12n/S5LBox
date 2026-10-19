@@ -7,7 +7,7 @@
 //! No generated host code, executable allocations, or Dynarmic dependency.
 
 use crate::abi::GuestFunction;
-use crate::mem::{ConstVoidPtr, GuestUSize, Mem};
+use crate::mem::{GuestUSize, Mem};
 use s5lbox_touchhle_cpu::{Cpu as Interpreter, Memory, Stop};
 
 pub type CpuContext = s5lbox_touchhle_cpu::Context;
@@ -26,6 +26,7 @@ mod interpreter_tests {
         let mut mem = Mem::new();
         mem.set_null_segment_size(0x1000);
         let code = 0x1000;
+        mem.reserve(code, 0x1000);
         // MOV r0,#41; ADD r0,r0,#1; SVC #66.
         for (i, op) in [0xe3a00029u32, 0xe2800001, 0xef000042]
             .into_iter()
@@ -103,31 +104,11 @@ pub enum CpuError {
 struct GuestMemory<'a>(&'a mut Mem);
 impl Memory for GuestMemory<'_> {
     fn read(&mut self, address: u32, bytes: &mut [u8]) -> bool {
-        let Ok(count) = GuestUSize::try_from(bytes.len()) else {
-            return false;
-        };
-        let Some(src) = self
-            .0
-            .get_bytes_fallible(ConstVoidPtr::from_bits(address), count)
-        else {
-            return false;
-        };
-        bytes.copy_from_slice(src);
-        true
+        self.0.interpreter_read(address, bytes)
     }
 
     fn write(&mut self, address: u32, bytes: &[u8]) -> bool {
-        let Ok(count) = GuestUSize::try_from(bytes.len()) else {
-            return false;
-        };
-        let Some(dst) = self
-            .0
-            .get_bytes_fallible_mut(ConstVoidPtr::from_bits(address), count)
-        else {
-            return false;
-        };
-        dst.copy_from_slice(bytes);
-        true
+        self.0.interpreter_write(address, bytes)
     }
 }
 

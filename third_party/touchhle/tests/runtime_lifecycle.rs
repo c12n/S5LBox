@@ -14,7 +14,7 @@ fn run(app: &Path, app_args: &[&str]) -> Result<i32, String> {
 }
 
 #[test]
-#[ignore = "requires the compiled ARMv6 fixture and a 4 GiB virtual address space"]
+#[ignore = "requires the compiled ARMv6 fixture"]
 fn exits_faults_and_failed_loads_allow_another_launch() {
     let app = std::env::var_os("S5LBOX_HLE_SMOKE_APP")
         .map(std::path::PathBuf::from)

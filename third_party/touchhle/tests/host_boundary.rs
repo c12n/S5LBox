@@ -33,7 +33,7 @@ fn run(
 }
 
 #[test]
-#[ignore = "requires the ARMv6 fixture and 4 GiB address space"]
+#[ignore = "requires the compiled ARMv6 fixture"]
 fn paths_exit_containment_and_interruptible_execution() {
     let app = std::path::PathBuf::from(std::env::var_os("S5LBOX_HLE_SMOKE_APP").unwrap());
     let resources = Path::new(env!("CARGO_MANIFEST_DIR"))
