@@ -13,6 +13,29 @@ permissions:
   contents: read
 
 jobs:
+  ios-library:
+    name: Interpreter library for iOS arm64
+    runs-on: macos-14
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/work/touchhle-ios-target
+      CARGO_BUILD_JOBS: '3'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CFLAGS: '-std=c11'
+      IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the iOS Rust target
+        run: rustup toolchain install stable --profile minimal --target aarch64-apple-ios
+      - name: Build the static library without code signing or JIT
+        run: cargo +stable build --locked --manifest-path third_party/touchhle/Cargo.toml --target aarch64-apple-ios --lib
+      - name: Verify the library architecture
+        run: |
+          set -euo pipefail
+          archive=work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
+          test -s "$archive"
+          xcrun lipo -verify_arch arm64 "$archive"
+
   interpreter-runtime:
     name: Rust frameworks with the C interpreter
     runs-on: macos-14
