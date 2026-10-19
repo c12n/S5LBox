@@ -479,6 +479,14 @@ pub(super) fn exit(env: &mut Environment) {
         let notif_name = get_static_str(env, UIApplicationWillTerminateNotification);
         () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
 
+        // Delegates and notification observers can update preferences while
+        // terminating. The earlier flush must not discard their final writes
+        // when the host returns to the guest immediately after Home.
+        if !env.is_app_picker {
+            let user_defaults: id = msg_class![env; NSUserDefaults standardUserDefaults];
+            let _: bool = msg![env; user_defaults synchronize];
+        }
+
         let _: () = msg![env; pool drain];
     };
 

@@ -15,6 +15,11 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface NSString : NSObject
 + (id)stringWithUTF8String:(const char *)text;
 @end
+@interface NSUserDefaults : NSObject
++ (id)standardUserDefaults;
+- (int)integerForKey:(id)key;
+- (void)setInteger:(int)value forKey:(id)key;
+@end
 @interface UIColor : NSObject
 + (id)colorWithRed:(float)red green:(float)green blue:(float)blue alpha:(float)alpha;
 + (id)whiteColor;
@@ -51,11 +56,15 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @implementation HLEVisualDelegate
 - (void)applicationDidFinishLaunching:(UIApplication *)application {
     [application setStatusBarHidden:1];
+    char path[1024]; snprintf(path,sizeof path,"%s/Documents/visual-touch.txt",getenv("HOME"));
+    FILE *saved=fopen(path,"r");
+    if (saved) { if (fscanf(saved,"%u",&_taps)!=1) _taps=0; fclose(saved); }
     _window=[[UIWindow alloc] initWithFrame:(CGRect){{0,0},{320,480}}];
     [_window setBackgroundColor:[UIColor colorWithRed:0.06f green:0.12f blue:0.25f alpha:1]];
     _label=[[UILabel alloc] initWithFrame:(CGRect){{12,130},{296,60}}];
     [_label setBackgroundColor:[UIColor colorWithRed:0 green:0 blue:0 alpha:0]];
-    [_label setText:@"ARMv6 UIKit is running"];
+    char title[96]; snprintf(title,sizeof title,"Saved touches: %u",_taps);
+    [_label setText:[NSString stringWithUTF8String:title]];
     [_label setTextColor:[UIColor whiteColor]];
     [_label setTextAlignment:1];
     [_window addSubview:_label];
@@ -66,6 +75,8 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     [_window addSubview:button];
     [_window makeKeyAndVisible];
     puts("S5LBOX-HLE-VISUAL READY"); fflush(stdout);
+    printf("S5LBOX-HLE-VISUAL RESTORED touches=%u exits=%d\n",_taps,
+        [[NSUserDefaults standardUserDefaults] integerForKey:@"CompletedExits"]); fflush(stdout);
 }
 - (void)tapped:(id)sender {
     (void)sender;
@@ -76,6 +87,15 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     FILE *file=fopen(path,"w");
     if (file) { fprintf(file,"%u\n",_taps); fclose(file); }
     printf("S5LBOX-HLE-VISUAL TOUCH count=%u saved=%d\n",_taps,file!=NULL); fflush(stdout);
+}
+- (void)applicationWillTerminate:(UIApplication *)application {
+    (void)application;
+    NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
+    int exits=[defaults integerForKey:@"CompletedExits"]+1;
+    // Intentionally do not call synchronize: the runtime must flush changes
+    // made by termination callbacks, not only changes made before Home.
+    [defaults setInteger:exits forKey:@"CompletedExits"];
+    printf("S5LBOX-HLE-VISUAL TERMINATING exits=%d\n",exits); fflush(stdout);
 }
 @end
 int main(int argc,char **argv) {
