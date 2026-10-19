@@ -3205,6 +3205,75 @@ static bool test_pmu_events(s5l8920_t *m) {
     return true;
 }
 
+static bool test_pmu_pin_status(s5l8920_t *m) {
+    static s5l8920_t before;
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh PMU pin-status board");return false; }
+    uint64_t seq=pmu_request(m,0x74u,7u,false,1u,0u);memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"unknown pin levels invented");
+    CHECK(s5l8920_reset(m),"cancel unknown pin-level read");
+    seq=pmu_request(m,0x74u,0x52u,true,1u,0xffu);
+    CHECK(s5l8920_pmu_config_service(m,seq),"independent pin configuration");
+    CHECK(s5l8920_pmu_events_configure(m,0x12345678u),"independent event latches");
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);
+    CHECK(s5l8920_timebase_clock(m,1000000u),"pin-level input remains external");
+    memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"pin configuration/events/time inferred status");
+    CHECK(s5l8920_reset(m),"cancel unsupplied pin-level read");
+    CHECK(s5l8920_pmu_status_input(m,0xa55a8008u),"explicit pin-level status");
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_bytes(m,1u)==0x5au,
+          "original iBoot pin-level status read refused");
+    seq=pmu_request(m,0x74u,9u,true,4u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq),"unmask pending event fixture");
+    m->bus.write32(m,S5L8920_GPIO_BASE+S5L8920_PMU_IRQ_PIN*4u,0x206u);
+    vic_write(m,2u,PL192_INTENABLE,1u<<30);
+    for (unsigned byte=0;byte<256u;byte++) {
+        uint32_t status=0xa5007ec3u|(byte<<16u);
+        CHECK(s5l8920_pmu_status_input(m,status),"replace supplied pin levels");
+        for (unsigned repeat=0;repeat<2u;repeat++) {
+            seq=pmu_request(m,0x74u,7u,false,1u,0u);memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_events_service(m,seq-1u) && !s5l8920_pmu_events_service(m,seq+1u) &&
+                  !s5l8920_pmu_config_service(m,seq) && !s5l8920_pmu_adc_service(m,seq) &&
+                  !memcmp(&before,m,sizeof before),"pin-status stale request/service isolation");
+            CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_bytes(m,1u)==byte,"pin-level byte order/repeat");
+            CHECK(!memcmp(&before.pmu_events,&m->pmu_events,sizeof m->pmu_events) &&
+                  !memcmp(&before.pmu_config,&m->pmu_config,sizeof m->pmu_config) &&
+                  !memcmp(&before.cpu,&m->cpu,sizeof m->cpu) && m->cpu.irq_line &&
+                  !m->gpio[S5L8920_PMU_IRQ_PIN].input_high,"pin status consumed events/changed configuration/IRQ/CPU");
+            memcpy(&before,m,sizeof before);
+            CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"pin-status replay");
+        }
+        seq=pmu_request(m,0x74u,5u,false,4u,0u);
+        CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_result(m)==status,"byte/block status coherence");
+    }
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);
+    CHECK(s5l8920_reset(m) && !s5l8920_pmu_events_service(m,seq),"reset cancelled pin-status request");
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);
+    CHECK(s5l8920_pmu_events_service(m,seq) && pmu_read_bytes(m,1u)==0xffu,"reset retained external pin levels");
+    const unsigned invalid[][3]={{0x75u,7u,1u},{0x74u,7u,2u},{0x74u,7u,4u},
+        {0x74u,6u,1u},{0x74u,6u,2u},{0x74u,8u,1u},{0x74u,5u,3u}};
+    for (unsigned n=0;n<sizeof invalid/sizeof invalid[0];n++) for (unsigned wr=0;wr<2u;wr++) {
+        seq=pmu_request(m,invalid[n][0],invalid[n][1],wr!=0u,invalid[n][2],0u);memcpy(&before,m,sizeof before);
+        CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"unsupported pin-status transfer mutation");
+        CHECK(s5l8920_reset(m),"cancel unsupported pin-status transfer");
+    }
+    seq=pmu_request(m,0x74u,7u,true,1u,0u);memcpy(&before,m,sizeof before);
+    CHECK(!s5l8920_pmu_events_service(m,seq) && !memcmp(&before,m,sizeof before),"pin-level status is read-only");
+    CHECK(s5l8920_reset(m),"cancel pin-status write");
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);(void)m->bus.read32(m,0u);
+    s5l8920_bus_failure_t diagnostic=m->bus_failure;
+    CHECK(diagnostic.reason && s5l8920_pmu_events_service(m,seq) &&
+          !memcmp(&diagnostic,&m->bus_failure,sizeof diagnostic),"pin-status service repaired bus failure");
+    s5l8920_free(m);
+    if (!s5l8920_init(m)) { CHECK(false,"fresh pin-status lifetime");return false; }
+    seq=pmu_request(m,0x74u,7u,false,1u,0u);memcpy(&before,m,sizeof before);
+    CHECK(!m->pmu_events.status_valid && !s5l8920_pmu_events_service(m,seq) &&
+          !memcmp(&before,m,sizeof before),"free/init retained external pin levels");
+    CHECK(s5l8920_reset(m),"pin-status final cleanup");
+    return true;
+}
+
 static void test_pmu_control(s5l8920_t *m) {
     s5l8920_t empty={0};static s5l8920_t before;
     CHECK(!s5l8920_pmu_control_configure(NULL,0u) && !s5l8920_pmu_control_configure(&empty,0u) &&
@@ -4460,6 +4529,7 @@ int main(void) {
     test_usb_controls(&m);
     test_uart_banks(&m);
     if (!test_pmu_events(&m)) return 1;
+    if (!test_pmu_pin_status(&m)) return 1;
     if (!test_pmu_boot_state(&m)) return 1;
     if (!test_pmu_voltage(&m)) return 1;
     if (!test_pmu_ldo(&m)) return 1;

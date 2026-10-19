@@ -575,7 +575,8 @@ bool s5l8920_pmu_config_service(s5l8920_t *m, uint64_t sequence);
  * consume only the returned event bytes. This read-clear model is inferred
  * from the matching level-interrupt handler's read/no-write-ACK contract and
  * saved wake-event merge, not physical read-phase/timing measurements.
- * Status uses exact four-byte reads at05. Masks support single bytes9..0c or
+ * Status uses exact four-byte reads at05 or the pin-level byte at07. Neither
+ * read consumes events or infers levels from pin configuration. Masks use bytes9..0c or
  * four bytes at09; reads require prior programming of all requested bytes.
  * Mask bits suppress delivery without discarding events. Once events and all
  * mask bytes are known, unmasked causes drive GPIO157 low, otherwise high.

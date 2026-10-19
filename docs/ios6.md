@@ -1576,6 +1576,13 @@ read at `0x01` consumes all four returned bytes. Repeated reads cannot reload
 consumed events. Status reads retain the separate supplied status image.
 Unsupported access shapes remain pending without changing device state.
 
+The matching iBoot pin-level getter at `0x4ff061c0` reads one byte at `0x07`
+and returns the selected bit for pin indices 0 through 7. This exact byte read
+shares bits 16 through 23 of the existing four-byte status read at `0x05`.
+It requires explicitly supplied status, preserves event latches and masks,
+and does not derive electrical levels from pin configuration. Writes and
+other partial status-read shapes remain unsupported.
+
 Read-clear is a logical model inferred from the matching kernel's complete
 event handler, its saved wake-event merge, and its low-level parent interrupt.
 The original handler performs one event read and no event-register write

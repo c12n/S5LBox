@@ -1305,8 +1305,9 @@ bool s5l8920_pmu_events_service(s5l8920_t *m,uint64_t sequence) {
         (i->subaddress==2u && length==1u))) {
         offset=i->subaddress-1u;value=e->pending>>(offset*8u);
         consume=length==4u?UINT32_MAX:UINT32_C(0xff00);
-    } else if (!i->write && e->status_valid && i->subaddress==5u && length==4u) {
-        value=e->status;
+    } else if (!i->write && e->status_valid && ((i->subaddress==5u && length==4u) ||
+               (i->subaddress==7u && length==1u))) {
+        value=e->status>>((i->subaddress-5u)*8u);
     } else if (i->subaddress>=9u && i->subaddress<=12u &&
                (length==1u || (i->subaddress==9u && length==4u))) {
         offset=i->subaddress-9u;
