@@ -533,7 +533,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
             self->_busy=NO; [self.tableView reloadData];
             if (error) {
                 UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Guest support needed"
-                    message:@"Set up touchHLE for this machine, wait for the respring, then try again."
+                    message:@"Install guest support and respring iPhone OS. Your app choice will be applied automatically."
                     preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"Set Up" style:UIAlertActionStyleDefault
