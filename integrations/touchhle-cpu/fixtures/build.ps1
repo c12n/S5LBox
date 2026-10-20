@@ -38,4 +38,17 @@ if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
     "$outputRoot/visual.o" -lSystem -lobjc -framework Foundation -framework UIKit -framework OpenAL
 if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
+$dylibs=Join-Path $outputRoot 'LibrarySmoke.app'
+New-Item -ItemType Directory -Force -Path $dylibs | Out-Null
+& $compiler @common -marm -c "$PSScriptRoot/dylibs.c" -o "$outputRoot/dylibs.o"
+if ($LASTEXITCODE) { throw 'Library fixture compile failed' }
+& $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
+    -undefined dynamic_lookup -o "$dylibs/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
+    "$outputRoot/dylibs.o" -lSystem `
+    "$repoRoot/third_party/touchhle/touchHLE_dylibs/libz.1.2.3.dylib" `
+    "$repoRoot/third_party/touchhle/touchHLE_dylibs/libsqlite3.dylib" `
+    "$repoRoot/third_party/touchhle/touchHLE_dylibs/libxml2.2.dylib" `
+    "$repoRoot/third_party/touchhle/touchHLE_dylibs/libstdc++.6.0.9.dylib"
+if ($LASTEXITCODE) { throw 'Library fixture link failed' }
+Copy-Item -LiteralPath "$PSScriptRoot/library.plist" -Destination "$dylibs/Info.plist"
 Write-Output $bundle

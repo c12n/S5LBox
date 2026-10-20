@@ -2,6 +2,30 @@
 
 These are impractical to reimplement, but they are Free Software.
 
+## S5LBox ARMv6 builds
+
+S5LBox rebuilds zlib, SQLite and libxml2 for its portable ARMv6 interpreter.
+The versions, install names and licenses below remain unchanged. The bundled
+libgcc and libstdc++ already contain ARMv6 slices.
+
+Rebuild with `tools/build_touchhle_dylibs.ps1` from the repository root, passing
+`-Clang`, `-SDK` (community SDK v0.3.7), and `-OutputDirectory` inside `work`.
+CMake, Ninja and Git must be available. The script pins these build recipes
+and their source submodules:
+
+| Library | Recipe revision |
+| --- | --- |
+| zlib | `touchHLE/zlib-dylib` at `1e0e03ce0040815b678d96f5c6e8a2f08e98fe2f` |
+| SQLite | `touchHLE/sqlite-dylib` at `5d960d99b632b08cb11af9196ad374919ade59ed` |
+| libxml2 | `touchHLE/libxml2-dylib` at `4b51e8c1ac1afacc983b72ac107069435a71dbc9` |
+
+It applies `integrations/touchhle-cpu/armv6-dylibs.patch`, links libgcc's
+ARM arithmetic helpers, and removes local source paths from compiler output.
+The checked-in builds used Clang 18.1.8. Results are placed in the output
+directory's `dylibs` folder; replacing the checked-in binaries is a separate
+step. Run the `LibrarySmoke.app` fixture through touchHLE after replacing them:
+it executes compression, SQL queries and XML parsing in the guest CPU.
+
 ## `libstdc++.6.0.9.dylib`
 
 * Alias: `libstdc++.6.dylib`

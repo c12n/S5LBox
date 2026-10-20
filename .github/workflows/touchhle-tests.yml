@@ -14,6 +14,7 @@ on:
       - 'tools/test_guest_hle_setup.py'
       - 'tools/build_guest_hle.ps1'
       - 'tools/package_guest_hle.py'
+      - 'tools/build_touchhle_dylibs.ps1'
       - 'tools/test_guest_hle_files.py'
       - 'tools/guest_package_service.c'
       - 'tools/test_guest_package_service.py'
@@ -284,7 +285,17 @@ jobs:
             work/hle-smoke.log
             work/hle-smoke/InterpreterSmoke.app
             work/hle-smoke/HLEVisual.app
+            work/hle-smoke/LibrarySmoke.app
           if-no-files-found: ignore
+
+      - name: Run bundled ARMv6 compression, database and XML code
+        working-directory: third_party/touchhle
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          ../../work/touchhle-target/debug/touchHLE ../../work/hle-smoke/LibrarySmoke.app --headless > ../../work/hle-dylibs.log 2>&1
+          cat ../../work/hle-dylibs.log
+          grep -F 'S5LBOX-HLE-DYLIBS PASS failures=0' ../../work/hle-dylibs.log
 
       - name: Verify cancelled UIKit touches do not activate controls
         working-directory: third_party/touchhle
@@ -326,4 +337,5 @@ jobs:
             work/hle-lifecycle.log
             work/hle-host.log
             work/hle-cancel.log
+            work/hle-dylibs.log
           if-no-files-found: ignore

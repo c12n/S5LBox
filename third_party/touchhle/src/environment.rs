@@ -209,6 +209,21 @@ struct BinaryDependencyNode {
     dependencies: Vec<String>,
 }
 
+/// Canonical resource names and fixed link addresses for bundled libraries.
+/// Aliases must identify one image, even when several dependencies use them.
+fn bundled_dylib(path: &str) -> Option<(&'static str, u32)> {
+    Some(match path.strip_prefix("/usr/lib/")? {
+        "libstdc++.6.dylib" | "libstdc++.6.0.9.dylib" => ("libstdc++.6.0.9.dylib", 0x3748a000),
+        "libgcc_s.1.dylib" => ("libgcc_s.1.dylib", 0x30000000),
+        "libz.1.dylib" | "libz.1.2.3.dylib" | "libz.dylib" | "libz.1.1.3.dylib" => {
+            ("libz.1.2.3.dylib", 0)
+        }
+        "libsqlite3.dylib" | "libsqlite3.0.dylib" => ("libsqlite3.dylib", 0),
+        "libxml2.2.dylib" | "libxml2.dylib" | "libxml2.2.7.8.dylib" => ("libxml2.2.dylib", 0),
+        _ => return None,
+    })
+}
+
 /// Topologically sorts the binary dylibs using Kahn's algorithm
 /// and returns the sorted list of indices
 fn generate_binary_load_order(graph: &[BinaryDependencyNode]) -> Result<Vec<usize>, String> {
@@ -227,11 +242,11 @@ fn generate_binary_load_order(graph: &[BinaryDependencyNode]) -> Result<Vec<usiz
             .ok_or_else(|| format!("Failed to find {:?} name mapping", node.name))?;
 
         // Bin names dont include prefix while dynamic lib paths do
-        for dependency in node
-            .dependencies
-            .iter()
-            .map(|path| path.strip_prefix("/usr/lib/").unwrap_or(path.as_str()))
-        {
+        for dependency in node.dependencies.iter().map(|path| {
+            bundled_dylib(path)
+                .map(|(name, _)| name)
+                .unwrap_or_else(|| path.strip_prefix("/usr/lib/").unwrap_or(path.as_str()))
+        }) {
             // Ignore dependencies that are not included in packaged dylibs
             let Some(&dylib_index) = node_to_index.get(dependency) else {
                 continue;
@@ -471,55 +486,34 @@ impl Environment {
         .map_err(|e| format!("Could not load executable: {e}"))?;
 
         let mut dylibs = Vec::new();
-        for dylib in &executable.dynamic_libraries {
+        let mut pending: VecDeque<_> = executable.dynamic_libraries.iter().cloned().collect();
+        let mut loaded = HashSet::new();
+        while let Some(path) = pending.pop_front() {
             // There are some Free Software libraries bundled with touchHLE and
             // exposed via the guest file system (see Fs::new()).
-            let dylib_path = fs::GuestPath::new(dylib);
-            if fs.is_file(dylib_path) {
-                // We use hardcoded slide values for libgcc and libstdc++
-                // based on base addresses of those dylibs prior to iOS 3.1
-                // TODO: implement some kind of ASLR instead of hardcoding
-                assert!(dylib_path.as_str().starts_with("/usr/lib/"));
-                let name = dylib_path.file_name().unwrap();
-                let dylib_slide = match name {
-                    "libstdc++.6.dylib" | "libstdc++.6.0.9.dylib" => 0x3748a000,
-                    "libgcc_s.1.dylib" => 0x30000000,
-                    "libz.1.dylib" | "libz.1.2.3.dylib" | "libz.dylib" | "libz.1.1.3.dylib" => {
-                        // We build `libz` from sources with our OSS toolchain,
-                        // the base address is already set and sliding is not
-                        // needed.
-                        0
-                    }
-                    "libsqlite3.dylib" | "libsqlite3.0.dylib" => {
-                        // We build `libsqlite3` from sources with our OSS
-                        // toolchain, the base address is already set and
-                        // sliding is not needed.
-                        0
-                    }
-                    "libxml2.2.dylib" | "libxml2.dylib" | "libxml2.2.7.8.dylib" => {
-                        // We build `libxml2` from sources with our OSS
-                        // toolchain, the base address is already set and
-                        // sliding is not needed.
-                        0
-                    }
-                    _ => unimplemented!("Unknown binary slide for {}", name),
-                };
+            if let Some((name, dylib_slide)) = bundled_dylib(&path) {
+                if !loaded.insert(name) {
+                    continue;
+                }
                 let dylib = mach_o::MachO::load_from_file(
-                    fs::GuestPath::new(dylib),
+                    fs::GuestPath::new(&format!("/usr/lib/{name}")),
                     &fs,
                     &mut mem,
                     dylib_slide,
                 )
                 .map_err(|e| format!("Could not load bundled dylib: {e}"))?;
+                // Libraries need their own dependencies too (for example the
+                // ARMv6 compiler's integer division helpers in libgcc).
+                pending.extend(dylib.dynamic_libraries.iter().cloned());
                 dylibs.push(dylib);
             // Otherwise, look for it in our host implementations.
             } else if !crate::dyld::DYLIB_LIST
                 .iter()
-                .any(|d| d.path == dylib || d.aliases.contains(&dylib.as_str()))
+                .any(|d| d.path == path || d.aliases.contains(&path.as_str()))
             {
                 log!(
-                    "Warning: app binary depends on unimplemented or missing dylib \"{}\"",
-                    dylib
+                    "Warning: binary depends on unimplemented or missing dylib \"{}\"",
+                    path
                 );
             }
         }
@@ -2066,11 +2060,11 @@ mod dylib_sorting_tests {
         for &index in sorted_indices {
             let current_bin = graph.get(index).unwrap();
 
-            for dependency in current_bin
-                .dependencies
-                .iter()
-                .map(|path| path.strip_prefix("/usr/lib/").unwrap_or(path.as_str()))
-            {
+            for dependency in current_bin.dependencies.iter().map(|path| {
+                bundled_dylib(path)
+                    .map(|(name, _)| name)
+                    .unwrap_or_else(|| path.strip_prefix("/usr/lib/").unwrap_or(path.as_str()))
+            }) {
                 // Ignore dependencies that are not included in packaged dylibs
                 let Some(&dylib_index) = bin_to_index.get(dependency) else {
                     continue;
@@ -2124,6 +2118,28 @@ mod dylib_sorting_tests {
         let sorted_indices = generate_binary_load_order(&dylib_graph).unwrap();
 
         verify_sort(&dylib_graph, &sorted_indices);
+    }
+
+    #[test]
+    fn bundled_aliases_use_one_image_and_keep_dependency_order() {
+        assert_eq!(
+            bundled_dylib("/usr/lib/libz.dylib"),
+            bundled_dylib("/usr/lib/libz.1.2.3.dylib")
+        );
+        assert_eq!(
+            bundled_dylib("/usr/lib/libstdc++.6.dylib"),
+            bundled_dylib("/usr/lib/libstdc++.6.0.9.dylib")
+        );
+        assert!(bundled_dylib("/app/libz.dylib").is_none());
+        let graph = create_dylib_graph(&[
+            ("App", &["/usr/lib/libxml2.dylib", "/usr/lib/libz.1.dylib"]),
+            ("libxml2.2.dylib", &["/usr/lib/libz.dylib"]),
+            ("libz.1.2.3.dylib", &["/usr/lib/libgcc_s.1.dylib"]),
+            ("libgcc_s.1.dylib", &["/usr/lib/libSystem.B.dylib"]),
+        ]);
+        let indices = generate_binary_load_order(&graph).unwrap();
+        verify_sort(&graph, &indices);
+        assert_eq!(indices, [3, 2, 1, 0]);
     }
 
     #[test]

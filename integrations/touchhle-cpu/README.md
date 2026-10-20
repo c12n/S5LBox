@@ -58,6 +58,17 @@ verify audible output on the iPhone.
 The Mach-O loader selects ARMv6-compatible slices for apps and libraries. It
 rejects ARMv7-only binaries before execution; the portable CPU does not provide
 upstream touchHLE's ARMv7 execution support.
+Bundled zlib, SQLite and libxml2 are rebuilt for ARMv6. The library smoke test
+executes compression/decompression, database creation and queries, and XML
+parsing through the interpreter. The loader follows transitive library
+dependencies and deduplicates aliases before running library initializers.
+The same fixture initializes the bundled C++ runtime and exercises its
+allocation/deallocation entry points.
+
+The user-supplied Geekbench 2.2.8 test reaches nib loading after the ARMv6
+selection fix, on both the desktop test runtime and the iPhone. It then stops
+at the unimplemented `UINavigationBar` class. This is not a supported app;
+the test establishes progress past the original CPU fault, not compatibility.
 
 Presentation ABI 2 brackets each native GLES borrow with a host graphics gate.
 Context creation, destruction and frame presentation use the same gate. On
