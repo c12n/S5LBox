@@ -8,6 +8,8 @@ on:
       - 'core/**'
       - 'tools/guest_hle_files.*'
       - 'tools/guest_hle_launch_guard.*'
+      - 'tools/guest_hle_routes.*'
+      - 'tools/guest_hle_route_service.c'
       - 'tools/guest_hle_springboard.m'
       - 'tools/guest_hle_cfmessageport.h'
       - 'tools/guest_hle_setup.c'
@@ -20,6 +22,8 @@ on:
       - 'tools/test_guest_package_service.py'
       - 'app/Sources/VMTouchHLESurface.*'
       - 'app/Sources/VMTouchHLEViewController.*'
+      - 'app/Sources/VMPackageBridge.*'
+      - 'app/Sources/EmulatorViewController.m'
       - 'app/Sources/VMRuntimeSettingsViewController.m'
       - 'app/project-touchhle.yml'
       - '.github/workflows/touchhle-tests.yml'
@@ -43,6 +47,12 @@ jobs:
             -o work/hle-files-tests/files-probe
       - name: Verify chroot, privilege drop, live writes and real kernel locks
         run: sudo python3 tools/test_guest_hle_files.py work/hle-files-tests/files-probe
+      - name: Verify bounded icon routing and stale-session recovery
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            tools/guest_hle_routes.c integrations/touchhle-cpu/fixtures/routes.c \
+            -o work/hle-files-tests/routes
+          work/hle-files-tests/routes
       - name: Verify authenticated live files through the package helper
         run: |
           cc -Wall -Wextra -Werror -DS5LBOX_PACKAGE_TEST -I tools \
@@ -232,7 +242,8 @@ jobs:
           xcrun clang -Wall -Wextra -Werror -fblocks -DS5LBOX_HLE_GUARD_TEST \
             '-DS5LBOX_HLE_GUARD_PATH="work/hle-launch-tests/lease"' \
             '-DS5LBOX_HLE_GUARD_PORT="com.j0shua.s5lbox.hle-launch-fixture"' \
-            tools/guest_hle_springboard.m tools/guest_hle_launch_guard.c \
+            '-DS5LBOX_HLE_ROUTE_PATH="work/hle-launch-tests/route-request"' \
+            tools/guest_hle_springboard.m tools/guest_hle_launch_guard.c tools/guest_hle_routes.c \
             integrations/touchhle-cpu/fixtures/launch_guard.m \
             -framework Foundation -framework CoreFoundation -o work/hle-launch-tests/launch-guard
           sudo work/hle-launch-tests/launch-guard

@@ -26,6 +26,8 @@ typedef void (^VMPackageSetupProgress)(NSString *stage, double fraction);
 // Worker only, for the HLE launch coordinator. Caller owns/closes the result.
 // Requires the guest's launch guard; no fallback to an unguarded file channel.
 - (VMUSBService *)openLiveFilesForContainer:(NSString *)uuid error:(NSError **)error;
+// Worker only. Authenticated, bounded SpringBoard routing request.
+- (NSData *)exchangeAppRoute:(NSData *)request error:(NSError **)error;
 // Caller must own a stopped machine, have explicit force-off consent, and
 // finish the existing jailbreak builder/recovery before invoking this method.
 + (BOOL)prepareStoppedMachine:(NSString *)directory instanceID:(NSString *)identifier error:(NSError **)error;

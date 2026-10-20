@@ -93,14 +93,28 @@ static void AwaitFirstConnection(NSString *identifier) {
     if (NSThread.isMainThread) { if (error) *error = VMPackageError(@"Package work requires a worker thread."); return nil; }
     NSData *capability = Capability(_identifier,NO,error); if (!capability) return nil;
     __weak VMPackageBridge *weakSelf = self;
-    NSTimeInterval statusDeadline=operation=='S' ? NSProcessInfo.processInfo.systemUptime+10 : 0;
-    VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:64321
+    NSTimeInterval statusDeadline=(operation=='S'||operation=='T') ? NSProcessInfo.processInfo.systemUptime+10 : 0;
+    VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:operation=='T'?64322:64321
         canceled:^BOOL{ return weakSelf.canceled; } deadline:statusDeadline error:error];
     if (!service) return nil;
     NSMutableData *hello = [NSMutableData dataWithBytes:"SPM2" length:4];
     [hello appendData:capability]; [hello appendBytes:&operation length:1];
     if (![service writeData:hello error:error]) { [service close]; return nil; }
     return service;
+}
+- (NSData *)exchangeAppRoute:(NSData *)request error:(NSError **)error {
+    if (request.length<27 || request.length>32923) {
+        if (error) *error=VMPackageError(@"Invalid app routing request."); return nil;
+    }
+    VMUSBService *service=[self connect:'T' error:error]; if (!service) return nil;
+    uint32_t length=htonl((uint32_t)request.length);
+    NSMutableData *packet=[NSMutableData dataWithBytes:&length length:4]; [packet appendData:request];
+    NSData *reply=[service writeData:packet error:error]?[self receive:service terminal:'T' error:error]:nil;
+    [service close];
+    if (reply && (reply.length<18 || reply.length>273 || memcmp(reply.bytes,"HLR1",4))) {
+        if (error) *error=VMPackageError(@"Invalid guest app routing response."); return nil;
+    }
+    return reply;
 }
 - (NSData *)receive:(VMUSBService *)service terminal:(char)terminal error:(NSError **)error {
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 1800;

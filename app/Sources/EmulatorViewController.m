@@ -42,6 +42,9 @@
 #import "VMInstanceStore.h"
 #include "VMSnapshotStore.h"
 #import "VMTouchMap.h"
+#if S5LBOX_TOUCHHLE
+#import "VMTouchHLEViewController.h"
+#endif
 
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
@@ -197,6 +200,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _consoleDirty;
 
     VMEngine          *_engine;
+#if S5LBOX_TOUCHHLE
+    VMTouchHLECoordinator *_hleCoordinator;
+#endif
     CADisplayLink     *_link;
     uint8_t           *_frame;        // main thread's copy of the guest's pixels
     NSUInteger         _ticks;
@@ -500,6 +506,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     }
 
     [self applySettingsToEngine];
+#if S5LBOX_TOUCHHLE
+    [_hleCoordinator invalidate];
+    _hleCoordinator=[[VMTouchHLECoordinator alloc] initWithTransport:_engine.usbTransport
+        instanceID:self.instanceID presenter:self];
+#endif
     [self applyPauseState];
     [self refreshRunControls];
 
@@ -551,6 +562,9 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 }
 
 - (void)dealloc {
+#if S5LBOX_TOUCHHLE
+    [_hleCoordinator invalidate];
+#endif
     if (_restoreIdleTimer)
         [UIApplication sharedApplication].idleTimerDisabled =
             _previousIdleTimerDisabled;
@@ -1588,6 +1602,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)tick:(CADisplayLink *)sender {
     (void)sender;
+#if S5LBOX_TOUCHHLE
+    [_hleCoordinator tick:[self runtimeCanControlGuest] && ![_engine isPaused] &&
+        !_savingCheckpoint && !_restarting && !_shuttingDown && !_forcePoweringOff &&
+        self.navigationController.topViewController==self && !self.presentedViewController &&
+        UIApplication.sharedApplication.applicationState==UIApplicationStateActive];
+#endif
 
     /* Geometry comes back with the pixels rather than being assumed here. The
      * emulator learns it from whichever CLCD window the guest enabled, and the

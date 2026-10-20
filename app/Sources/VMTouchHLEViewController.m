@@ -9,6 +9,40 @@
 #import "VMUSBService.h"
 #include <math.h>
 
+static NSString *HLEChoiceKey(NSString *instance) { return [@"TouchHLEApps-" stringByAppendingString:instance]; }
+static NSArray<NSString *> *HLEChoices(NSString *instance) {
+    NSArray *saved=[NSUserDefaults.standardUserDefaults arrayForKey:HLEChoiceKey(instance)];
+    NSMutableSet *valid=[NSMutableSet set];
+    NSCharacterSet *bad=[[NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"] invertedSet];
+    for (id name in saved) if ([name isKindOfClass:NSString.class] && [name length] &&
+        [name length]<=255 && [name rangeOfCharacterFromSet:bad].location==NSNotFound && valid.count<128) [valid addObject:name];
+    return [valid.allObjects sortedArrayUsingSelector:@selector(compare:)];
+}
+static NSData *HLERouteRequest(uint8_t op,NSData *session,uint64_t ticket,NSArray<NSString *> *apps) {
+    uint8_t header[27]={0}; header[0]=op; memcpy(header+1,session.bytes,16);
+    for (unsigned i=0;i<8;i++) header[17+i]=(uint8_t)(ticket>>(56-i*8));
+    header[25]=(uint8_t)(apps.count>>8); header[26]=(uint8_t)apps.count;
+    NSMutableData *request=[NSMutableData dataWithBytes:header length:sizeof header];
+    for (NSString *app in apps) {
+        NSData *name=[app dataUsingEncoding:NSUTF8StringEncoding];
+        uint8_t length[2]={(uint8_t)(name.length>>8),(uint8_t)name.length};
+        [request appendBytes:length length:2]; [request appendData:name];
+    }
+    return request;
+}
+static NSError *HLEError(NSString *message) {
+    return [NSError errorWithDomain:@"S5LBox.HLE" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
+}
+@interface VMTouchHLECoordinator ()
+@property(atomic) BOOL invalidated;
+@property(atomic,strong) VMPackageBridge *activeBridge;
++ (instancetype)forInstance:(NSString *)identifier;
+- (void)openIdentifier:(NSString *)identifier name:(NSString *)name;
+- (void)nativeIdentifier:(NSString *)identifier;
+- (void)setIdentifier:(NSString *)identifier usesHLE:(BOOL)enabled completion:(void (^)(NSError *))completion;
+@end
+
 @interface HLEDisplayView : UIView <UIKeyInput>
 @property(nonatomic,weak) VMTouchHLESurface *surface;
 @property(nonatomic) BOOL inputEnabled;
@@ -93,25 +127,28 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 @property(nonatomic,strong) VMGuestApplication *application;
 @property(nonatomic,strong) VMUSBTransport *transport;
 @property(nonatomic,copy) NSString *instanceID;
+@property(nonatomic,copy) NSString *appIdentifier,*appName;
+@property(nonatomic,strong) VMTouchHLECoordinator *coordinator;
 @end
 @implementation HLERunViewController {
     HLEDisplayView *_display;
     UILabel *_status;
-    UIButton *_home,*_controls;
+    UIButton *_home,*_controls,*_tryNative;
     UIActivityIndicatorView *_spinner;
     CADisplayLink *_link;
     VMTouchHLESurface *_surface;
     VMPackageBridge *_bridge;
+    VMGuestApplications *_discovery;
     const s5lbox_hle_control *_control;
     BOOL _paused,_closing,_forceAvailable,_finished,_inactive,_wantsTextInput;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor=UIColor.systemBackgroundColor;
-    self.title=self.application.name; self.modalInPresentation=YES;
+    self.title=self.appName; self.modalInPresentation=YES;
     self.navigationController.modalInPresentation=YES;
     _display=[HLEDisplayView new]; _display.backgroundColor=UIColor.blackColor;
     _display.multipleTouchEnabled=YES; _display.layer.magnificationFilter=kCAFilterNearest;
-    _display.accessibilityLabel=self.application.name;
+    _display.accessibilityLabel=self.appName;
     _status=[UILabel new]; _status.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     _status.adjustsFontForContentSizeCategory=YES; _status.numberOfLines=0;
     _status.textAlignment=NSTextAlignmentCenter; _status.textColor=UIColor.whiteColor; _status.text=@"Opening app…";
@@ -123,7 +160,12 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     _controls=[UIButton buttonWithType:UIButtonTypeSystem]; [_controls setImage:[UIImage systemImageNamed:@"slider.horizontal.3"] forState:UIControlStateNormal];
     _controls.accessibilityLabel=@"App controls";
     [_controls addTarget:self action:@selector(controls) forControlEvents:UIControlEventTouchUpInside];
-    for (UIView *view in @[_display,_status,_spinner,_home,_controls]) [self.view addSubview:view];
+    _tryNative=[UIButton buttonWithType:UIButtonTypeSystem];
+    [_tryNative setTitle:@"Try iPhone OS" forState:UIControlStateNormal];
+    _tryNative.titleLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    _tryNative.titleLabel.adjustsFontForContentSizeCategory=YES; _tryNative.hidden=YES;
+    [_tryNative addTarget:self action:@selector(tryNative) forControlEvents:UIControlEventTouchUpInside];
+    for (UIView *view in @[_display,_status,_spinner,_home,_controls,_tryNative]) [self.view addSubview:view];
     _surface=[[VMTouchHLESurface alloc] initWithWidth:320 height:480]; _display.surface=_surface;
     __weak HLERunViewController *weakSelf=self;
     _surface.textInputChanged=^(BOOL enabled) {
@@ -148,17 +190,29 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     _status.frame=CGRectInset(_display.frame,16,16); _spinner.center=CGPointMake(CGRectGetMidX(safe),CGRectGetMinY(_display.frame)+32);
     _home.frame=CGRectMake(CGRectGetMidX(safe)-54,CGRectGetMaxY(safe)-60,108,48);
     _controls.frame=CGRectMake(CGRectGetMaxX(safe)-72,CGRectGetMaxY(safe)-60,48,48);
+    _tryNative.frame=CGRectMake(safe.origin.x+20,CGRectGetMaxY(_display.frame)-56,MAX(0,safe.size.width-40),48);
+    if (_finished) _status.frame=CGRectMake(CGRectGetMinX(_display.frame)+16,CGRectGetMinY(_display.frame)+16,
+        MAX(0,_display.frame.size.width-32),MAX(0,_display.frame.size.height-88));
 }
 - (void)start {
     _control=s5lbox_hle_control_create();
     s5lbox_hle_control_pause(_control,_paused||_inactive);
     _bridge=[[VMPackageBridge alloc] initWithTransport:self.transport instanceID:self.instanceID];
+    _discovery=[[VMGuestApplications alloc] initWithTransport:self.transport instanceID:self.instanceID];
     VMPackageBridge *bridge=_bridge; VMTouchHLESurface *surface=_surface;
-    const s5lbox_hle_control *control=_control; VMGuestApplication *app=self.application;
+    VMGuestApplications *discovery=_discovery;
+    const s5lbox_hle_control *control=_control;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         @autoreleasepool {
             NSError *error=nil; VMTouchHLEFiles *files=nil;
-            VMUSBService *service=[bridge openLiveFilesForContainer:app.containerID error:&error];
+            VMGuestApplication *app=nil;
+            for (VMGuestApplication *candidate in [discovery installedApplications:&error])
+                if ([candidate.identifier isEqual:self.appIdentifier]) { app=candidate; break; }
+            if (!app && !error) error=HLEError(@"This app is no longer installed in the guest.");
+            if (app) dispatch_async(dispatch_get_main_queue(), ^{
+                self.title=app.name; self->_display.accessibilityLabel=app.name;
+            });
+            VMUSBService *service=app?[bridge openLiveFilesForContainer:app.containerID error:&error]:nil;
             s5lbox_hle_outcome outcome={0}; int result=S5LBOX_HLE_ERROR;
             if (service) {
                 files=[[VMTouchHLEFiles alloc] initWithService:service homeDirectory:app.homeDirectory bundleDirectory:app.bundleDirectory];
@@ -181,7 +235,13 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
                 [self->_link invalidate]; self->_link=nil; [self->_spinner stopAnimating];
                 [self updateInputState];
                 if (self->_closing || (result==S5LBOX_HLE_OK && !error)) [self dismissViewControllerAnimated:YES completion:nil];
-                else { self->_status.text=message; self->_status.hidden=NO; self->_status.textColor=UIColor.labelColor; self->_display.hidden=YES; }
+                else {
+                    self->_status.text=[@"Could not open with touchHLE.\n\n" stringByAppendingString:
+                        message.length>350?[message substringToIndex:350]:message];
+                    self->_status.hidden=NO; self->_status.textColor=UIColor.labelColor; self->_display.hidden=YES;
+                    self->_tryNative.hidden=NO; self->_controls.hidden=YES;
+                    [self.view setNeedsLayout];
+                }
             });
         }
     });
@@ -212,7 +272,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 }
 - (void)home {
     if (_finished) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
-    if (_forceAvailable) { if (_control) s5lbox_hle_control_stop(_control); _bridge.canceled=YES; return; }
+    if (_forceAvailable) { if (_control) s5lbox_hle_control_stop(_control); _bridge.canceled=YES; _discovery.canceled=YES; return; }
     if (_closing) return;
     _closing=YES; _paused=NO; [_surface setGraphicsSuspended:_inactive];
     if (_control) s5lbox_hle_control_pause(_control,_inactive);
@@ -227,6 +287,11 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
         owner->_status.text=@"The app has not closed. Force Close may lose unsaved changes.";
     });
 }
+- (void)tryNative {
+    if (!_finished) return;
+    VMTouchHLECoordinator *coordinator=self.coordinator; NSString *identifier=self.appIdentifier;
+    [self dismissViewControllerAnimated:YES completion:^{ [coordinator nativeIdentifier:identifier]; }];
+}
 - (void)controls {
     if (_closing || _finished) return;
     UIAlertController *sheet=[UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
@@ -240,6 +305,121 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 - (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; [_link invalidate]; }
+@end
+
+@implementation VMTouchHLECoordinator {
+    VMUSBTransport *_transport;
+    NSString *_instanceID;
+    __weak UIViewController *_presenter;
+    NSData *_session;
+    dispatch_queue_t _queue;
+    BOOL _busy,_armed,_canRoute;
+    NSTimeInterval _next;
+}
+static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
++ (instancetype)forInstance:(NSString *)identifier { return [HLECoordinators objectForKey:identifier]; }
+- (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier presenter:(UIViewController *)presenter {
+    self=[super init]; if (self) {
+        _transport=transport; _instanceID=[identifier copy]; _presenter=presenter;
+        uuid_t bytes; [NSUUID.UUID getUUIDBytes:bytes]; _session=[NSData dataWithBytes:bytes length:16];
+        _queue=dispatch_queue_create("com.j0shua.s5lbox.app-routing",DISPATCH_QUEUE_SERIAL);
+        if (!HLECoordinators) HLECoordinators=[NSMapTable strongToWeakObjectsMapTable];
+        [HLECoordinators setObject:self forKey:identifier];
+    } return self;
+}
+- (NSData *)exchange:(NSData *)request error:(NSError **)error {
+    if (self.invalidated) { if (error) *error=HLEError(@"The machine session has ended."); return nil; }
+    VMPackageBridge *bridge=[[VMPackageBridge alloc] initWithTransport:_transport instanceID:_instanceID];
+    self.activeBridge=bridge;
+    if (self.invalidated) bridge.canceled=YES;
+    NSData *reply=[bridge exchangeAppRoute:request error:error]; self.activeBridge=nil;
+    if (reply) {
+        const uint8_t *p=reply.bytes;
+        unsigned length=((unsigned)p[16]<<8)|p[17];
+        if (p[4]||p[5]||p[6]||p[7]||reply.length!=18+length) {
+            if (error) *error=HLEError(@"The guest could not complete the app request. Return to iPhone OS and try again.");
+            return nil;
+        }
+    }
+    return reply;
+}
+- (void)tick:(BOOL)canRoute {
+    _canRoute=canRoute;
+    NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+    if (self.invalidated || _busy || now<_next) return;
+    NSArray *choices=canRoute?HLEChoices(_instanceID):@[];
+    if (!choices.count && !_armed) return;
+    _busy=YES; _next=now+1;
+    NSData *request=HLERouteRequest(1,_session,0,choices);
+    dispatch_async(_queue, ^{
+        NSError *error=nil; NSData *reply=[self exchange:request error:&error];
+        uint64_t ticket=0; NSString *identifier=nil;
+        if (reply) {
+            const uint8_t *p=reply.bytes;
+            for (unsigned i=0;i<8;i++) ticket=(ticket<<8)|p[8+i];
+            if (ticket) identifier=[[NSString alloc] initWithBytes:p+18 length:reply.length-18 encoding:NSUTF8StringEncoding];
+        }
+        if (ticket) {
+            NSData *ack=[self exchange:HLERouteRequest(2,self->_session,ticket,@[]) error:&error];
+            if (!ack) identifier=nil; // Unknown acknowledgement is not permission to run twice.
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_busy=NO; self->_armed=reply && choices.count>0;
+            if (!reply) self->_next=NSProcessInfo.processInfo.systemUptime+3;
+            if (identifier.length && self->_canRoute && !self.invalidated)
+                [self openIdentifier:identifier name:identifier];
+        });
+    });
+}
+- (void)openIdentifier:(NSString *)identifier name:(NSString *)name {
+    UIViewController *presenter=_presenter;
+    if (self.invalidated || !presenter.viewIfLoaded.window || presenter.presentedViewController) return;
+    HLERunViewController *run=[HLERunViewController new];
+    run.appIdentifier=identifier; run.appName=name; run.transport=_transport; run.instanceID=_instanceID; run.coordinator=self;
+    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:run];
+    nav.modalPresentationStyle=UIModalPresentationFullScreen;
+    [presenter presentViewController:nav animated:YES completion:nil];
+}
+- (void)showError:(NSError *)error {
+    UIViewController *presenter=_presenter; if (!presenter.viewIfLoaded.window || presenter.presentedViewController || self.invalidated) return;
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Could not open app"
+        message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+- (void)nativeIdentifier:(NSString *)identifier {
+    _busy=YES; NSArray *choices=HLEChoices(_instanceID);
+    dispatch_async(_queue, ^{
+        NSError *error=nil;
+        if ([self exchange:HLERouteRequest(1,self->_session,0,choices) error:&error])
+            [self exchange:HLERouteRequest(3,self->_session,0,@[identifier]) error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{ self->_busy=NO; if (error) [self showError:error]; });
+    });
+}
+- (void)setIdentifier:(NSString *)identifier usesHLE:(BOOL)enabled completion:(void (^)(NSError *))completion {
+    NSMutableArray *choices=[HLEChoices(_instanceID) mutableCopy]; [choices removeObject:identifier];
+    if (enabled) [choices addObject:identifier];
+    if (choices.count>128) { completion(HLEError(@"Up to 128 apps can use touchHLE in one machine.")); return; }
+    if (!enabled) {
+        // Recovery must remain available even if the guest helper is offline.
+        [NSUserDefaults.standardUserDefaults setObject:choices forKey:HLEChoiceKey(_instanceID)];
+        _armed=YES; _next=0; completion(nil); return;
+    }
+    _busy=YES;
+    dispatch_async(_queue, ^{
+        NSError *error=nil;
+        [self exchange:HLERouteRequest(1,self->_session,0,choices) error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_busy=NO;
+            if (!error && !self.invalidated) {
+                [NSUserDefaults.standardUserDefaults setObject:choices forKey:HLEChoiceKey(self->_instanceID)];
+                self->_armed=choices.count>0;
+            }
+            completion(error);
+        });
+    });
+}
+- (void)invalidate { self.invalidated=YES; self.activeBridge.canceled=YES; }
 @end
 
 @implementation VMTouchHLEAppsViewController {
@@ -292,18 +472,44 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell=[table dequeueReusableCellWithIdentifier:@"app"];
     if (!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
-    VMGuestApplication *app=_apps[path.row]; cell.textLabel.text=app.name; cell.detailTextLabel.text=app.version;
+    VMGuestApplication *app=_apps[path.row]; cell.textLabel.text=app.name;
+    cell.detailTextLabel.text=[HLEChoices(_instanceID) containsObject:app.identifier]?@"Opens with touchHLE":@"Opens in iPhone OS";
     cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody]; cell.textLabel.adjustsFontForContentSizeCategory=YES;
     cell.detailTextLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleCaption1]; cell.detailTextLabel.adjustsFontForContentSizeCategory=YES;
     cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator; return cell;
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES]; if (_busy) return;
-    UIViewController *presenter=self.navigationController.presentingViewController; if (!presenter) return;
-    HLERunViewController *run=[HLERunViewController new]; run.application=_apps[path.row];
-    run.transport=_transport; run.instanceID=_instanceID;
-    UINavigationController *nav=[[UINavigationController alloc] initWithRootViewController:run]; nav.modalPresentationStyle=UIModalPresentationFullScreen;
-    [presenter dismissViewControllerAnimated:YES completion:^{ [presenter presentViewController:nav animated:YES completion:nil]; }];
+    VMGuestApplication *app=_apps[path.row];
+    VMTouchHLECoordinator *coordinator=[VMTouchHLECoordinator forInstance:_instanceID];
+    if (!coordinator) return;
+    BOOL usesHLE=[HLEChoices(_instanceID) containsObject:app.identifier];
+    UIAlertController *sheet=[UIAlertController alertControllerWithTitle:app.name
+        message:@"Choose how this app opens from its iPhone OS icon." preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:usesHLE?@"Use iPhone OS":@"Use touchHLE"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        self->_busy=YES;
+        [coordinator setIdentifier:app.identifier usesHLE:!usesHLE completion:^(NSError *error) {
+            self->_busy=NO; [self.tableView reloadData];
+            if (error) {
+                UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Guest support needed"
+                    message:@"Set up touchHLE for this machine, wait for the respring, then try again."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+                [alert addAction:[UIAlertAction actionWithTitle:@"Set Up" style:UIAlertActionStyleDefault
+                    handler:^(__unused UIAlertAction *a) { [self installSupport]; }]];
+                [self presentViewController:alert animated:YES completion:nil];
+            }
+        }];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Open with touchHLE" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        UIViewController *presenter=self.navigationController.presentingViewController;
+        [presenter dismissViewControllerAnimated:YES completion:^{ [coordinator openIdentifier:app.identifier name:app.name]; }];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView=[table cellForRowAtIndexPath:path];
+    sheet.popoverPresentationController.sourceRect=[table cellForRowAtIndexPath:path].bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 - (void)setup {
     if (_busy) return;

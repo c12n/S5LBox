@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <stdlib.h>
+#include <mach/mach_time.h>
 
 typedef signed char BOOL;
 typedef struct objc_method *Method;
@@ -35,6 +37,14 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; } @end
 - (NSString *)path;
 - (NSString *)launchdJobLabel;
 - (int)pid;
+- (NSString *)bundleIdentifier;
+@end
+@interface SBApplicationIcon : NSObject
+- (SBApplication *)application;
+@end
+@interface SBUIController : NSObject
++ (id)sharedInstance;
+- (void)activateApplicationAnimated:(SBApplication *)app;
 @end
 @interface SBApplicationController : NSObject
 + (id)sharedInstance;
@@ -48,6 +58,12 @@ static BOOL (*original_launch)(id,SEL);
 static void (*original_exit)(id,SEL),(*original_failed)(id,SEL),(*original_dealloc)(id,SEL);
 static id pending[128];
 static BOOL overflow;
+static s5lbox_hle_routes routes;
+static void (*original_icon_launch)(id,SEL);
+static double uptime(void) {
+    mach_timebase_info_data_t scale; mach_timebase_info(&scale);
+    return (double)mach_absolute_time()*scale.numer/scale.denom/1e9;
+}
 static const char *container_path(id application) {
     const char *path=[[(SBApplication *)application path] UTF8String];
     if (!path) return NULL;
@@ -81,8 +97,59 @@ static void exited(id app,SEL cmd) { forget(app); original_exit(app,cmd); }
 static void failed(id app,SEL cmd) { forget(app); original_failed(app,cmd); }
 static void deallocated(id app,SEL cmd) { forget(app); original_dealloc(app,cmd); }
 
+static void icon_launch(id icon,SEL cmd) {
+    SBApplication *app=[(SBApplicationIcon *)icon application];
+    if (container_path(app) && s5lbox_hle_route_icon(&routes,[[app bundleIdentifier] UTF8String],uptime())) return;
+    original_icon_launch(icon,cmd);
+}
+static int native_launch(void *context,const char *identifier) {
+    (void)context;
+    int fd=open(S5LBOX_HLE_GUARD_PATH,O_RDONLY|O_NOFOLLOW);
+    if (fd>=0) {
+        struct stat st;
+        int busy=fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid || st.st_nlink!=1 ||
+            flock(fd,LOCK_SH|LOCK_NB);
+        close(fd); if (busy) return EBUSY;
+    } else if (errno!=ENOENT) return EACCES;
+    NSArray *apps=[[(id)objc_getClass("SBApplicationController") sharedInstance] allApplications];
+    for (unsigned i=0;i<[apps count];i++) {
+        SBApplication *app=[apps objectAtIndex:i];
+        const char *name=[[app bundleIdentifier] UTF8String];
+        if (container_path(app) && name && !strcmp(name,identifier)) {
+            /* Bypass only the icon-routing hook, never the native launch guard. */
+            [(SBUIController *)[(id)objc_getClass("SBUIController") sharedInstance] activateApplicationAnimated:app];
+            return 0;
+        }
+    }
+    return ENOENT;
+}
+static CFDataRef route_query(CFDataRef data) {
+    static unsigned char nonce[32],cached[HLE_ROUTE_MAX_REPLY];
+    static size_t cached_length;
+    if (!original_icon_launch || !data || CFDataGetLength(data)<59 ||
+        CFDataGetLength(data)>32+HLE_ROUTE_MAX_REQUEST) return NULL;
+    size_t count=(size_t)CFDataGetLength(data);
+    int fd=open(S5LBOX_HLE_ROUTE_PATH,O_RDONLY|O_NOFOLLOW); if (fd<0) return NULL;
+    struct stat st; struct flock lock; memset(&lock,0,sizeof lock);
+    lock.l_type=F_RDLCK; lock.l_whence=SEEK_SET;
+    unsigned char *trusted=malloc(count);
+    int valid=trusted && !fstat(fd,&st) && S_ISREG(st.st_mode) && !st.st_uid &&
+        st.st_nlink==1 && !(st.st_mode&0022) && st.st_size==(off_t)count &&
+        !fcntl(fd,F_GETLK,&lock) && lock.l_type==F_WRLCK &&
+        read(fd,trusted,count)==(ssize_t)count && !memcmp(trusted,CFDataGetBytePtr(data),count);
+    close(fd);
+    if (!valid) { free(trusted); return NULL; }
+    /* Replaying an authorized packet while the root broker owns its lock
+     * must not repeat native activation or consume another launch ticket. */
+    if (!cached_length || memcmp(nonce,trusted,32)) {
+        memcpy(nonce,trusted,32);
+        cached_length=s5lbox_hle_route_request(&routes,trusted+32,count-32,uptime(),cached,native_launch,NULL);
+    }
+    free(trusted); return CFDataCreate(NULL,cached,(CFIndex)cached_length);
+}
 static CFDataRef query(CFMessagePortRef port,SInt32 message,CFDataRef data,void *info) {
     (void)port; (void)info;
+    if (message==2) return route_query(data);
     int error=EINVAL;
     if (message!=1 || !data || CFDataGetLength(data)!=36) goto done;
     const char *uuid=(const char *)CFDataGetBytePtr(data);
@@ -155,6 +222,14 @@ void s5lbox_hle_guard_install(void) {
     original_exit=(void *)method_setImplementation(methods[1],(IMP)exited);
     original_failed=(void *)method_setImplementation(methods[2],(IMP)failed);
     original_dealloc=(void *)method_setImplementation(methods[3],(IMP)deallocated);
+    Class icon=objc_getClass("SBApplicationIcon"),ui=objc_getClass("SBUIController");
+    Method icon_method=icon?class_getInstanceMethod(icon,sel_registerName("launch")):NULL;
+    if (signature(icon_method,"v@:") &&
+        signature(class_getInstanceMethod(icon,sel_registerName("application")),"@@:") &&
+        signature(class_getInstanceMethod(app,sel_registerName("bundleIdentifier")),"@@:") &&
+        signature(class_getClassMethod(ui,sel_registerName("sharedInstance")),"@@:") &&
+        signature(class_getInstanceMethod(ui,sel_registerName("activateApplicationAnimated:")),"v@:@"))
+        original_icon_launch=(void *)method_setImplementation(icon_method,(IMP)icon_launch);
     CFMessagePortRef port=CFMessagePortCreateLocal(NULL,CFSTR(S5LBOX_HLE_GUARD_PORT),query,NULL,NULL);
     if (!port) return; /* Native still works; HLE refuses without a handshake. */
     CFRunLoopSourceRef source=CFMessagePortCreateRunLoopSource(NULL,port,0);
