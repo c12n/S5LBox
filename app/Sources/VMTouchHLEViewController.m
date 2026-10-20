@@ -9,6 +9,7 @@
 #import "VMUSBService.h"
 #import <CoreMotion/CoreMotion.h>
 #include <math.h>
+#include <errno.h>
 
 static NSString *HLEChoiceKey(NSString *instance) { return [@"TouchHLEApps-" stringByAppendingString:instance]; }
 static NSArray<NSString *> *HLEChoices(NSString *instance) {
@@ -358,7 +359,9 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         const uint8_t *p=reply.bytes;
         unsigned length=((unsigned)p[16]<<8)|p[17];
         if (p[4]||p[5]||p[6]||p[7]||reply.length!=18+length) {
-            if (error) *error=HLEError(@"The guest could not complete the app request. Return to iPhone OS and try again.");
+            if (error) *error=HLEError(!p[4]&&!p[5]&&!p[6]&&p[7]==EACCES ?
+                @"Unlock iPhone OS, then open the app from its icon." :
+                @"The guest could not complete the app request. Return to iPhone OS and try again.");
             return nil;
         }
     }

@@ -39,7 +39,7 @@ def main():
     build, output = map(pathlib.Path, sys.argv[1:])
     repo = pathlib.Path(__file__).resolve().parent.parent
     control = (
-        "Package: com.j0shua.s5lbox.hle-launch\nVersion: 1.1.0\n"
+        "Package: com.j0shua.s5lbox.hle-launch\nVersion: 1.1.1\n"
         "Architecture: iphoneos-arm\n"
         "Maintainer: j0shua-SYSON <219831225+j0shua-SYSON@users.noreply.github.com>\n"
         "Depends: firmware (= 3.1.3)\nSection: Tweaks\n"

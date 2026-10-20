@@ -62,6 +62,22 @@ static unsigned iconLaunches,activations;
 + (id)sharedInstance { static id instance; if (!instance) instance=[self new]; return instance; }
 - (void)activateApplicationAnimated:(SBApplication *)app { CHECK(app==application); activations++; }
 @end
+static unsigned idleCount,lockCount,resets;
+@interface SpringBoard : NSObject
+@property(nonatomic) BOOL locked;
++ (id)sharedApplication;
+- (signed char)isLocked;
+- (void)didIdle;
+- (void)autoLock;
+- (void)resetIdleTimer;
+@end
+@implementation SpringBoard
++ (id)sharedApplication { static id instance; if (!instance) instance=[self new]; return instance; }
+- (signed char)isLocked { return self.locked; }
+- (void)didIdle { idleCount++; }
+- (void)autoLock { lockCount++; }
+- (void)resetIdleTimer { resets++; }
+@end
 static void pumpUntil(NSFileHandle *handle,NSTask *task,NSData **result) {
     __block NSData *data=nil;
     handle.readabilityHandler=^(NSFileHandle *file) {
@@ -177,9 +193,16 @@ int main(int argc,char **argv) {
         CHECK([route(exe,1,1,0,@"example.app") isEqual:@"0 1\n"]);
         CHECK([route(exe,2,1,1,nil) isEqual:@"0 0\n"]);
         CHECK([route(exe,3,1,0,@"example.app") isEqual:@"0 0\n"] && activations==1);
+        SpringBoard *board=[SpringBoard sharedApplication];
+        [board didIdle]; [board autoLock]; CHECK(idleCount==1 && lockCount==1 && !resets);
         task=client(exe,uuid,0,&input);
+        [board didIdle]; [board autoLock]; CHECK(idleCount==1 && lockCount==1 && resets==2);
         CHECK(![route(exe,3,1,0,@"example.app") isEqual:@"0 0\n"] && activations==1);
         finish(task,input);
+        [board didIdle]; [board autoLock]; CHECK(idleCount==2 && lockCount==2 && resets==2);
+        board.locked=YES;
+        CHECK(![route(exe,3,1,0,@"example.app") isEqual:@"0 0\n"] && activations==1);
+        board.locked=NO;
         CHECK([route(exe,4,1,0,nil) isEqual:@"0 0\n"]);
         [icon launch]; CHECK(iconLaunches==2);
         NSData *sentinel=[@"must survive rejected ownership/mode checks" dataUsingEncoding:NSUTF8StringEncoding];

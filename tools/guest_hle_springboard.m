@@ -46,6 +46,11 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; } @end
 + (id)sharedInstance;
 - (void)activateApplicationAnimated:(SBApplication *)app;
 @end
+@interface SpringBoard : NSObject
++ (id)sharedApplication;
+- (void)resetIdleTimer;
+- (BOOL)isLocked;
+@end
 @interface SBApplicationController : NSObject
 + (id)sharedInstance;
 - (NSArray *)allApplications;
@@ -60,6 +65,8 @@ static id pending[128];
 static BOOL overflow;
 static s5lbox_hle_routes routes;
 static void (*original_icon_launch)(id,SEL);
+static void (*original_idle)(id,SEL),(*original_auto_lock)(id,SEL);
+static BOOL has_lock_state;
 static double uptime(void) {
     mach_timebase_info_data_t scale; mach_timebase_info(&scale);
     return (double)mach_absolute_time()*scale.numer/scale.denom/1e9;
@@ -97,6 +104,22 @@ static void exited(id app,SEL cmd) { forget(app); original_exit(app,cmd); }
 static void failed(id app,SEL cmd) { forget(app); original_failed(app,cmd); }
 static void deallocated(id app,SEL cmd) { forget(app); original_dealloc(app,cmd); }
 
+static BOOL live_file_lease(void) {
+    int fd=open(S5LBOX_HLE_GUARD_PATH,O_RDONLY|O_NOFOLLOW);
+    if (fd<0) return 0;
+    struct stat st;
+    int valid=!fstat(fd,&st) && S_ISREG(st.st_mode) && !st.st_uid && st.st_nlink==1 && !(st.st_mode&0022);
+    int held=valid?flock(fd,LOCK_SH|LOCK_NB):0,error=errno; close(fd);
+    return valid && held && (error==EWOULDBLOCK || error==EAGAIN);
+}
+static void idle(id app,SEL cmd) {
+    if (live_file_lease()) [(SpringBoard *)app resetIdleTimer];
+    else original_idle(app,cmd);
+}
+static void auto_lock(id app,SEL cmd) {
+    if (live_file_lease()) [(SpringBoard *)app resetIdleTimer];
+    else original_auto_lock(app,cmd);
+}
 static void icon_launch(id icon,SEL cmd) {
     SBApplication *app=[(SBApplicationIcon *)icon application];
     if (container_path(app) && s5lbox_hle_route_icon(&routes,[[app bundleIdentifier] UTF8String],uptime())) return;
@@ -104,6 +127,7 @@ static void icon_launch(id icon,SEL cmd) {
 }
 static int native_launch(void *context,const char *identifier) {
     (void)context;
+    if (has_lock_state && [(SpringBoard *)[(id)objc_getClass("SpringBoard") sharedApplication] isLocked]) return EACCES;
     int fd=open(S5LBOX_HLE_GUARD_PATH,O_RDONLY|O_NOFOLLOW);
     if (fd>=0) {
         struct stat st;
@@ -230,6 +254,18 @@ void s5lbox_hle_guard_install(void) {
         signature(class_getClassMethod(ui,sel_registerName("sharedInstance")),"@@:") &&
         signature(class_getInstanceMethod(ui,sel_registerName("activateApplicationAnimated:")),"v@:@"))
         original_icon_launch=(void *)method_setImplementation(icon_method,(IMP)icon_launch);
+    Class springboard=objc_getClass("SpringBoard");
+    if (springboard) {
+        Method idle_method=class_getInstanceMethod(springboard,sel_registerName("didIdle"));
+        Method lock_method=class_getInstanceMethod(springboard,sel_registerName("autoLock"));
+        if (signature(idle_method,"v@:") && signature(lock_method,"v@:") &&
+            signature(class_getInstanceMethod(springboard,sel_registerName("resetIdleTimer")),"v@:")) {
+            original_idle=(void *)method_setImplementation(idle_method,(IMP)idle);
+            original_auto_lock=(void *)method_setImplementation(lock_method,(IMP)auto_lock);
+        }
+        has_lock_state=signature(class_getClassMethod(springboard,sel_registerName("sharedApplication")),"@@:") &&
+            signature(class_getInstanceMethod(springboard,sel_registerName("isLocked")),"c@:");
+    }
     CFMessagePortRef port=CFMessagePortCreateLocal(NULL,CFSTR(S5LBOX_HLE_GUARD_PORT),query,NULL,NULL);
     if (!port) return; /* Native still works; HLE refuses without a handshake. */
     CFRunLoopSourceRef source=CFMessagePortCreateRunLoopSource(NULL,port,0);
