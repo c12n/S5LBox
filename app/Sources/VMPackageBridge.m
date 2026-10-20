@@ -127,6 +127,7 @@ static void AwaitFirstConnection(NSString *identifier) {
     return nil;
 }
 - (VMUSBService *)openLiveFilesForContainer:(NSString *)uuid error:(NSError **)error {
+    _setupPending=NO;
     NSUUID *identity=[[NSUUID alloc] initWithUUIDString:uuid];
     if (uuid.length!=36 || !identity || [identity.UUIDString caseInsensitiveCompare:uuid]!=NSOrderedSame) {
         if (error) *error=VMPackageError(@"Invalid guest application container."); return nil;
@@ -136,10 +137,28 @@ static void AwaitFirstConnection(NSString *identifier) {
     [service setOperationDeadline:NSProcessInfo.processInfo.systemUptime+30];
     NSData *name=[uuid dataUsingEncoding:NSUTF8StringEncoding];
     if (![service writeData:name error:error]) { [service close]; return nil; }
-    NSData *reply=[service readCount:8 error:error];
+    // The package supervisor can refuse the request before handing the socket
+    // to the file broker. Its framed E response is not a broker errno packet.
+    NSData *header=[service readCount:4 error:error];
     uint32_t length=0,status=0;
-    if (reply.length==8) { memcpy(&length,reply.bytes,4); memcpy(&status,(const uint8_t *)reply.bytes+4,4); }
-    if (reply.length!=8 || ntohl(length)!=4 || status) {
+    if (header.length==4) memcpy(&length,header.bytes,4);
+    length=ntohl(length);
+    if (header.length!=4 || length<4 || length>4096) {
+        if (error && !*error) *error=VMPackageError(@"Invalid guest file handshake.");
+        [service close]; return nil;
+    }
+    NSData *reply=[service readCount:length error:error];
+    if (reply.length!=length) { [service close]; return nil; }
+    if (length!=4) {
+        NSString *message=nil;
+        if (((const uint8_t *)reply.bytes)[0]=='E')
+            message=[[NSString alloc] initWithBytes:(const uint8_t *)reply.bytes+1 length:length-1 encoding:NSUTF8StringEncoding];
+        _setupPending=[message isEqualToString:@"Jailbreak setup is still finishing. Wait for it to complete, then refresh Packages and retry."];
+        if (error) *error=VMPackageError(message.length?message:@"Invalid guest file handshake.");
+        [service close]; return nil;
+    }
+    memcpy(&status,reply.bytes,4);
+    if (status) {
         if (error && !*error) *error=VMPackageError(ntohl(status)==EBUSY ?
             @"Return to the guest's Home screen and close any other app session, then retry." :
             @"The guest launch guard is unavailable. Set up touchHLE for this machine and restart it.");

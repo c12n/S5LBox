@@ -160,6 +160,13 @@ def main():
                     kind, data = frame(sock)
                     assert kind == b"E" and b"setup is still finishing" in data
                 checks += 1
+            # The live-file client must decode this supervisor error before
+            # interpreting the broker's separate length=4 errno handshake.
+            for op in (b"H", b"L"):
+                with connect(op, modern=True) as sock:
+                    kind, data = frame(sock)
+                    assert kind == b"E" and b"setup is still finishing" in data
+                checks += 1
             assert (root / "status").read_bytes() == status
             for op in (b"I", b"R"):
                 with connect(op, modern=True) as sock:
