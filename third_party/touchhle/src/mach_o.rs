@@ -240,6 +240,18 @@ fn cpu_subtype_to_str(ty: cpu_subtype_t) -> &'static str {
     }
 }
 
+/// Match the portable ARMv6 CPU, not upstream touchHLE's ARMv7 JIT.
+/// Apply the same policy to executables and every dynamically loaded library.
+fn interpreter_slice_preference(ty: cpu_subtype_t) -> Option<u8> {
+    match ty {
+        mach_object::CPU_SUBTYPE_ARM_V6 => Some(4),
+        mach_object::CPU_SUBTYPE_ARM_V5TEJ => Some(3),
+        mach_object::CPU_SUBTYPE_ARM_V4T => Some(2),
+        mach_object::CPU_SUBTYPE_ARM_ALL => Some(1),
+        _ => None,
+    }
+}
+
 impl MachO {
     /// Load the all the sections from a Mach-O binary (provided as `bytes`)
     /// into the guest memory (`into_mem`), and return a struct containing
@@ -260,26 +272,28 @@ impl MachO {
             OFile::MachFile { header, commands } => (header, commands),
             OFile::FatFile { files, .. } => {
                 let mut best_subslice = None;
-                let mut best_type = None;
+                let mut best_preference = None;
                 for (arch, _) in files {
                     if arch.cputype != mach_object::CPU_TYPE_ARM {
                         continue;
                     }
-                    if arch.cpusubtype == mach_object::CPU_SUBTYPE_ARM_V7
-                        || (arch.cpusubtype == mach_object::CPU_SUBTYPE_ARM_V6
-                            && best_type != Some(mach_object::CPU_SUBTYPE_ARM_V7))
-                        || best_type.is_none()
-                    {
-                        best_subslice = Some(
-                            &bytes[arch.offset as usize..arch.offset as usize + arch.size as usize],
-                        );
-                        best_type = Some(arch.cpusubtype);
+                    let Some(preference) = interpreter_slice_preference(arch.cpusubtype) else {
+                        continue;
+                    };
+                    if Some(preference) > best_preference {
+                        let start = arch.offset as usize;
+                        let end = start
+                            .checked_add(arch.size as usize)
+                            .ok_or("Invalid Mach-O slice range")?;
+                        best_subslice =
+                            Some(bytes.get(start..end).ok_or("Invalid Mach-O slice range")?);
+                        best_preference = Some(preference);
                     }
                 }
                 return if let Some(subslice) = best_subslice {
                     MachO::load_from_bytes(subslice, into_mem, name, slide_to_address)
                 } else {
-                    Err("No supported architecture in the fat binary")
+                    Err("This binary has no ARMv6-compatible slice")
                 };
             }
             OFile::ArFile { .. } | OFile::SymDef { .. } => {
@@ -289,6 +303,11 @@ impl MachO {
 
         if header.cputype != mach_object::CPU_TYPE_ARM {
             return Err("Executable is not for an ARM CPU!");
+        }
+        if interpreter_slice_preference(header.cpusubtype).is_none() {
+            return Err(
+                "This binary requires an unsupported CPU; an ARMv6-compatible build is needed",
+            );
         }
         log!(
             "Loading {} slice for {:?}",
@@ -304,7 +323,6 @@ impl MachO {
         if is_64bit {
             return Err("Executable is not 32-bit!");
         }
-        // TODO: Check cpusubtype (should be some flavour of ARMv6/ARMv7)
 
         let split_segs = (header.flags & mach_object::MH_SPLIT_SEGS) != 0;
 
@@ -713,5 +731,131 @@ impl MachO {
     /// Get a section by its name (`&str`) or type ([SectionType]).
     pub fn get_section<P: SectionPredicate>(&self, by: P) -> Option<&Section> {
         self.sections.iter().find(|section| by.test(section))
+    }
+}
+
+#[cfg(test)]
+mod interpreter_slice_tests {
+    use super::*;
+    use mach_object::*;
+
+    // Original, minimal Mach-O images, not extracted firmware. A dependency
+    // name identifies the selected slice without needing to execute its code.
+    fn thin(cpu: cpu_type_t, subtype: cpu_subtype_t, marker: &str) -> Vec<u8> {
+        let command_size = (24 + marker.len() + 1 + 3) & !3;
+        let mut bytes = Vec::new();
+        for word in [
+            0xfeedface,
+            cpu as u32,
+            subtype as u32,
+            2,
+            1,
+            command_size as u32,
+            0,
+            0xc,
+            command_size as u32,
+            24,
+            0,
+            0,
+            0,
+        ] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes.extend_from_slice(marker.as_bytes());
+        bytes.resize(28 + command_size, 0);
+        bytes
+    }
+
+    fn fat(slices: &[(cpu_type_t, cpu_subtype_t, Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xcafebabeu32.to_be_bytes());
+        bytes.extend_from_slice(&(slices.len() as u32).to_be_bytes());
+        let mut offset = 8 + slices.len() * 20;
+        for (cpu, subtype, image) in slices {
+            for word in [
+                *cpu as u32,
+                *subtype as u32,
+                offset as u32,
+                image.len() as u32,
+                2,
+            ] {
+                bytes.extend_from_slice(&word.to_be_bytes());
+            }
+            offset += image.len();
+        }
+        for (_, _, image) in slices {
+            bytes.extend_from_slice(image);
+        }
+        bytes
+    }
+
+    fn load(bytes: &[u8]) -> Result<MachO, &'static str> {
+        MachO::load_from_bytes(bytes, &mut Mem::new(), "test".into(), 0)
+    }
+
+    #[test]
+    fn fat_apps_and_libraries_choose_armv6_in_either_order() {
+        let v6 = (
+            CPU_TYPE_ARM,
+            CPU_SUBTYPE_ARM_V6,
+            thin(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6, "v6"),
+        );
+        let v7 = (
+            CPU_TYPE_ARM,
+            CPU_SUBTYPE_ARM_V7,
+            thin(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, "v7"),
+        );
+        for slices in [[v6.clone(), v7.clone()], [v7, v6]] {
+            assert_eq!(load(&fat(&slices)).unwrap().dynamic_libraries, ["v6"]);
+        }
+    }
+
+    #[test]
+    fn compatible_fallbacks_work_but_never_outrank_armv6() {
+        for subtype in [
+            CPU_SUBTYPE_ARM_ALL,
+            CPU_SUBTYPE_ARM_V4T,
+            CPU_SUBTYPE_ARM_V5TEJ,
+        ] {
+            let fallback = (CPU_TYPE_ARM, subtype, thin(CPU_TYPE_ARM, subtype, "old"));
+            assert_eq!(load(&fallback.2).unwrap().dynamic_libraries, ["old"]);
+            let preferred = (
+                CPU_TYPE_ARM,
+                CPU_SUBTYPE_ARM_V6,
+                thin(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6, "v6"),
+            );
+            assert_eq!(
+                load(&fat(&[preferred, fallback]))
+                    .unwrap()
+                    .dynamic_libraries,
+                ["v6"]
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_thin_and_fat_architectures_are_errors_not_panics() {
+        for subtype in [
+            CPU_SUBTYPE_ARM_V7,
+            CPU_SUBTYPE_ARM_V7S,
+            CPU_SUBTYPE_ARM_V6M,
+            CPU_SUBTYPE_ARM_XSCALE,
+            0xffff,
+        ] {
+            let image = thin(CPU_TYPE_ARM, subtype, "unsupported");
+            assert!(load(&image).unwrap_err().contains("unsupported CPU"));
+            assert!(load(&fat(&[(CPU_TYPE_ARM, subtype, image)]))
+                .unwrap_err()
+                .contains("no ARMv6-compatible slice"));
+        }
+        assert!(load(&thin(CPU_TYPE_X86, 3, "x86")).is_err());
+    }
+
+    #[test]
+    fn fat_wrapper_cannot_disguise_an_unsupported_inner_header() {
+        let image = thin(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, "v7");
+        assert!(load(&fat(&[(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6, image)]))
+            .unwrap_err()
+            .contains("unsupported CPU"));
     }
 }

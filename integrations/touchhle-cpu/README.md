@@ -41,12 +41,23 @@ an A9 iPhone running iOS 15.8.5 with a freshly jailbroken 3.1.3 guest:
 - Interrupt a held button press by switching host apps, resume without firing
   the button, and accept the next ordinary tap.
 - Close with Home while paused, reopen the app, and read the saved document.
+- Upgrade the fixture through live IPA installation without losing its document.
+- Start OpenAL playback in both the native guest and touchHLE; observe advancing
+  playback positions in touchHLE after pause/resume and host background/foreground
+  transitions, then close and reopen normally. This checks backend operation,
+  not audible quality or audio-route/interruption recovery.
+- Recover from a real app's CPU fault in the same host process and reopen the
+  fixture with its saved data intact.
 
 The host tests additionally cover file isolation and locks, launch races,
 installer validation/removal, runtime exits/faults, and audio resource cleanup.
 Audio tests use a null output device to verify teardown, frozen playback
 positions during pause, resume, and devices opened while paused. They do not
 verify audible output on the iPhone.
+
+The Mach-O loader selects ARMv6-compatible slices for apps and libraries. It
+rejects ARMv7-only binaries before execution; the portable CPU does not provide
+upstream touchHLE's ARMv7 execution support.
 
 Presentation ABI 2 brackets each native GLES borrow with a host graphics gate.
 Context creation, destruction and frame presentation use the same gate. On
