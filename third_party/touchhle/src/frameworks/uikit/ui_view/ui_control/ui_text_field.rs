@@ -23,6 +23,7 @@ use crate::objc::{
     NSZonePtr, SEL,
 };
 use crate::Environment;
+use unicode_segmentation::UnicodeSegmentation;
 
 type UIKeyboardAppearance = NSInteger;
 type UIKeyboardType = NSInteger;
@@ -318,10 +319,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 };
 
 pub fn handle_text(env: &mut Environment, text_field: id, text: String) {
+    if text.is_empty() {
+        return;
+    }
     log_dbg!("Calling handle_text for {:?} with '{}'", text_field, text);
     let txt = ns_string::from_rust_string(env, text);
-    let txt_len: NSUInteger = msg![env; txt length];
-    assert_eq!(txt_len, 1);
 
     let text_label = env
         .objc
@@ -360,12 +362,31 @@ pub fn handle_text(env: &mut Environment, text_field: id, text: String) {
             "handle_text, new_text: {}",
             ns_string::to_rust_string(env, new_text)
         );
-        // TODO: refactor this to proper update() method
-        () = msg![env; text_label setText:new_text];
-        () = msg![env; text_field setNeedsDisplay];
+        update_edited_text(env, text_field, new_text);
         release(env, new_text);
     }
     release(env, txt);
+}
+
+/// UIKit delegate ranges use UTF-16 offsets, not UTF-8 bytes or scalar counts.
+/// Delete the last composed character as a unit so a backspace cannot leave an
+/// unpaired surrogate (or half of a combining/emoji sequence) in the field.
+fn backspace_range(text: &str) -> NSRange {
+    let len = text.encode_utf16().count() as NSUInteger;
+    let tail = text
+        .graphemes(true)
+        .next_back()
+        .map_or(0, |last| last.encode_utf16().count() as NSUInteger);
+    NSRange {
+        location: len - tail,
+        length: tail,
+    }
+}
+
+fn update_edited_text(env: &mut Environment, text_field: id, text: id) {
+    () = msg![env; text_field setText:text];
+    () = msg![env; text_field setNeedsDisplay];
+    super::send_actions(env, text_field, nil, super::UIControlEventEditingChanged);
 }
 
 pub fn handle_backspace(env: &mut Environment, text_field: id) {
@@ -380,10 +401,8 @@ pub fn handle_backspace(env: &mut Environment, text_field: id) {
     if len == 0 {
         return;
     }
-    let range = NSRange {
-        location: len - 1,
-        length: 1,
-    };
+    let range = backspace_range(&ns_string::to_rust_string(env, curr_text));
+    let prefix_len = range.location;
     let empty = ns_string::get_static_str(env, "");
 
     let delegate: id = env
@@ -399,15 +418,35 @@ pub fn handle_backspace(env: &mut Environment, text_field: id) {
         || !responds
         || msg![env; delegate textField:text_field shouldChangeCharactersInRange:range replacementString:empty];
     if should {
-        let new_text: id = msg![env; curr_text substringToIndex:(len-1)];
+        let new_text: id = msg![env; curr_text substringToIndex:prefix_len];
         log_dbg!(
             "handle_backspace, new_text: {}",
             ns_string::to_rust_string(env, new_text)
         );
-        // TODO: refactor this to proper update() method
-        () = msg![env; text_label setText:new_text];
-        () = msg![env; text_field setNeedsDisplay];
+        update_edited_text(env, text_field, new_text);
         release(env, new_text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backspace_range;
+
+    #[test]
+    fn backspace_preserves_utf16_and_composed_characters() {
+        for (text, location, length) in [
+            ("", 0, 0),
+            ("abc", 2, 1),
+            ("a\u{1f600}", 1, 2),
+            ("\u{1f600}x", 2, 1),
+            ("a\u{301}", 0, 2),
+            ("x\u{1f1fa}\u{1f1f8}", 1, 4),
+            ("x\u{1f469}\u{200d}\u{1f4bb}", 1, 5),
+            ("x\u{1100}\u{1161}", 1, 2),
+        ] {
+            let range = backspace_range(text);
+            assert_eq!((range.location, range.length), (location, length));
+        }
     }
 }
 

@@ -456,6 +456,41 @@ mod tests {
         }
     }
     #[test]
+    fn native_keyboard_keeps_bulk_unicode_text_and_edit_commands() {
+        let text = "Hello \u{1f600} a\u{301}";
+        let mut input = InputEvent {
+            kind: 4,
+            ..Default::default()
+        };
+        input.text[..text.len()].copy_from_slice(text.as_bytes());
+        let mut queue = VecDeque::from([
+            input,
+            InputEvent {
+                kind: 5,
+                ..Default::default()
+            },
+            InputEvent {
+                kind: 6,
+                ..Default::default()
+            },
+        ]);
+        let mut window = window(&mut queue);
+        window.poll_for_events(&Options::default());
+        match window.pop_event().unwrap() {
+            Event::TextInput(TextInputEvent::Text(actual)) => assert_eq!(actual, text),
+            _ => panic!("Bulk text must remain valid UTF-8"),
+        }
+        assert!(matches!(
+            window.pop_event(),
+            Some(Event::TextInput(TextInputEvent::Backspace))
+        ));
+        assert!(matches!(
+            window.pop_event(),
+            Some(Event::TextInput(TextInputEvent::Return))
+        ));
+        assert!(window.pop_event().is_none());
+    }
+    #[test]
     fn callback_polling_is_bounded_and_malformed_text_is_ignored() {
         let mut queue = VecDeque::from([InputEvent {
             kind: 4,

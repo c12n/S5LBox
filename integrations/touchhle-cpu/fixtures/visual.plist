@@ -4,7 +4,7 @@
 <key>CFBundleIdentifier</key><string>org.s5lbox.tests.HLEVisual</string>
 <key>CFBundleExecutable</key><string>HLEVisual</string>
 <key>CFBundleName</key><string>HLEVisual</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>MinimumOSVersion</key><string>3.0</string>
 </dict></plist>

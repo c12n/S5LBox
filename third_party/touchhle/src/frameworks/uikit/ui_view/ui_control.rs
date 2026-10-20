@@ -33,6 +33,7 @@ pub const UIControlEventTouchUpInside: UIControlEvents = 1 << 6;
 const UIControlEventTouchUpOutside: UIControlEvents = 1 << 7;
 const UIControlEventTouchCancel: UIControlEvents = 1 << 8;
 pub const UIControlEventValueChanged: UIControlEvents = 1 << 12;
+const UIControlEventEditingChanged: UIControlEvents = 1 << 17;
 
 // TODO: Add the other UIControlContentVerticalAlignment enums
 pub type UIControlContentVerticalAlignment = NSInteger;

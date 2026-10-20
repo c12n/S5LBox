@@ -266,7 +266,19 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 }
 - (void)updateInputState {
     _display.inputEnabled=!(_paused||_inactive||_closing||_finished);
-    if (_display.inputEnabled && _wantsTextInput) [_display becomeFirstResponder];
+    BOOL keyboard=_display.inputEnabled && _wantsTextInput;
+    // The software keyboard covers the bottom bar. Keep the same actions
+    // reachable above it without permanently duplicating the runtime chrome.
+    if (keyboard && !self.navigationItem.leftBarButtonItem) {
+        self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"Home"
+            style:UIBarButtonItemStylePlain target:self action:@selector(home)];
+        UIBarButtonItem *controls=[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"slider.horizontal.3"]
+            style:UIBarButtonItemStylePlain target:self action:@selector(controls)];
+        controls.accessibilityLabel=@"App controls"; self.navigationItem.rightBarButtonItem=controls;
+    } else if (!keyboard) {
+        self.navigationItem.leftBarButtonItem=nil; self.navigationItem.rightBarButtonItem=nil;
+    }
+    if (keyboard) [_display becomeFirstResponder];
     else [_display resignFirstResponder];
     _link.paused=_paused||_inactive;
     [self updateMotionState];

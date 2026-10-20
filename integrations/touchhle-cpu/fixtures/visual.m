@@ -15,6 +15,8 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface NSAutoreleasePool : NSObject @end
 @interface NSString : NSObject
 + (id)stringWithUTF8String:(const char *)text;
+- (const char *)UTF8String;
+- (BOOL)isEqualToString:(id)other;
 @end
 @interface NSUserDefaults : NSObject
 + (id)standardUserDefaults;
@@ -50,6 +52,13 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 @interface UIButton : UIControl
 + (id)buttonWithType:(int)type;
 - (void)setTitle:(id)title forState:(unsigned)state;
+@end
+typedef struct { unsigned location,length; } NSRange;
+@interface UITextField : UIControl
+- (void)setDelegate:(id)delegate;
+- (void)setText:(id)text;
+- (id)text;
+- (BOOL)resignFirstResponder;
 @end
 @interface NSSet : NSObject
 + (id)setWithObject:(id)object;
@@ -108,6 +117,8 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     BOOL _audioPlaying;
     UIButton *_motionButton;
     unsigned _motionSamples;
+    UITextField *_textField;
+    unsigned _edits;
 }
 @end
 @implementation HLEVisualDelegate
@@ -125,6 +136,15 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     [_label setTextColor:[UIColor whiteColor]];
     [_label setTextAlignment:1];
     [_window addSubview:_label];
+    _textField=[[UITextField alloc] initWithFrame:(CGRect){{30,60},{260,44}}];
+    [_textField setDelegate:self];
+    char textPath[1024],savedText[1024]={0};
+    snprintf(textPath,sizeof textPath,"%s/Documents/visual-keyboard.txt",getenv("HOME"));
+    FILE *textFile=fopen(textPath,"r");
+    if (textFile) { fread(savedText,1,sizeof savedText-1,textFile); fclose(textFile); }
+    [_textField setText:[NSString stringWithUTF8String:savedText]];
+    [_textField addTarget:self action:@selector(textChanged:) forControlEvents:(1u<<17)];
+    [_window addSubview:_textField];
     UIButton *button=[UIButton buttonWithType:1];
     [button setFrame:(CGRect){{50,245},{220,64}}];
     [button setTitle:@"Test guest touch" forState:0];
@@ -144,6 +164,25 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     puts("S5LBOX-HLE-VISUAL READY"); fflush(stdout);
     printf("S5LBOX-HLE-VISUAL RESTORED touches=%u exits=%d\n",_taps,
         [[NSUserDefaults standardUserDefaults] integerForKey:@"CompletedExits"]); fflush(stdout);
+}
+- (void)saveText {
+    char path[1024]; snprintf(path,sizeof path,"%s/Documents/visual-keyboard.txt",getenv("HOME"));
+    FILE *file=fopen(path,"w");
+    if (file) { fputs([[_textField text] UTF8String],file); fclose(file); }
+}
+- (void)textChanged:(id)sender {
+    (void)sender;
+    char title[96]; snprintf(title,sizeof title,"Keyboard edits: %u",++_edits);
+    [_label setText:[NSString stringWithUTF8String:title]];
+}
+- (BOOL)textField:(UITextField *)field shouldChangeCharactersInRange:(NSRange)range replacementString:(NSString *)text {
+    (void)field; (void)range;
+    // A deliberate delegate rejection for the keyboard regression test.
+    return ![text isEqualToString:@"!"];
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)field {
+    [self saveText];
+    return [field resignFirstResponder];
 }
 - (void)motionTapped:(id)sender {
     (void)sender;
@@ -204,6 +243,7 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 }
 - (void)applicationWillTerminate:(UIApplication *)application {
     (void)application;
+    [self saveText];
     NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
     int exits=[defaults integerForKey:@"CompletedExits"]+1;
     // Intentionally do not call synchronize: the runtime must flush changes

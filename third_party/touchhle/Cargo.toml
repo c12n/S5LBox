@@ -64,6 +64,7 @@ digest = "0.10.7"
 md-5 = "0.10.6"
 sha1 = "0.10.6"
 encoding_rs = "0.8.35"
+unicode-segmentation = "=1.12.0"
 # We currently use a fork of rust-sdl2 because we need a fix for Android builds
 # that's not upstream yet.
 # The HIDAPI feature is enabled because rust-sdl2 hides the SDL2 sensor features
