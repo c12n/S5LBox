@@ -23,6 +23,7 @@ pub const UITouchPhaseBegan: UITouchPhase = 0;
 pub const UITouchPhaseMoved: UITouchPhase = 1;
 pub const UITouchPhaseStationary: UITouchPhase = 2;
 pub const UITouchPhaseEnded: UITouchPhase = 3;
+pub const UITouchPhaseCancelled: UITouchPhase = 4;
 
 #[derive(Default)]
 pub struct State {
@@ -118,7 +119,8 @@ pub fn handle_event(env: &mut Environment, event: Event) {
     match event {
         Event::TouchesDown(map) => handle_touches_down(env, map),
         Event::TouchesMove(map) => handle_touches_move(env, map),
-        Event::TouchesUp(map) => handle_touches_up(env, map),
+        Event::TouchesUp(map) => handle_touches_up(env, map, false),
+        Event::TouchesCancel(map) => handle_touches_up(env, map, true),
         _ => unreachable!(),
     }
 }
@@ -401,7 +403,7 @@ fn handle_touches_move(env: &mut Environment, map: HashMap<FingerId, Coords>) {
     release(env, pool);
 }
 
-fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>) {
+fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>, cancelled: bool) {
     let pool: id = msg_class![env; NSAutoreleasePool new];
 
     let timestamp: NSTimeInterval = {
@@ -456,7 +458,11 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         host_object.location = location;
         host_object.timestamp = timestamp;
         assert_eq!(host_object.phase, UITouchPhaseStationary);
-        host_object.phase = UITouchPhaseEnded;
+        host_object.phase = if cancelled {
+            UITouchPhaseCancelled
+        } else {
+            UITouchPhaseEnded
+        };
 
         let _: () = msg![env; touches addObject:touch];
 
@@ -486,7 +492,11 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>) {
             touches,
             event
         );
-        let _: () = msg![env; view touchesEnded:touches withEvent:event];
+        if cancelled {
+            let _: () = msg![env; view touchesCancelled:touches withEvent:event];
+        } else {
+            let _: () = msg![env; view touchesEnded:touches withEvent:event];
+        }
     }
 
     release(env, pool);

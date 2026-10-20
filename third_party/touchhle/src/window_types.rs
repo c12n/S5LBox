@@ -81,6 +81,7 @@ pub enum Event {
     TouchesDown(HashMap<FingerId, Coords>),
     TouchesMove(HashMap<FingerId, Coords>),
     TouchesUp(HashMap<FingerId, Coords>),
+    TouchesCancel(HashMap<FingerId, Coords>),
     /// User pressed F12, requesting that execution be paused and the debugger
     /// take over.
     EnterDebugger,

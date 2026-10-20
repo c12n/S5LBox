@@ -113,9 +113,10 @@ pub fn handle_events(env: &mut Environment) -> Option<Instant> {
                 echo!("User requested quit, exiting.");
                 ui_application::exit(env);
             }
-            Event::TouchesDown(..) | Event::TouchesMove(..) | Event::TouchesUp(..) => {
-                ui_touch::handle_event(env, event)
-            }
+            Event::TouchesDown(..)
+            | Event::TouchesMove(..)
+            | Event::TouchesUp(..)
+            | Event::TouchesCancel(..) => ui_touch::handle_event(env, event),
             Event::AppWillResignActive => {
                 // Getting this event means touchHLE is becoming inactive, e.g.
                 // due to switching apps. The obvious way to handle this would

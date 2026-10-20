@@ -129,7 +129,7 @@ impl Window {
                 break;
             }
             let event = match input.kind {
-                1..=3 => {
+                1..=3 | 9 => {
                     if !input.x.is_finite() || !input.y.is_finite() {
                         continue;
                     }
@@ -148,7 +148,8 @@ impl Window {
                     match input.kind {
                         1 => Event::TouchesDown(touches),
                         2 => Event::TouchesMove(touches),
-                        _ => Event::TouchesUp(touches),
+                        3 => Event::TouchesUp(touches),
+                        _ => Event::TouchesCancel(touches),
                     }
                 }
                 4 => {
@@ -385,6 +386,24 @@ mod tests {
                 assert!((x - 160.0).abs() <= 1.0 && (y - 240.0).abs() <= 1.0);
             }
             _ => panic!("Incorrect native touch release"),
+        }
+    }
+    #[test]
+    fn cancelled_touch_is_not_a_button_release() {
+        let mut queue = VecDeque::from([InputEvent {
+            kind: 9,
+            finger: 9,
+            x: 0.25,
+            y: 0.75,
+            ..Default::default()
+        }]);
+        let mut window = window(&mut queue);
+        window.poll_for_events(&Options::default());
+        match window.pop_event().unwrap() {
+            Event::TouchesCancel(touches) => {
+                assert_eq!(touches[&FingerId::Touch(9)], (80.0, 360.0))
+            }
+            _ => panic!("Cancellation must not become a touch-up action"),
         }
     }
     #[test]

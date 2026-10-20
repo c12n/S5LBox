@@ -22,7 +22,7 @@ typedef struct {
 } s5lbox_hle_outcome;
 /* Paths must be absolute, UTF-8, existing, and owned by the caller. Resource
  * and data roots must be directories. Strings/pointer arrays must remain valid
- * until run returns; output storage must be writable. Only HEADLESS is ready.
+ * until run returns; output storage must be writable. This entry is headless.
  * Run blocks its worker thread. One session per host process is supported.
  * Errors and guest exits return here; normal Rust panics do not cross the ABI.
  * This is not a security boundary for malicious native host callers. */
@@ -49,8 +49,8 @@ int32_t s5lbox_hle_run_live(const s5lbox_hle_config *, const s5lbox_hle_live_con
     const s5lbox_hle_control *, s5lbox_hle_outcome *);
 /* Native callback backend. All callbacks run serially on the runtime worker;
  * UI work must be marshalled to the main thread by the host. Do not throw.
- * kind: 1 down, 2 move, 3 up/cancel, 4 UTF-8 text, 5 backspace, 6 return,
- * 7 resign-active, 8 quit. Coordinates are normalized to the complete surface.
+ * kind: 1 down, 2 move, 3 up, 4 UTF-8 text, 5 backspace, 6 return,
+ * 7 resign-active, 8 quit, 9 cancel. Coordinates are normalized to the surface.
  * poll_event returns 1 for an event, 0 for none, negative on failure.
  * The surface, callback targets and GL contexts must outlive the run. */
 typedef struct {

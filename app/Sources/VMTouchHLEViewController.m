@@ -28,7 +28,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
         // pause must not become a delayed burst of input after Resume.
         for (NSNumber *finger in _pressed) {
             CGPoint point=_pressed[finger].CGPointValue;
-            s5lbox_hle_input_event event={0}; event.kind=3;
+            s5lbox_hle_input_event event={0}; event.kind=9;
             event.finger=finger.longLongValue; event.x=point.x; event.y=point.y;
             [self.surface enqueueInput:event];
         }
@@ -61,7 +61,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
         if ([self.surface enqueueInput:event]) {
             if (!_pressed) _pressed=[NSMutableDictionary dictionary];
             NSNumber *finger=@(event.finger);
-            if (kind==3) [_pressed removeObjectForKey:finger];
+            if (kind==3 || kind==9) [_pressed removeObjectForKey:finger];
             else _pressed[finger]=[NSValue valueWithCGPoint:CGPointMake(event.x,event.y)];
         }
     }
@@ -69,7 +69,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:1]; }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:2]; }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:9]; }
 - (BOOL)canBecomeFirstResponder { return _inputEnabled; }
 - (BOOL)hasText { return YES; }
 - (void)deleteBackward { if (!_inputEnabled) return; s5lbox_hle_input_event event={0}; event.kind=5; [self.surface enqueueInput:event]; }

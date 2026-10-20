@@ -3,6 +3,7 @@
  * SDK can build the test without distributing Apple headers or firmware. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 typedef signed char BOOL;
 typedef struct { float x,y; } CGPoint;
 typedef struct { float width,height; } CGSize;
@@ -38,10 +39,29 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 - (void)setTextColor:(id)color;
 - (void)setTextAlignment:(int)alignment;
 @end
-@interface UIButton : UIView
+@interface UIControl : UIView
+- (void)addTarget:(id)target action:(SEL)action forControlEvents:(unsigned)events;
+- (void)touchesBegan:(id)touches withEvent:(id)event;
+- (void)touchesCancelled:(id)touches withEvent:(id)event;
+- (void)cancelTrackingWithEvent:(id)event;
+- (BOOL)isTracking;
+- (BOOL)isHighlighted;
+@end
+@interface UIButton : UIControl
 + (id)buttonWithType:(int)type;
 - (void)setTitle:(id)title forState:(unsigned)state;
-- (void)addTarget:(id)target action:(SEL)action forControlEvents:(unsigned)events;
+@end
+@interface NSSet : NSObject
++ (id)setWithObject:(id)object;
+@end
+@interface UITouch : NSObject @end
+@interface CancelTarget : NSObject { @public unsigned ended,cancelled; }
+- (void)ended:(id)sender;
+- (void)cancelled:(id)sender;
+@end
+@implementation CancelTarget
+- (void)ended:(id)sender { (void)sender; ended++; }
+- (void)cancelled:(id)sender { (void)sender; cancelled++; }
 @end
 @interface UIApplication : NSObject
 - (void)setStatusBarHidden:(BOOL)hidden;
@@ -100,5 +120,24 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
 @end
 int main(int argc,char **argv) {
     (void)[[NSAutoreleasePool alloc] init];
+    // Headless framework regression; normal visual/native runs skip this.
+    if (argc>1 && !strcmp(argv[1],"--cancel-smoke")) {
+        UIControl *control=[[UIControl alloc] init];
+        CancelTarget *target=[[CancelTarget alloc] init];
+        id touch=[[UITouch alloc] init],touches=[NSSet setWithObject:touch];
+        [control addTarget:target action:@selector(ended:) forControlEvents:64];
+        [control addTarget:target action:@selector(cancelled:) forControlEvents:256];
+        [control touchesBegan:touches withEvent:0];
+        unsigned failures=![control isTracking] || ![control isHighlighted];
+        [control touchesCancelled:touches withEvent:0];
+        failures += [control isTracking] || [control isHighlighted] || target->ended || target->cancelled!=1;
+        [control touchesCancelled:touches withEvent:0]; // No duplicate action.
+        failures += target->cancelled!=1;
+        [control touchesBegan:touches withEvent:0];
+        [control cancelTrackingWithEvent:0];
+        failures += [control isTracking] || [control isHighlighted] || target->ended;
+        printf("S5LBOX-HLE-CANCEL %s failures=%u\n",failures?"FAIL":"PASS",failures);
+        fflush(stdout); return failures?1:0;
+    }
     return UIApplicationMain(argc,argv,0,@"HLEVisualDelegate");
 }

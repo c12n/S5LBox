@@ -31,6 +31,7 @@ const UIControlEventTouchDragEnter: UIControlEvents = 1 << 4;
 const UIControlEventTouchDragExit: UIControlEvents = 1 << 5;
 pub const UIControlEventTouchUpInside: UIControlEvents = 1 << 6;
 const UIControlEventTouchUpOutside: UIControlEvents = 1 << 7;
+const UIControlEventTouchCancel: UIControlEvents = 1 << 8;
 pub const UIControlEventValueChanged: UIControlEvents = 1 << 12;
 
 // TODO: Add the other UIControlContentVerticalAlignment enums
@@ -179,8 +180,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow::<UIControlHostObject>(this).tracking
 }
 
+- (bool)isTracking {
+    env.objc.borrow::<UIControlHostObject>(this).tracking
+}
+
 - (())cancelTrackingWithEvent:(id)_event {
-    // default implementation, subclasses can override this
+    let state = env.objc.borrow_mut::<UIControlHostObject>(this);
+    state.tracking = false;
+    let touch = std::mem::replace(&mut state.tracked_touch, nil);
+    release(env, touch);
+    () = msg![env; this setHighlighted:false];
 }
 
 - (bool)beginTrackingWithTouch:(id)_touch // UITouch*
@@ -279,6 +288,15 @@ pub const CLASSES: ClassExports = objc_classes! {
         true => UIControlEventTouchUpInside,
         false => UIControlEventTouchUpOutside,
     });
+}
+
+- (())touchesCancelled:(id)touches withEvent:(id)event {
+    let touch = env.objc.borrow::<UIControlHostObject>(this).tracked_touch;
+    if touch == nil || !msg![env; touches containsObject:touch] {
+        return;
+    }
+    () = msg![env; this cancelTrackingWithEvent:event];
+    send_actions(env, this, event, UIControlEventTouchCancel);
 }
 
 - (())addTarget:(id)target
