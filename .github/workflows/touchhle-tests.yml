@@ -51,7 +51,7 @@ jobs:
   ios-library:
     name: Interpreter library for iOS arm64
     needs: interpreter-runtime
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 35
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/work/touchhle-ios-target
@@ -62,6 +62,12 @@ jobs:
       CMAKE_TOOLCHAIN_FILE_aarch64_apple_ios: ${{ github.workspace }}/third_party/touchhle/s5lbox-ios-arm64.cmake
     steps:
       - uses: actions/checkout@v4
+      - name: Select the app's current Xcode toolchain
+        # Match ios-build: older default SDKs lack the public pairing header.
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
       - name: Install the iOS Rust target
         run: rustup toolchain install stable --profile minimal --target aarch64-apple-ios
       - name: Build the static library without code signing or JIT

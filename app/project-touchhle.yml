@@ -1,7 +1,7 @@
 # Feature-only test app. A separate container preserves normal S5LBox machines.
 include: project.yml
 options:
-  # Match the Xcode 15.4 toolchain on the iOS-library runner.
+  # Keep this test project readable by Xcode 15.3 and later.
   projectFormat: xcode15_3
 targets:
   S5LBox:
