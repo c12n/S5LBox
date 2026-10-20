@@ -13,9 +13,38 @@ pub use al_sys::al_defines::*;
 pub use al_sys::al_types;
 pub use al_sys::alc_defines::*;
 pub use al_sys::alc_types;
-pub use al_sys::{alcCloseDevice, alcGetError, alcGetString, alcOpenDevice};
+pub use al_sys::{alcGetError, alcGetString};
 
 use al_types::*;
+
+// Track every embedded playback device, including guest-owned OpenAL devices
+// and those owned by AudioQueue/AVAudioPlayer. Standalone runs have no control.
+pub unsafe fn alcOpenDevice(name: *const alc_types::ALCchar) -> *mut ALCdevice {
+    let device = unsafe { al_sys::alcOpenDevice(name) };
+    if !device.is_null() {
+        crate::host::register_audio_device(device);
+    }
+    device
+}
+pub unsafe fn alcCloseDevice(device: *mut ALCdevice) -> alc_types::ALCboolean {
+    let registered = crate::host::unregister_audio_device(device);
+    let result = unsafe { al_sys::alcCloseDevice(device) };
+    if result == ALC_FALSE && registered {
+        crate::host::register_audio_device(device);
+    }
+    result
+}
+pub(crate) fn set_device_paused(device: *mut ALCdevice, paused: bool) {
+    // OpenAL Soft serializes these with the device state lock. Unlike
+    // alcSuspendContext, this stops the mixer and preserves source positions.
+    unsafe {
+        if paused {
+            al_sys::alcDevicePauseSOFT(device);
+        } else {
+            al_sys::alcDeviceResumeSOFT(device);
+        }
+    }
+}
 
 static OPENALMANAGER_INSTANCE_EXISTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -46,7 +75,7 @@ pub struct OpenALContext {
 
 impl OpenALContext {
     pub fn new(_manager: &mut OpenALManager) -> Result<Self, String> {
-        let device = unsafe { al_sys::alcOpenDevice(std::ptr::null()) };
+        let device = unsafe { alcOpenDevice(std::ptr::null()) };
         if device.is_null() {
             return Err("Could not open OpenAL device".to_string());
         }
@@ -56,7 +85,7 @@ impl OpenALContext {
                 Ok(context)
             }
             Err(error) => {
-                unsafe { al_sys::alcCloseDevice(device) };
+                unsafe { alcCloseDevice(device) };
                 Err(error)
             }
         }
@@ -123,7 +152,7 @@ impl Drop for OpenALContext {
             }
             al_sys::alcDestroyContext(self.context);
             if self.owns_device {
-                al_sys::alcCloseDevice(self.device);
+                alcCloseDevice(self.device);
             }
         }
     }

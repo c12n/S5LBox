@@ -1,6 +1,7 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //! S5LBox host boundary. Never changes the process working directory.
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::{c_char, CStr};
 use std::fs::File;
 use std::io::Write;
@@ -15,6 +16,16 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 struct ControlState {
     paused: bool,
     stopped: bool,
+    // Guarded by the same mutex as pause/stop. Removal precedes destruction,
+    // so a concurrent host pause can never use a freed OpenAL device.
+    audio_devices: HashSet<usize>,
+}
+impl ControlState {
+    fn update_audio(&self) {
+        for &device in &self.audio_devices {
+            crate::audio::openal::set_device_paused(device as *mut _, self.paused || self.stopped);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -51,6 +62,24 @@ pub(crate) struct StopRequested;
 
 fn control() -> Option<Arc<Control>> {
     SESSION.with(|session| session.borrow().as_ref().map(|s| Arc::clone(&s.control)))
+}
+
+pub(crate) fn register_audio_device(device: *mut std::ffi::c_void) {
+    if let Some(control) = control() {
+        let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.audio_devices.insert(device as usize);
+        // A device opened while paused must not start when its first context
+        // or source is created later.
+        if state.paused || state.stopped {
+            crate::audio::openal::set_device_paused(device, true);
+        }
+    }
+}
+pub(crate) fn unregister_audio_device(device: *mut std::ffi::c_void) -> bool {
+    control().is_some_and(|control| {
+        let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.audio_devices.remove(&(device as usize))
+    })
 }
 
 /// Called at interpreter/scheduler safe points, never from a C callback.
@@ -422,6 +451,7 @@ pub unsafe extern "C" fn s5lbox_hle_control_stop(control: *const Control) {
     if let Some(control) = unsafe { control.as_ref() } {
         let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
         state.stopped = true;
+        state.update_audio();
         control.wake.notify_all();
     }
 }
@@ -430,7 +460,10 @@ pub unsafe extern "C" fn s5lbox_hle_control_stop(control: *const Control) {
 pub unsafe extern "C" fn s5lbox_hle_control_pause(control: *const Control, paused: bool) {
     if let Some(control) = unsafe { control.as_ref() } {
         let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.paused = paused;
+        if state.paused != paused {
+            state.paused = paused;
+            state.update_audio();
+        }
         control.wake.notify_all();
     }
 }
@@ -463,5 +496,131 @@ mod tests {
             .collect();
         assert!(std::str::from_utf8(&bytes).is_ok());
         assert!(bytes.len() < 512);
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use crate::audio::openal::{OpenALContext, OpenALManager};
+    use touchHLE_openal_soft_wrapper as al;
+
+    struct TestSession(PathBuf);
+    impl Drop for TestSession {
+        fn drop(&mut self) {
+            SESSION.with(|session| {
+                session.borrow_mut().take();
+            });
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    fn offset(source: u32) -> i32 {
+        let mut position = -1;
+        unsafe {
+            al::alGetSourcei(source, 0x1025 /* AL_SAMPLE_OFFSET */, &mut position);
+        }
+        assert_eq!(unsafe { al::alGetError() }, 0);
+        position
+    }
+    fn wait_for_audio(source: u32, previous: i32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while offset(source) == previous {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Audio mixer did not resume"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ALSOFT_DRIVERS=null to avoid host audio output"]
+    fn embedded_pause_freezes_audio_and_new_devices_inherit_it() {
+        assert_eq!(std::env::var("ALSOFT_DRIVERS").as_deref(), Ok("null"));
+        let control = Arc::new(Control::default());
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("s5lbox-audio-{}-{unique}.log", std::process::id()));
+        let log = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        SESSION.with(|session| {
+            assert!(session.borrow().is_none());
+            *session.borrow_mut() = Some(Session {
+                resources: PathBuf::new(),
+                data: PathBuf::new(),
+                log,
+                control: Arc::clone(&control),
+                live: None,
+                presentation: None,
+            });
+        });
+        let _session = TestSession(path);
+        let mut manager = OpenALManager::new().unwrap();
+        for iteration in 0..2 {
+            let mut context = OpenALContext::new(&mut manager).unwrap();
+            assert_eq!(control.state.lock().unwrap().audio_devices.len(), 1);
+            let _ = context.make_current(&mut manager);
+            let (mut buffer, mut source) = (0, 0);
+            let silence = vec![0i16; 96000];
+            unsafe {
+                al::alGenBuffers(1, &mut buffer);
+                al::alBufferData(
+                    buffer,
+                    al::al_defines::AL_FORMAT_MONO16,
+                    silence.as_ptr().cast(),
+                    (silence.len() * 2) as i32,
+                    48000,
+                );
+                al::alGenSources(1, &mut source);
+                al::alSourcei(source, 0x1009 /* AL_BUFFER */, buffer as i32);
+                al::alSourcei(source, 0x1007 /* AL_LOOPING */, 1);
+                al::alSourcePlay(source);
+            }
+            if iteration == 0 {
+                wait_for_audio(source, 0);
+                // Host lifecycle calls arrive from another thread.
+                let host_control = Arc::clone(&control);
+                std::thread::spawn(move || unsafe {
+                    s5lbox_hle_control_pause(Arc::as_ptr(&host_control), true);
+                })
+                .join()
+                .unwrap();
+            }
+            let paused = offset(source);
+            std::thread::sleep(Duration::from_millis(60));
+            assert_eq!(offset(source), paused, "Paused playback advanced");
+            if iteration == 1 {
+                assert_eq!(paused, 0, "A new device bypassed pause");
+            }
+            unsafe {
+                s5lbox_hle_control_pause(Arc::as_ptr(&control), false);
+            }
+            wait_for_audio(source, paused);
+            if iteration == 0 {
+                unsafe {
+                    s5lbox_hle_control_pause(Arc::as_ptr(&control), true);
+                }
+            } else {
+                unsafe {
+                    s5lbox_hle_control_stop(Arc::as_ptr(&control));
+                    s5lbox_hle_control_pause(Arc::as_ptr(&control), false);
+                }
+                let stopped = offset(source);
+                std::thread::sleep(Duration::from_millis(60));
+                assert_eq!(offset(source), stopped, "Stop must not resume playback");
+            }
+            unsafe {
+                al::alDeleteSources(1, &source);
+                al::alDeleteBuffers(1, &buffer);
+            }
+            drop(context);
+            assert!(control.state.lock().unwrap().audio_devices.is_empty());
+        }
     }
 }

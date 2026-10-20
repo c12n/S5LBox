@@ -70,6 +70,8 @@ pub mod alc_defines {
 extern "C" {
     pub fn alcOpenDevice(devicename: *const ALCchar) -> *mut ALCdevice;
     pub fn alcCloseDevice(device: *mut ALCdevice) -> ALCboolean;
+    pub fn alcDevicePauseSOFT(device: *mut ALCdevice);
+    pub fn alcDeviceResumeSOFT(device: *mut ALCdevice);
 
     pub fn alcCreateContext(device: *mut ALCdevice, attrlist: *const ALCint) -> *mut ALCcontext;
     pub fn alcDestroyContext(context: *mut ALCcontext);
