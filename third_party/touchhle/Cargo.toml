@@ -90,3 +90,8 @@ cargo-license = "0.5.1"
 cc = { workspace = true }
 cmake = { workspace = true }
 gl_generator = { workspace = true }
+
+[profile.release]
+# The embedded host catches guest faults and stop requests at the Rust ABI.
+# Aborting here would terminate S5LBox instead of returning to iPhone OS.
+panic = "unwind"

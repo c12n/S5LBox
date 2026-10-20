@@ -85,11 +85,11 @@ jobs:
       - name: Install the iOS Rust target
         run: rustup toolchain install stable --profile minimal --target aarch64-apple-ios
       - name: Build the static library without code signing or JIT
-        run: cargo +stable build --locked --manifest-path third_party/touchhle/Cargo.toml --target aarch64-apple-ios --lib
+        run: cargo +stable build --release --locked --manifest-path third_party/touchhle/Cargo.toml --target aarch64-apple-ios --lib
       - name: Verify the library architecture
         run: |
           set -euo pipefail
-          archive=work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
+          archive=work/touchhle-ios-target/aarch64-apple-ios/release/libtouchHLE.a
           test -s "$archive"
           xcrun lipo "$archive" -verify_arch arm64
 
@@ -100,7 +100,7 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 \
             -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -std=c11 -Wall -Wextra -Werror \
             integrations/touchhle-cpu/fixtures/host_probe.c \
-            work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
+            work/touchhle-ios-target/aarch64-apple-ios/release/libtouchHLE.a \
             -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
             -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
             -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics \
@@ -135,7 +135,7 @@ jobs:
             -isysroot "$sdk" -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
             integrations/touchhle-cpu/fixtures/ios_probe.m work/ios-hle-app/host-probe.o \
             integrations/touchhle-cpu/fixtures/ios_graphics_probe.m app/Sources/VMTouchHLESurface.m \
-            work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a \
+            work/touchhle-ios-target/aarch64-apple-ios/release/libtouchHLE.a \
             -Wl,-dead_strip -lc++ -liconv -lz -framework Foundation -framework Security \
             -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox \
             -framework CoreAudio -framework CoreBluetooth -framework CoreGraphics -framework CoreHaptics \
@@ -341,6 +341,21 @@ jobs:
           cargo +stable test --locked --test host_boundary -- --ignored --nocapture --test-threads=1 > ../../work/hle-host.log 2>&1
           cat ../../work/hle-host.log
           grep -F 'S5LBOX-HLE-HOST PASS' ../../work/hle-host.log
+
+      - name: Verify optimized embedded runtime and fault recovery
+        working-directory: third_party/touchhle
+        env:
+          ALSOFT_DRIVERS: 'null'
+          S5LBOX_HLE_SMOKE_APP: ${{ github.workspace }}/work/hle-smoke/InterpreterSmoke.app
+        run: |
+          set -euo pipefail
+          cargo +stable test --release --locked \
+            --features native-window --lib -- --test-threads=1
+          cargo +stable test --release --locked \
+            --features native-window --lib resource_tests -- --ignored --test-threads=1
+          cargo +stable test --release --locked \
+            --features native-window --test runtime_lifecycle --test host_boundary \
+            -- --ignored --nocapture --test-threads=1
 
       - name: Preserve lifecycle-test output
         if: always()

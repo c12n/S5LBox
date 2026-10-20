@@ -17,7 +17,7 @@ targets:
       - path: ../work/hle-guest-package/s5lbox-hle-launch.deb
         buildPhase: resources
     dependencies:
-      - framework: ../work/touchhle-ios-target/aarch64-apple-ios/debug/libtouchHLE.a
+      - framework: ../work/touchhle-ios-target/aarch64-apple-ios/release/libtouchHLE.a
         embed: false
       - sdk: libc++.tbd
       - sdk: libiconv.tbd
@@ -38,6 +38,6 @@ targets:
         # is resolved by ld through -L when Xcode emits -ltouchHLE.
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
-          - $(SRCROOT)/../work/touchhle-ios-target/aarch64-apple-ios/debug
+          - $(SRCROOT)/../work/touchhle-ios-target/aarch64-apple-ios/release
         GCC_PREPROCESSOR_DEFINITIONS:
           - S5LBOX_TOUCHHLE=1

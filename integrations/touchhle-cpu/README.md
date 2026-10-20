@@ -18,6 +18,9 @@ from the repository root. The CMake `arm_user` test exercises the C boundary.
 The feature branch includes a separate-container iPhone test app, built with
 `app/project-touchhle.yml`. It does not replace the normal S5LBox app or its
 machines, and is not included in release 1.1.0.
+The iPhone app links the optimized Rust release library. Panic unwinding is
+retained so guest faults and stop requests return through the host boundary
+instead of terminating S5LBox.
 
 Use a jailbroken iPhone OS 3.1.3 guest with Packages connected. Install apps
 through the existing IPA library or Legacy Store. Machine Settings → touchHLE
