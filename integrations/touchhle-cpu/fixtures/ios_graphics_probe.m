@@ -27,6 +27,7 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 @property(nonatomic,strong) UILabel *status;
 @property(nonatomic,strong) HLEProbeDisplay *display;
 @property(nonatomic,strong) UIButton *button;
+@property(nonatomic,strong) UIButton *home;
 @property(nonatomic,strong) VMTouchHLESurface *surface;
 @property(nonatomic,strong) CADisplayLink *link;
 @property(nonatomic) const s5lbox_hle_control *control;
@@ -40,7 +41,10 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
     self.display.multipleTouchEnabled=YES; self.display.layer.magnificationFilter=kCAFilterNearest;
     self.button=[UIButton buttonWithType:UIButtonTypeSystem];
     [self.button addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-    for (UIView *view in @[self.status,self.display,self.button]) [self.view addSubview:view];
+    self.home=[UIButton buttonWithType:UIButtonTypeSystem];
+    [self.home setTitle:@"Home" forState:UIControlStateNormal];
+    [self.home addTarget:self action:@selector(homePressed) forControlEvents:UIControlEventTouchUpInside];
+    for (UIView *view in @[self.status,self.display,self.button,self.home]) [self.view addSubview:view];
     self.link=[CADisplayLink displayLinkWithTarget:self selector:@selector(frame)];
     [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(inactive) name:UIApplicationWillResignActiveNotification object:nil];
@@ -50,12 +54,18 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews]; CGRect safe=self.view.safeAreaLayoutGuide.layoutFrame;
     self.status.frame=CGRectMake(safe.origin.x+8,safe.origin.y,safe.size.width-16,60);
-    self.button.frame=CGRectMake(safe.origin.x,safe.origin.y+safe.size.height-48,safe.size.width,44);
+    self.home.frame=CGRectMake(safe.origin.x,safe.origin.y+safe.size.height-48,80,44);
+    self.button.frame=CGRectMake(safe.origin.x+80,safe.origin.y+safe.size.height-48,safe.size.width-80,44);
     CGFloat height=MIN(safe.size.height-132,(safe.size.width-24)*1.5),width=height/1.5;
     self.display.frame=CGRectMake(CGRectGetMidX(safe)-width/2,safe.origin.y+72,width,height);
 }
 - (void)inactive { if (self.control) s5lbox_hle_control_pause(self.control,true); }
 - (void)active { if (self.control) s5lbox_hle_control_pause(self.control,false); }
+- (void)homePressed {
+    if (!self.control) return;
+    s5lbox_hle_input_event event={0}; event.kind=8;
+    [self.surface enqueueInput:event];
+}
 - (void)toggle {
     if (self.control) { s5lbox_hle_control_stop(self.control); return; }
     self.surface=[[VMTouchHLESurface alloc] initWithWidth:320 height:480]; self.display.surface=self.surface;
