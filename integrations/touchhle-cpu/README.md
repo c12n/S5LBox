@@ -36,14 +36,26 @@ an A9 iPhone running iOS 15.8.5 with a freshly jailbroken 3.1.3 guest:
   callbacks across both runtimes.
 - Save/close the guest, update the host test app, resume the guest, and reopen
   the same app and saved data through a newly connected file session.
+- Pause without replaying taps on resume; preserve manual pause across host
+  background/foreground transitions.
+- Interrupt a held button press by switching host apps, resume without firing
+  the button, and accept the next ordinary tap.
+- Close with Home while paused, reopen the app, and read the saved document.
 
 The host tests additionally cover file isolation and locks, launch races,
 installer validation/removal, runtime exits/faults, and audio resource cleanup.
 The audio cleanup test uses a null output device; it does not verify playback.
 
+Presentation ABI 2 brackets each native GLES borrow with a host graphics gate.
+Context creation, destruction and frame presentation use the same gate. On
+pause or loss of host activity, it excludes the worker and drains every live
+context before returning; startup and cleanup also wait until the gate reopens.
+Raw GL calls must not escape the GLES borrow. The device checks above exercise
+the integrated lifecycle but are not a long-duration interruption stress test.
+
 This is **not release-ready** and is not part of 1.1.0. The device evidence
 above uses a small test app, not a representative compatibility suite.
-Background GPU quiescence, interruption/disconnection recovery, integrated
-audio behavior and real-app compatibility still need work. Launching from
+Long-duration interruption/disconnection recovery, integrated audio behavior
+and real-app compatibility still need work. Launching from
 SpringBoard into touchHLE is not implemented; the test mode is opened from
 Machine Settings. Do not enable it in the shipping app yet.

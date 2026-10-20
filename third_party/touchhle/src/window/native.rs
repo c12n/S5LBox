@@ -360,6 +360,50 @@ mod tests {
         }
     }
     #[test]
+    fn raw_gles_borrow_keeps_the_host_gate_closed_until_drop() {
+        use crate::gles::gles1_native::GLES1NativeContext;
+        unsafe extern "C" fn enter(context: *mut c_void) {
+            let depth = unsafe { &*context.cast::<Cell<usize>>() };
+            depth.set(depth.get() + 1);
+        }
+        unsafe extern "C" fn leave(context: *mut c_void) {
+            let depth = unsafe { &*context.cast::<Cell<usize>>() };
+            depth.set(depth.get() - 1);
+        }
+        unsafe extern "C" fn create(_: *mut c_void, _: bool) -> *mut c_void {
+            std::ptr::dangling_mut()
+        }
+        unsafe extern "C" fn destroy(_: *mut c_void, _: *mut c_void) {}
+        unsafe extern "C" fn current(_: *mut c_void, _: *mut c_void) -> bool {
+            true
+        }
+        unsafe extern "C" fn make_current(_: *mut c_void, _: *mut c_void) -> i32 {
+            0
+        }
+        unsafe extern "C" fn proc(_: *mut c_void, _: *const std::ffi::c_char) -> *const c_void {
+            std::ptr::null() // This test borrows the driver but submits no GL.
+        }
+        let mut depth = Cell::new(0usize);
+        let mut queue = VecDeque::new();
+        let mut window = window(&mut queue);
+        window.surface.context = (&mut depth as *mut Cell<usize>).cast();
+        window.surface.graphics_enter = Some(enter);
+        window.surface.graphics_leave = Some(leave);
+        window.surface.create_gl = Some(create);
+        window.surface.destroy_gl = Some(destroy);
+        window.surface.is_current = Some(current);
+        window.surface.make_current = Some(make_current);
+        window.surface.get_proc = Some(proc);
+        let mut context = GLES1NativeContext::new(&mut window).unwrap();
+        // Both the initial load and already-current fast path need a lease.
+        for _ in 0..2 {
+            let graphics = context.make_current(&mut window);
+            assert_eq!(depth.get(), 1);
+            drop(graphics);
+            assert_eq!(depth.get(), 0);
+        }
+    }
+    #[test]
     fn native_input_and_rotated_viewport_preserve_guest_coordinates() {
         let mut queue = VecDeque::from([InputEvent {
             kind: 1,
