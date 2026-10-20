@@ -13,6 +13,9 @@
 - (BOOL)enqueueInput:(s5lbox_hle_input_event)event;
 @property(nonatomic,copy) void (^textInputChanged)(BOOL active);
 @property(nonatomic,copy) void (^idleTimerChanged)(BOOL enabled);
+// Invoked on main only when the guest first asks for acceleration.
+@property(nonatomic,copy) void (^accelerationRequested)(void);
+- (void)setAccelerationX:(float)x y:(float)y z:(float)z;
 // Main thread: closes the graphics gate and drains all contexts before return.
 // Resume opens it again. This does not depend on interpreter/file-I/O progress.
 - (void)setGraphicsSuspended:(BOOL)suspended;

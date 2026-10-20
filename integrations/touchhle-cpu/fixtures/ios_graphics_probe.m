@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #import "../../../app/Sources/VMTouchHLESurface.h"
 #include <stdio.h>
+#include <math.h>
 @interface HLEProbeDisplay : UIView
 @property(nonatomic,weak) VMTouchHLESurface *surface;
 @end
@@ -88,6 +89,15 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
             config.app_path=guest.fileSystemRepresentation; config.resource_directory=resources.fileSystemRepresentation;
             config.data_directory=documents.fileSystemRepresentation;
             s5lbox_hle_presentation presentation=surface.configuration; s5lbox_hle_outcome result={0};
+            float acceleration[3]={0};
+            presentation.acceleration(presentation.context,acceleration);
+            BOOL motionOK=acceleration[0]==0 && acceleration[1]==0 && acceleration[2]==-1;
+            [surface setAccelerationX:0.25f y:-0.5f z:0.75f];
+            [surface setAccelerationX:NAN y:1 z:1]; // Invalid samples cannot poison the guest.
+            presentation.acceleration(presentation.context,acceleration);
+            motionOK=motionOK && acceleration[0]==0.25f && acceleration[1]==-0.5f && acceleration[2]==0.75f;
+            [surface setAccelerationX:0 y:0 z:-1];
+            printf("S5LBOX-HLE-MOTION-BRIDGE %s\n",motionOK?"PASS":"FAIL");
             int status=s5lbox_hle_run_presented(&config,NULL,&presentation,control,&result);
             [surface finish];
             printf("S5LBOX-HLE-VISUAL END status=%d frames=%lu message=%s\n",status,(unsigned long)surface.frameCount,result.message);

@@ -7,6 +7,7 @@
 #import "VMGuestApplications.h"
 #import "VMPackageBridge.h"
 #import "VMUSBService.h"
+#import <CoreMotion/CoreMotion.h>
 #include <math.h>
 
 static NSString *HLEChoiceKey(NSString *instance) { return [@"TouchHLEApps-" stringByAppendingString:instance]; }
@@ -124,7 +125,6 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 @end
 
 @interface HLERunViewController : UIViewController
-@property(nonatomic,strong) VMGuestApplication *application;
 @property(nonatomic,strong) VMUSBTransport *transport;
 @property(nonatomic,copy) NSString *instanceID;
 @property(nonatomic,copy) NSString *appIdentifier,*appName;
@@ -139,6 +139,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     VMTouchHLESurface *_surface;
     VMPackageBridge *_bridge;
     VMGuestApplications *_discovery;
+    CMMotionManager *_motion;
     const s5lbox_hle_control *_control;
     BOOL _paused,_closing,_forceAvailable,_finished,_inactive,_wantsTextInput;
 }
@@ -173,6 +174,14 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
         if (!owner) return;
         owner->_wantsTextInput=enabled;
         [owner updateInputState];
+    };
+    _surface.accelerationRequested=^{
+        HLERunViewController *owner=weakSelf;
+        if (!owner || owner->_finished || owner->_closing) return;
+        if (!owner->_motion) {
+            owner->_motion=[CMMotionManager new]; owner->_motion.accelerometerUpdateInterval=1.0/60.0;
+        }
+        [owner updateMotionState];
     };
     _link=[CADisplayLink displayLinkWithTarget:self selector:@selector(frame)];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -234,6 +243,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
                 s5lbox_hle_control_release(control); self->_control=NULL; self->_finished=YES;
                 [self->_link invalidate]; self->_link=nil; [self->_spinner stopAnimating];
                 [self updateInputState];
+                [self updateMotionState];
                 if (self->_closing || (result==S5LBOX_HLE_OK && !error)) [self dismissViewControllerAnimated:YES completion:nil];
                 else {
                     self->_status.text=[@"Could not open with touchHLE.\n\n" stringByAppendingString:
@@ -247,6 +257,9 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     });
 }
 - (void)frame {
+    CMAccelerometerData *sample=_motion.accelerometerData;
+    if (sample && !_paused && !_inactive && !_closing && !_finished)
+        [_surface setAccelerationX:(float)sample.acceleration.x y:(float)sample.acceleration.y z:(float)sample.acceleration.z];
     NSData *frame=[_surface takeFrame]; if (!frame) return;
     [_display showFrame:frame]; if (!_closing && !_paused) _status.hidden=YES; [_spinner stopAnimating];
 }
@@ -255,10 +268,17 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     if (_display.inputEnabled && _wantsTextInput) [_display becomeFirstResponder];
     else [_display resignFirstResponder];
     _link.paused=_paused||_inactive;
+    [self updateMotionState];
     if (!_closing && !_finished) {
         _status.text=_paused?@"Paused":@"Opening app…";
         _status.hidden=!_paused && _surface.frameCount>0;
     }
+}
+- (void)updateMotionState {
+    if (!_motion) return;
+    BOOL enabled=!(_paused||_inactive||_closing||_finished);
+    if (enabled && _motion.accelerometerAvailable && !_motion.accelerometerActive) [_motion startAccelerometerUpdates];
+    else if (!enabled && _motion.accelerometerActive) [_motion stopAccelerometerUpdates];
 }
 - (void)inactive {
     _inactive=YES; [self updateInputState];
@@ -304,7 +324,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     sheet.popoverPresentationController.sourceView=_controls; sheet.popoverPresentationController.sourceRect=_controls.bounds;
     [self presentViewController:sheet animated:YES completion:nil];
 }
-- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; [_link invalidate]; }
+- (void)dealloc { [_motion stopAccelerometerUpdates]; [NSNotificationCenter.defaultCenter removeObserver:self]; [_link invalidate]; }
 @end
 
 @implementation VMTouchHLECoordinator {
@@ -333,6 +353,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     self.activeBridge=bridge;
     if (self.invalidated) bridge.canceled=YES;
     NSData *reply=[bridge exchangeAppRoute:request error:error]; self.activeBridge=nil;
+    if (!reply && error && !*error) *error=HLEError(@"The guest app service did not respond.");
     if (reply) {
         const uint8_t *p=reply.bytes;
         unsigned length=((unsigned)p[16]<<8)|p[17];

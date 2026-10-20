@@ -7,6 +7,7 @@
 #import <OpenGLES/ES1/gl.h>
 #import <OpenGLES/ES1/glext.h>
 #include <dlfcn.h>
+#include <math.h>
 
 @interface HLEGLContext : NSObject
 @property(nonatomic,strong) EAGLContext *context;
@@ -25,6 +26,7 @@ static _Thread_local NSUInteger GraphicsDepth;
 - (int)pollEvent:(s5lbox_hle_input_event *)event;
 - (void)enterGraphics;
 - (void)leaveGraphics;
+- (void)readAcceleration:(float *)values;
 @end
 static HLEGLContext *Current(void) { return (__bridge HLEGLContext *)CurrentContext; }
 static void BindFramebuffer(GLenum target,GLuint framebuffer) {
@@ -92,6 +94,9 @@ static void IdleTimer(void *owner,bool enabled) {
     VMTouchHLESurface *surface=(__bridge VMTouchHLESurface *)owner;
     dispatch_async(dispatch_get_main_queue(), ^{ if (surface.idleTimerChanged) surface.idleTimerChanged(enabled); });
 }
+static void Acceleration(void *owner,float *values) {
+    @autoreleasepool { [(__bridge VMTouchHLESurface *)owner readAcceleration:values]; }
+}
 @implementation VMTouchHLESurface {
     NSMutableSet<HLEGLContext *> *_contexts;
     NSMutableData *_scratch;
@@ -102,11 +107,13 @@ static void IdleTimer(void *owner,bool enabled) {
     BOOL _overflow;
     NSCondition *_graphicsGate;
     BOOL _graphicsSuspended,_graphicsBusy;
+    float _acceleration[3];
+    BOOL _motionRequested;
 }
 - (instancetype)initWithWidth:(uint32_t)width height:(uint32_t)height {
     if (!width || !height || width>4096 || height>4096) return nil;
     self=[super init];
-    if (self) { _width=width; _height=height; _contexts=[NSMutableSet set]; _graphicsGate=[NSCondition new]; }
+    if (self) { _width=width; _height=height; _contexts=[NSMutableSet set]; _graphicsGate=[NSCondition new]; _acceleration[2]=-1; }
     return self;
 }
 - (s5lbox_hle_presentation)configuration {
@@ -115,8 +122,23 @@ static void IdleTimer(void *owner,bool enabled) {
     surface.create_gl=Create; surface.destroy_gl=Destroy; surface.make_current=MakeCurrent;
     surface.is_current=IsCurrent; surface.get_proc=GetProc; surface.present=Present; surface.poll_event=Poll;
     surface.text_input=TextInput; surface.idle_timer=IdleTimer;
+    surface.acceleration=Acceleration;
     surface.graphics_enter=EnterGraphics; surface.graphics_leave=LeaveGraphics;
     return surface;
+}
+- (void)readAcceleration:(float *)values {
+    BOOL request=NO;
+    @synchronized(self) {
+        memcpy(values,_acceleration,sizeof _acceleration);
+        if (!_motionRequested) { _motionRequested=YES; request=YES; }
+    }
+    if (request) dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.accelerationRequested) self.accelerationRequested();
+    });
+}
+- (void)setAccelerationX:(float)x y:(float)y z:(float)z {
+    if (!isfinite(x)||!isfinite(y)||!isfinite(z)) return;
+    @synchronized(self) { _acceleration[0]=x; _acceleration[1]=y; _acceleration[2]=z; }
 }
 - (void)enterGraphics {
     // Context callbacks can nest inside a Rust GLES borrow. They must not wait

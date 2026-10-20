@@ -11,7 +11,7 @@ typedef struct {
     unsigned char session[16];
     char selected[HLE_ROUTE_MAX_APPS][256], pending[256];
     unsigned count;
-    uint64_t serial,ticket;
+    uint64_t serial,ticket,last_ack;
     double lease_until,ticket_until;
 } s5lbox_hle_routes;
 /* Request: operation:u8, session:16, ticket:BE64, count:BE16,

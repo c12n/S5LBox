@@ -59,6 +59,16 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)scheduledTimerWithTimeInterval:(double)interval target:(id)target selector:(SEL)selector userInfo:(id)info repeats:(BOOL)repeats;
 - (void)invalidate;
 @end
+@interface UIAcceleration : NSObject
+- (double)x;
+- (double)y;
+- (double)z;
+@end
+@interface UIAccelerometer : NSObject
++ (id)sharedAccelerometer;
+- (void)setDelegate:(id)delegate;
+- (void)setUpdateInterval:(double)interval;
+@end
 extern void *alcOpenDevice(const char *);
 extern void *alcCreateContext(void *,const int *);
 extern BOOL alcMakeContextCurrent(void *);
@@ -96,6 +106,8 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     void *_audioDevice,*_audioContext;
     unsigned _audioBuffer,_audioSource;
     BOOL _audioPlaying;
+    UIButton *_motionButton;
+    unsigned _motionSamples;
 }
 @end
 @implementation HLEVisualDelegate
@@ -123,10 +135,26 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     [_audioButton setTitle:@"Play audio" forState:0];
     [_audioButton addTarget:self action:@selector(audioTapped:) forControlEvents:64];
     [_window addSubview:_audioButton];
+    _motionButton=[UIButton buttonWithType:1];
+    [_motionButton setFrame:(CGRect){{30,415},{260,44}}];
+    [_motionButton setTitle:@"Read motion" forState:0];
+    [_motionButton addTarget:self action:@selector(motionTapped:) forControlEvents:64];
+    [_window addSubview:_motionButton];
     [_window makeKeyAndVisible];
     puts("S5LBOX-HLE-VISUAL READY"); fflush(stdout);
     printf("S5LBOX-HLE-VISUAL RESTORED touches=%u exits=%d\n",_taps,
         [[NSUserDefaults standardUserDefaults] integerForKey:@"CompletedExits"]); fflush(stdout);
+}
+- (void)motionTapped:(id)sender {
+    (void)sender;
+    UIAccelerometer *motion=[UIAccelerometer sharedAccelerometer];
+    [motion setUpdateInterval:0.25]; [motion setDelegate:self];
+}
+- (void)accelerometer:(UIAccelerometer *)sensor didAccelerate:(UIAcceleration *)sample {
+    (void)sensor;
+    char title[96]; snprintf(title,sizeof title,"Tilt %.2f  %.2f  %.2f",[sample x],[sample y],[sample z]);
+    [_motionButton setTitle:[NSString stringWithUTF8String:title] forState:0];
+    if (++_motionSamples==4) { puts("S5LBOX-HLE-VISUAL MOTION samples=4"); fflush(stdout); }
 }
 - (void)tapped:(id)sender {
     (void)sender;
@@ -182,6 +210,7 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     // made by termination callbacks, not only changes made before Home.
     [defaults setInteger:exits forKey:@"CompletedExits"];
     [_audioTimer invalidate];
+    [[UIAccelerometer sharedAccelerometer] setDelegate:0];
     if (_audioContext) {
         alcMakeContextCurrent(_audioContext);
         if (_audioSource) alDeleteSources(1,&_audioSource);

@@ -32,12 +32,16 @@ int main(void) {
     CHECK(out[7] && s.ticket==ticket);
     n=request(p,2,1,ticket,NULL); s5lbox_hle_route_request(&s,p,n,4,out,native,&launches);
     CHECK(!out[7] && !s.ticket);
+    s5lbox_hle_route_request(&s,p,n,4,out,native,&launches); CHECK(!out[7]);
     n=request(p,3,1,0,"example.app"); s5lbox_hle_route_request(&s,p,n,5,out,native,&launches);
     CHECK(!out[7] && launches==1);
     n=request(p,1,1,0,"bad/path"); s5lbox_hle_route_request(&s,p,n,5,out,native,&launches);
     CHECK(out[7] && !strcmp(s.selected[0],"example.app"));
     CHECK(s5lbox_hle_route_icon(&s,"example.app",6));
+    ticket=s.ticket;
     CHECK(!s5lbox_hle_route_icon(&s,"example.app",15) && !s.ticket);
+    n=request(p,2,1,ticket,NULL); s5lbox_hle_route_request(&s,p,n,15,out,native,&launches);
+    CHECK(out[7]); /* A delayed acknowledgement cannot resurrect an expired tap. */
     n=request(p,1,2,0,"example.app"); s5lbox_hle_route_request(&s,p,n,16,out,native,&launches);
     CHECK(s5lbox_hle_route_icon(&s,"example.app",17));
     n=request(p,1,3,0,"example.app"); s5lbox_hle_route_request(&s,p,n,18,out,native,&launches);

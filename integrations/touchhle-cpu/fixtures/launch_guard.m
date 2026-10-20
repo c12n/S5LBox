@@ -2,7 +2,9 @@
  * Native macOS regression: real CFMessagePort + kernel flock, mock guest
  * application model. Requires root solely for the root-owned lease file. */
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -156,6 +158,20 @@ int main(int argc,char **argv) {
         SBApplicationIcon *icon=[SBApplicationIcon new];
         [icon launch]; CHECK(iconLaunches==1);
         CHECK([route(exe,1,1,0,@"example.app") isEqual:@"0 0\n"]);
+        /* A readable file, even with valid owner/content, is insufficient:
+         * the live privileged writer's kernel record lock is mandatory. */
+        unsigned char forged[59]={0}; forged[32]=4; forged[33]=1;
+        NSString *routePath=@S5LBOX_HLE_ROUTE_PATH;
+        CHECK([[NSData dataWithBytes:forged length:sizeof forged] writeToFile:routePath atomically:NO]);
+        CFMessagePortRef remote=CFMessagePortCreateRemote(NULL,CFSTR(S5LBOX_HLE_GUARD_PORT));
+        CFDataRef packet=CFDataCreate(NULL,forged,sizeof forged),response=NULL;
+        CHECK(remote!=NULL);
+        if (remote) {
+            (void)CFMessagePortSendRequest(remote,2,packet,1,1,kCFRunLoopDefaultMode,&response);
+            CHECK(!response || !CFDataGetLength(response));
+            CFRelease(remote);
+        }
+        CFRelease(packet); if (response) CFRelease(response);
         [icon launch]; [icon launch]; CHECK(iconLaunches==1);
         CHECK([route(exe,1,1,0,@"example.app") isEqual:@"0 1\n"]);
         CHECK([route(exe,1,1,0,@"example.app") isEqual:@"0 1\n"]);
@@ -166,6 +182,17 @@ int main(int argc,char **argv) {
         finish(task,input);
         CHECK([route(exe,4,1,0,nil) isEqual:@"0 0\n"]);
         [icon launch]; CHECK(iconLaunches==2);
+        NSData *sentinel=[@"must survive rejected ownership/mode checks" dataUsingEncoding:NSUTF8StringEncoding];
+        CHECK([sentinel writeToFile:routePath atomically:NO]);
+        CHECK(chmod(S5LBOX_HLE_ROUTE_PATH,0666)==0);
+        CHECK(![route(exe,1,1,0,@"example.app") isEqual:@"0 0\n"]);
+        CHECK([[NSData dataWithContentsOfFile:routePath] isEqual:sentinel]);
+        CHECK(chmod(S5LBOX_HLE_ROUTE_PATH,0644)==0);
+        NSString *linked=[routePath stringByAppendingString:@".unchanged"];
+        CHECK(link(S5LBOX_HLE_ROUTE_PATH,linked.fileSystemRepresentation)==0);
+        CHECK(![route(exe,1,1,0,@"example.app") isEqual:@"0 0\n"]);
+        CHECK([[NSData dataWithContentsOfFile:linked] isEqual:sentinel]);
+        CHECK(unlink(linked.fileSystemRepresentation)==0);
         [icon release];
         [application release]; application=nil;
         printf("S5LBOX-HLE-LAUNCH-GUARD %s failures=%u\n",failures?"FAIL":"PASS",failures);

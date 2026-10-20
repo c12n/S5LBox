@@ -338,6 +338,33 @@ pub(crate) fn exit_guest(status: i32) -> ! {
     std::panic::resume_unwind(Box::new(GuestExit(status)))
 }
 
+fn startup_orientation(
+    requested: window::DeviceOrientation,
+    supported: &[&str],
+) -> window::DeviceOrientation {
+    use window::DeviceOrientation::*;
+    // A list of allowed orientations is not a request to rotate. Preserve
+    // portrait whenever it is supported, as well as explicit user overrides.
+    if requested != Portrait
+        || supported
+            .iter()
+            .any(|o| o.trim() == "UIInterfaceOrientationPortrait")
+    {
+        return requested;
+    }
+    supported
+        .iter()
+        .find_map(|o| match o.trim() {
+            "UIInterfaceOrientationPortraitUpsideDown" => Some(PortraitUpsideDown),
+            "UIInterfaceOrientationLandscapeLeft" => Some(LandscapeRight),
+            "UIInterfaceOrientationLandscapeRight" | "UIInterfaceOrientationLandscape" => {
+                Some(LandscapeLeft)
+            }
+            _ => None,
+        })
+        .unwrap_or(Portrait)
+}
+
 impl Environment {
     /// Loads the binary and sets up the emulator.
     pub fn new(
@@ -356,36 +383,10 @@ impl Environment {
         // should be handled before creating the window because handling of
         // window rotation after-the-fact is somewhat glitchy.
         // This also ensures the splash screen is correctly oriented.
-        if options.initial_orientation == window::DeviceOrientation::Portrait {
-            if let Some(&non_portrait_orientation) = bundle
-                .supported_interface_orientations()
-                .iter()
-                .find(|&&o| o != "UIInterfaceOrientationPortrait")
-            {
-                // TODO: Overwriting the options might not be ideal; do we need
-                //       to distinguish this kind of orientation change from
-                //       others?
-                options.initial_orientation = match non_portrait_orientation {
-                    // UIInterfaceOrientation values are flipped relative to
-                    // (UI)DeviceOrientation values (content has to rotate in
-                    // the opposite direction to how the device rotates).
-                    "UIInterfaceOrientationPortraitUpsideDown" => {
-                        window::DeviceOrientation::PortraitUpsideDown
-                    }
-                    "UIInterfaceOrientationLandscapeLeft" => {
-                        window::DeviceOrientation::LandscapeRight
-                    }
-                    "UIInterfaceOrientationLandscapeRight" => {
-                        window::DeviceOrientation::LandscapeLeft
-                    }
-                    // This appears to be an older way set the orientation.
-                    // From testing, it seems to correspond to left.
-                    "UIInterfaceOrientationLandscape" => window::DeviceOrientation::LandscapeLeft,
-                    other => unimplemented!("Unsupported startup orientation: {:?}", other),
-                };
-                log!("App needs non-portrait user interface orientation {:?}, applying device orientation {:?}.", non_portrait_orientation, options.initial_orientation);
-            }
-        }
+        options.initial_orientation = startup_orientation(
+            options.initial_orientation,
+            &bundle.supported_interface_orientations(),
+        );
 
         let device_family_override = options.device_family;
         let device_family_array = bundle.device_family_array();
@@ -2025,6 +2026,59 @@ mod lifecycle_tests {
         });
         assert_eq!(result.unwrap_err().downcast::<GuestExit>().unwrap().0, 23);
         drop(EnvironmentInstance::acquire().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::startup_orientation;
+    use crate::window::DeviceOrientation::*;
+
+    #[test]
+    fn multiple_supported_orientations_do_not_force_upside_down() {
+        assert_eq!(
+            startup_orientation(
+                Portrait,
+                &[
+                    "UIInterfaceOrientationPortraitUpsideDown",
+                    "UIInterfaceOrientationPortrait",
+                    "UIInterfaceOrientationLandscapeLeft",
+                ]
+            ),
+            Portrait
+        );
+        assert_eq!(
+            startup_orientation(
+                Portrait,
+                &[
+                    "UIInterfaceOrientationLandscapeLeft",
+                    " UIInterfaceOrientationPortrait ",
+                ]
+            ),
+            Portrait
+        );
+    }
+
+    #[test]
+    fn landscape_only_apps_and_explicit_overrides_still_rotate() {
+        assert_eq!(
+            startup_orientation(Portrait, &["UIInterfaceOrientationLandscapeLeft"]),
+            LandscapeRight
+        );
+        assert_eq!(
+            startup_orientation(Portrait, &["UIInterfaceOrientationLandscapeRight"]),
+            LandscapeLeft
+        );
+        assert_eq!(
+            startup_orientation(Portrait, &["UIInterfaceOrientationLandscape"]),
+            LandscapeLeft
+        );
+        assert_eq!(
+            startup_orientation(LandscapeLeft, &["UIInterfaceOrientationPortrait"]),
+            LandscapeLeft
+        );
+        assert_eq!(startup_orientation(Portrait, &["unknown"]), Portrait);
+        assert_eq!(startup_orientation(Portrait, &[]), Portrait);
     }
 }
 

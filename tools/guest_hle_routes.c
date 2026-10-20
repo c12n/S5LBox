@@ -48,7 +48,7 @@ size_t s5lbox_hle_route_request(s5lbox_hle_routes *s,const unsigned char *p,size
     expire(s,now);
     if (p[0]!=1 && memcmp(s->session,p+1,16)) { error=EAGAIN; goto done; }
     if (p[0]==1) {
-        if (memcmp(s->session,p+1,16)) { s->ticket=0; s->pending[0]=0; }
+        if (memcmp(s->session,p+1,16)) { s->ticket=0; s->last_ack=0; s->pending[0]=0; }
         memcpy(s->session,p+1,16); s->count=count;
         for (unsigned i=0;i<count;i++) {
             memcpy(s->selected[i],names[i],lengths[i]); s->selected[i][lengths[i]]=0;
@@ -56,12 +56,14 @@ size_t s5lbox_hle_route_request(s5lbox_hle_routes *s,const unsigned char *p,size
         if (s->ticket && !selected(s,s->pending)) { s->ticket=0; s->pending[0]=0; }
         s->lease_until=now+10;
     } else if (p[0]==2) {
-        if (s->ticket && s->ticket!=be64(p+17)) { error=EAGAIN; goto done; }
+        uint64_t ticket=be64(p+17);
+        if (!ticket || (s->ticket?s->ticket!=ticket:s->last_ack!=ticket)) { error=EAGAIN; goto done; }
+        s->last_ack=ticket;
         s->ticket=0; s->pending[0]=0;
     } else if (p[0]==3) {
         char identifier[256]; memcpy(identifier,names[0],lengths[0]); identifier[lengths[0]]=0;
         error=native?native(context,identifier):ENOTSUP; goto done;
-    } else { s->count=0; s->lease_until=0; s->ticket=0; s->pending[0]=0; }
+    } else { s->count=0; s->lease_until=0; s->ticket=0; s->last_ack=0; s->pending[0]=0; }
     error=0;
 done:
     memcpy(out,"HLR1",4);
