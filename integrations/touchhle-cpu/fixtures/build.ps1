@@ -42,13 +42,34 @@ $dylibs=Join-Path $outputRoot 'LibrarySmoke.app'
 New-Item -ItemType Directory -Force -Path $dylibs | Out-Null
 & $compiler @common -marm -c "$PSScriptRoot/dylibs.c" -o "$outputRoot/dylibs.o"
 if ($LASTEXITCODE) { throw 'Library fixture compile failed' }
+# The old fat image's ARMv6 slice is not aligned to a 16 KiB host page.
+# Avoid the community linker's slice mmap failure by thinning the link input.
+# The runtime still loads/selects the original bundled fat library.
+$fat=[IO.File]::ReadAllBytes("$repoRoot/third_party/touchhle/touchHLE_dylibs/libstdc++.6.0.9.dylib")
+function Read-Big32([int]$offset) {
+    if($offset -lt 0 -or $offset+4 -gt $fat.Length) { throw 'Invalid fat header' }
+    return [uint32]($fat[$offset]*16777216L + $fat[$offset+1]*65536L +
+                   $fat[$offset+2]*256L + $fat[$offset+3])
+}
+if((Read-Big32 0) -ne [uint32]3405691582) { throw 'Expected the bundled fat C++ library' }
+$count=Read-Big32 4; $thin=$null
+if($count -gt ($fat.Length-8)/20) { throw 'Invalid fat architecture count' }
+for($i=0; $i -lt $count; $i++) {
+    $entry=8+$i*20
+    if((Read-Big32 $entry) -ne 12 -or (Read-Big32 ($entry+4)) -ne 6) { continue }
+    $offset=Read-Big32 ($entry+8); $size=Read-Big32 ($entry+12)
+    if([long]$offset+$size -gt $fat.Length) { throw 'Invalid ARMv6 slice range' }
+    $thin=New-Object byte[] $size; [Array]::Copy($fat,$offset,$thin,0,$size); break
+}
+if(!$thin) { throw 'No ARMv6 C++ link input' }
+[IO.File]::WriteAllBytes("$outputRoot/libstdcxx-armv6.dylib",$thin)
 & $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
     -undefined dynamic_lookup -o "$dylibs/InterpreterSmoke" "$sdkRoot/usr/lib/crt1.o" `
     "$outputRoot/dylibs.o" -lSystem `
     "$repoRoot/third_party/touchhle/touchHLE_dylibs/libz.1.2.3.dylib" `
     "$repoRoot/third_party/touchhle/touchHLE_dylibs/libsqlite3.dylib" `
     "$repoRoot/third_party/touchhle/touchHLE_dylibs/libxml2.2.dylib" `
-    "$repoRoot/third_party/touchhle/touchHLE_dylibs/libstdc++.6.0.9.dylib"
+    "$outputRoot/libstdcxx-armv6.dylib"
 if ($LASTEXITCODE) { throw 'Library fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/library.plist" -Destination "$dylibs/Info.plist"
 Write-Output $bundle
