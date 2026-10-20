@@ -41,6 +41,7 @@ pub struct OpenALContext {
     // We don't need to guarantee the lifetime or thread-safety of the device -
     // OpenAL (should) do that for us.
     device: *mut ALCdevice,
+    owns_device: bool,
 }
 
 impl OpenALContext {
@@ -49,7 +50,16 @@ impl OpenALContext {
         if device.is_null() {
             return Err("Could not open OpenAL device".to_string());
         }
-        unsafe { Self::new_with_device_and_attrlist(_manager, device, std::ptr::null()) }
+        match unsafe { Self::new_with_device_and_attrlist(_manager, device, std::ptr::null()) } {
+            Ok(mut context) => {
+                context.owns_device = true;
+                Ok(context)
+            }
+            Err(error) => {
+                unsafe { al_sys::alcCloseDevice(device) };
+                Err(error)
+            }
+        }
     }
 
     pub unsafe fn new_with_device_and_attrlist(
@@ -66,7 +76,11 @@ impl OpenALContext {
             device,
             context
         );
-        Ok(Self { context, device })
+        Ok(Self {
+            context,
+            device,
+            owns_device: false,
+        })
     }
 
     pub fn make_current<'al_ctx, 'manager: 'al_ctx>(
@@ -103,12 +117,51 @@ impl OpenALContext {
 
 impl Drop for OpenALContext {
     fn drop(&mut self) {
-        unsafe { al_sys::alcDestroyContext(self.context) };
+        unsafe {
+            if al_sys::alcGetCurrentContext() == self.context {
+                al_sys::alcMakeContextCurrent(std::ptr::null_mut());
+            }
+            al_sys::alcDestroyContext(self.context);
+            if self.owns_device {
+                al_sys::alcCloseDevice(self.device);
+            }
+        }
     }
 }
 
 pub struct OpenAL<'al_ctx> {
     _al_lifetime: PhantomData<&'al_ctx ()>,
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires ALSOFT_DRIVERS=null to avoid host audio output"]
+    fn owned_and_borrowed_audio_contexts_release_cleanly() {
+        assert_eq!(std::env::var("ALSOFT_DRIVERS").as_deref(), Ok("null"));
+        let mut manager = OpenALManager::new().unwrap();
+        for _ in 0..32 {
+            let mut owned = OpenALContext::new(&mut manager).unwrap();
+            let _ = owned.make_current(&mut manager);
+            drop(owned);
+            assert!(unsafe { al_sys::alcGetCurrentContext() }.is_null());
+        }
+        let device = unsafe { al_sys::alcOpenDevice(std::ptr::null()) };
+        assert!(!device.is_null());
+        for _ in 0..2 {
+            let mut borrowed = unsafe {
+                OpenALContext::new_with_device_and_attrlist(&mut manager, device, std::ptr::null())
+            }
+            .unwrap();
+            let _ = borrowed.make_current(&mut manager);
+            drop(borrowed);
+            assert!(unsafe { al_sys::alcGetCurrentContext() }.is_null());
+        }
+        // A context wrapping a guest-owned device must not close that device.
+        assert_eq!(unsafe { al_sys::alcCloseDevice(device) }, ALC_TRUE);
+    }
 }
 
 impl OpenAL<'_> {

@@ -213,6 +213,11 @@ jobs:
       - name: Test the integrated Rust library
         run: cargo +stable test --locked --manifest-path third_party/touchhle/Cargo.toml --lib -- --test-threads=1
 
+      - name: Verify audio resources are released between app sessions
+        env:
+          ALSOFT_DRIVERS: 'null'
+        run: cargo +stable test --locked --manifest-path third_party/touchhle/Cargo.toml --lib resource_tests -- --ignored --test-threads=1
+
       - name: Test embedded viewport and input mapping
         run: cargo +stable test --locked --manifest-path third_party/touchhle/Cargo.toml --features native-window --lib window::tests -- --test-threads=1
 

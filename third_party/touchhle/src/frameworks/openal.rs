@@ -47,7 +47,32 @@ pub struct State {
     warned_mixer_output_rate_proc: bool,
     warned_invalid_host_devices: HashSet<*mut ALCdevice>,
 }
+impl Drop for State {
+    fn drop(&mut self) {
+        // Embedding does not end the host process when a guest app exits.
+        // Destroy every guest context before closing its borrowed device.
+        self.contexts.clear();
+        for (_, device) in self.devices.drain() {
+            unsafe { al::alcCloseDevice(device) };
+        }
+    }
+}
 impl State {
+    fn remove_device_contexts(&mut self, device: *mut ALCdevice) -> Vec<MutPtr<GuestALCcontext>> {
+        let keys: Vec<_> = self
+            .contexts
+            .iter()
+            .filter_map(|(&key, context)| (context.GetContextsDevice() == device).then_some(key))
+            .collect();
+        for key in &keys {
+            if self.current_ctx == *key {
+                self.current_ctx = Ptr::null();
+            }
+            self.contexts.remove(key);
+        }
+        keys
+    }
+
     fn get(env: &mut Environment) -> &mut Self {
         &mut env.framework_state.openal
     }
@@ -58,6 +83,46 @@ impl State {
             .contexts
             .get_mut(&state.current_ctx)
             .map(|ctx| ctx.make_current(&mut env.openal_manager))
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use crate::audio::openal::OpenALManager;
+
+    #[test]
+    #[ignore = "requires ALSOFT_DRIVERS=null to avoid host audio output"]
+    fn device_close_retires_only_its_contexts() {
+        assert_eq!(std::env::var("ALSOFT_DRIVERS").as_deref(), Ok("null"));
+        let mut manager = OpenALManager::new().unwrap();
+        for _ in 0..8 {
+            let mut state = State::default();
+            for key in [16, 32] {
+                let device = unsafe { al::alcOpenDevice(std::ptr::null()) };
+                assert!(!device.is_null());
+                let context = unsafe {
+                    OpenALContext::new_with_device_and_attrlist(
+                        &mut manager,
+                        device,
+                        std::ptr::null(),
+                    )
+                }
+                .unwrap();
+                state.devices.insert(Ptr::from_bits(key), device);
+                state.contexts.insert(Ptr::from_bits(key), context);
+            }
+            state.current_ctx = Ptr::from_bits(16);
+            let device = state.devices[&Ptr::from_bits(16)];
+            assert_eq!(state.remove_device_contexts(device), [Ptr::from_bits(16)]);
+            assert!(state.current_ctx.is_null());
+            assert_eq!(state.contexts.len(), 1);
+            assert!(state.contexts.contains_key(&Ptr::from_bits(32)));
+            assert_eq!(unsafe { al::alcCloseDevice(device) }, al::ALC_TRUE);
+            state.devices.remove(&Ptr::from_bits(16));
+            // Dropping a session also closes devices the app never closed.
+            drop(state);
+        }
     }
 }
 
@@ -158,7 +223,7 @@ fn alcCloseDevice(env: &mut Environment, device: MutPtr<GuestALCdevice>) -> bool
         }
         return false;
     }
-    let Some(host_device) = State::get(env).devices.remove(&device) else {
+    let Some(&host_device) = State::get(env).devices.get(&device) else {
         if State::get(env).warned_invalid_devices.insert(device) {
             log!(
                 "alcCloseDevice({:?}) called for unknown/already-closed device, ignoring",
@@ -167,8 +232,17 @@ fn alcCloseDevice(env: &mut Environment, device: MutPtr<GuestALCdevice>) -> bool
         }
         return false;
     };
-    env.mem.free(device.cast());
+    // OpenAL Soft also destroys attached contexts when closing a device.
+    // Retire our wrappers first, so a later guest call cannot reuse one of
+    // those stale host context pointers.
+    for context in State::get(env).remove_device_contexts(host_device) {
+        env.mem.free(context.cast());
+    }
     let res = unsafe { al::alcCloseDevice(host_device) };
+    if res != al::ALC_FALSE {
+        State::get(env).devices.remove(&device);
+        env.mem.free(device.cast());
+    }
     log_dbg!("alcCloseDevice({:?}) => {:?}", device, res,);
     res != al::ALC_FALSE
 }
