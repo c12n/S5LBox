@@ -21,7 +21,13 @@ static unsigned checks, failures;
 #define CHECK(x) do { checks++; if (!(x)) { failures++; fprintf(stderr, "line %d: %s\n", __LINE__, #x); } } while (0)
 // Service tests substitute only the FD factory. The service framing code is real.
 static int nextFD = -1;
+static BOOL lastAllowGuestWake;
 @implementation VMUSBTransport
+- (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
+      canceled:(BOOL (^)(void))canceled allowGuestWake:(BOOL)allowGuestWake error:(NSError **)error {
+    lastAllowGuestWake = allowGuestWake;
+    return [self openPort:port timeout:timeout canceled:canceled error:error];
+}
 - (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
       canceled:(BOOL (^)(void))canceled error:(NSError **)error {
     (void)canceled;
@@ -372,7 +378,7 @@ static void testService(void) {
     CHECK(fcntl(fds[0], F_SETFL, O_NONBLOCK) == 0);
     nextFD = fds[0];
     VMUSBService *service = [[VMUSBService alloc] initWithTransport:[VMUSBTransport new] port:62078 error:NULL];
-    CHECK(service != nil);
+    CHECK(service != nil && lastAllowGuestWake);
     NSDictionary *value = @{@"Status":@"Complete"};
     CHECK([service sendPlist:value error:NULL]);
     uint8_t buffer[2048]; ssize_t n = read(fds[1], buffer, sizeof buffer);
@@ -392,6 +398,12 @@ static void testService(void) {
     CHECK(![service receivePlist:&error]);
     close(fds[1]); CHECK(![service readCount:1 error:&error]);
     [service close]; [service close];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    nextFD = fds[0];
+    service = [[VMUSBService alloc] initWithTransport:[VMUSBTransport new] port:64322
+        canceled:nil deadline:NSProcessInfo.processInfo.systemUptime+1 allowGuestWake:NO error:NULL];
+    CHECK(service != nil && !lastAllowGuestWake);
+    [service close]; close(fds[1]);
 
     // An expired connection deadline never opens a transport or masquerades
     // as user cancellation. The same bound applies after the socket connects.

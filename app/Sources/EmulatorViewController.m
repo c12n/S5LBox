@@ -1606,7 +1606,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [_hleCoordinator tick:[self runtimeCanControlGuest] && ![_engine isPaused] &&
         !_savingCheckpoint && !_restarting && !_shuttingDown && !_forcePoweringOff &&
         self.navigationController.topViewController==self && !self.presentedViewController &&
-        UIApplication.sharedApplication.applicationState==UIApplicationStateActive];
+        UIApplication.sharedApplication.applicationState==UIApplicationStateActive
+        guestAwake:[_engine isGuestDisplayAwake]];
 #endif
 
     /* Geometry comes back with the pixels rather than being assumed here. The

@@ -379,8 +379,11 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     }
     return reply;
 }
-- (void)tick:(BOOL)canRoute {
-    _canRoute=canRoute;
+- (void)tick:(BOOL)canRoute guestAwake:(BOOL)guestAwake {
+    _canRoute=canRoute && guestAwake;
+    // Sleeping guests cannot tap icons. Do not wake one just to renew or
+    // disarm a routing lease; it expires on its own, and refreshes on wake.
+    if (!guestAwake) return;
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
     if (self.invalidated || _busy || now<_next) return;
     NSArray *choices=canRoute?HLEChoices(_instanceID):@[];

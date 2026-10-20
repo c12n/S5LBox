@@ -11,6 +11,9 @@
 - (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
                          canceled:(BOOL (^)(void))canceled deadline:(NSTimeInterval)deadline
                             error:(NSError **)error;
+- (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
+                         canceled:(BOOL (^)(void))canceled deadline:(NSTimeInterval)deadline
+                   allowGuestWake:(BOOL)allowGuestWake error:(NSError **)error;
 @property (nonatomic, copy) BOOL (^canceled)(void);
 // Worker-thread only. Start a separately bounded transfer after a short connect.
 - (void)setOperationDeadline:(NSTimeInterval)deadline;

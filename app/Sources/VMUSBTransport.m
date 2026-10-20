@@ -12,6 +12,7 @@
 @property int channel;
 @property BOOL ready;
 @property BOOL canceled;
+@property BOOL allowGuestWake;
 @property (nonatomic, strong) NSError *error;
 @end
 @implementation VMUSBConnection
@@ -75,7 +76,7 @@ static NSError *VMUSBError(NSString *message) {
             c.canceled = YES;
             continue;
         }
-        active = YES;
+        if (c.allowGuestWake) active = YES;
     }
     [_condition unlock];
     return active;
@@ -85,6 +86,10 @@ static NSError *VMUSBError(NSString *message) {
 }
 - (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
       canceled:(BOOL (^)(void))canceled error:(NSError **)error {
+    return [self openPort:port timeout:timeout canceled:canceled allowGuestWake:YES error:error];
+}
+- (int)openPort:(uint16_t)port timeout:(NSTimeInterval)timeout
+      canceled:(BOOL (^)(void))canceled allowGuestWake:(BOOL)allowGuestWake error:(NSError **)error {
     if (NSThread.isMainThread || !port || !isfinite(timeout) || timeout <= 0) {
         if (error) *error = VMUSBError(@"USB service connections require a worker thread and a finite timeout.");
         return -1;
@@ -108,7 +113,7 @@ static NSError *VMUSBError(NSString *message) {
         return -1;
     }
     VMUSBConnection *c = [[VMUSBConnection alloc] init];
-    c.port = port; c.bridgeFD = fds[0]; c.channel = -1;
+    c.port = port; c.bridgeFD = fds[0]; c.channel = -1; c.allowGuestWake = allowGuestWake;
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + MIN(timeout, 300.0);
     [_condition lock];
     if (!_accepting || _connections.count >= USB_MUX_CHANNELS) {

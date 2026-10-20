@@ -109,6 +109,8 @@ typedef void (^VMEngineStopCompletion)(void);
  * without anyone pressing anything. */
 - (BOOL)isPaused;
 - (BOOL)isRunning;
+/* Published display-controller state, not an inspection of pixel colors. */
+- (BOOL)isGuestDisplayAwake;
 - (BOOL)isStarting;
 /* Service clients run off-main; this transport never accesses the guest disk. */
 - (VMUSBTransport *)usbTransport;

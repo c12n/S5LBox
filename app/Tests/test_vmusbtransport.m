@@ -34,8 +34,8 @@ s5l_usb_result_t s5l8900_usb_packet(s5l8900_t *m, s5l_usb_token_t pid,
 static BOOL waitFor(dispatch_semaphore_t semaphore) {
     return dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
 }
-static USBRequest *request(VMUSBTransport *transport, uint16_t port,
-                           NSTimeInterval timeout, BOOL canceled) {
+static USBRequest *requestWithWake(VMUSBTransport *transport, uint16_t port,
+                           NSTimeInterval timeout, BOOL canceled, BOOL allowGuestWake) {
     USBRequest *r = [USBRequest new]; r.fd = -1; r.canceled = canceled;
     r.entered = dispatch_semaphore_create(0); r.done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -45,7 +45,7 @@ static USBRequest *request(VMUSBTransport *transport, uint16_t port,
             r.fd = [transport openPort:port timeout:timeout canceled:^BOOL{
                 if (!notified) { notified = YES; dispatch_semaphore_signal(r.entered); }
                 return r.canceled;
-            } error:&error];
+            } allowGuestWake:allowGuestWake error:&error];
             r.error = error;
             if (!notified) dispatch_semaphore_signal(r.entered);
             dispatch_semaphore_signal(r.done);
@@ -53,6 +53,10 @@ static USBRequest *request(VMUSBTransport *transport, uint16_t port,
     });
     CHECK(waitFor(r.entered));
     return r;
+}
+static USBRequest *request(VMUSBTransport *transport, uint16_t port,
+                           NSTimeInterval timeout, BOOL canceled) {
+    return requestWithWake(transport, port, timeout, canceled, YES);
 }
 static void failed(USBRequest *r, NSString *message) {
     CHECK(waitFor(r.done)); CHECK(r.fd < 0);
@@ -144,6 +148,25 @@ static void testAssignedCancellation(VMUSBTransport *transport, usb_mux_t *mux) 
     acceptRequest(transport, mux, retry, 62079);
     closeClient(transport, mux, retry); closeClient(transport, mux, live);
 }
+static void testPassivePollingDoesNotWake(VMUSBTransport *transport, usb_mux_t *mux) {
+    [transport beginSession]; usb_mux_init(mux);
+    unsigned baseline = openFDs();
+    USBRequest *passive = requestWithWake(transport, 64322, 2, NO, NO);
+    CHECK(![transport hasServiceActivity]);
+    [transport reconnectSession:@"Sleeping"];
+    CHECK(![transport hasServiceActivity]);
+    ready(mux);
+    acceptRequest(transport, mux, passive, 64322);
+    CHECK(![transport hasServiceActivity]);
+    USBRequest *active = request(transport, 62078, 2, NO);
+    CHECK([transport hasServiceActivity]);
+    acceptRequest(transport, mux, active, 62078);
+    closeClient(transport, mux, active);
+    CHECK(![transport hasServiceActivity]);
+    closeClient(transport, mux, passive);
+    CHECK(![transport hasServiceActivity]);
+    CHECK(openFDs() == baseline);
+}
 static void testCloseErrorAndReset(VMUSBTransport *transport, usb_mux_t *mux) {
     [transport beginSession]; ready(mux);
     USBRequest *r = request(transport, 62078, 2, NO);
@@ -226,6 +249,7 @@ int main(void) {
         if (!mux) return 1;
         testBeforeReady(transport, mux);
         testAssignedCancellation(transport, mux);
+        testPassivePollingDoesNotWake(transport, mux);
         testCloseErrorAndReset(transport, mux);
         testReconnectWaitingAndLiveStreams(transport, mux);
         [transport endSession:@"Finished"]; free(mux);

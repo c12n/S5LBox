@@ -4,7 +4,7 @@
 @interface VMTouchHLECoordinator : NSObject
 - (instancetype)initWithTransport:(VMUSBTransport *)transport instanceID:(NSString *)identifier presenter:(UIViewController *)presenter;
 // Main thread; safe to call every display tick. Internally rate limited.
-- (void)tick:(BOOL)canRoute;
+- (void)tick:(BOOL)canRoute guestAwake:(BOOL)guestAwake;
 - (void)invalidate;
 @end
 @interface VMTouchHLEAppsViewController : UITableViewController

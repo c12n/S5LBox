@@ -46,6 +46,11 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
 - (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
                          canceled:(BOOL (^)(void))canceled deadline:(NSTimeInterval)deadline
                             error:(NSError **)error {
+    return [self initWithTransport:transport port:port canceled:canceled deadline:deadline allowGuestWake:YES error:error];
+}
+- (instancetype)initWithTransport:(VMUSBTransport *)transport port:(uint16_t)port
+                         canceled:(BOOL (^)(void))canceled deadline:(NSTimeInterval)deadline
+                   allowGuestWake:(BOOL)allowGuestWake error:(NSError **)error {
     self = [super init];
     if (!self) return nil;
     _socketFD = -1;
@@ -53,7 +58,7 @@ static OSStatus ServiceWrite(SSLConnectionRef ref, const void *data, size_t *siz
     _operationDeadline = deadline;
     if (![self checkOperation:error]) return nil;
     NSTimeInterval timeout = deadline ? MIN(120, deadline - NSProcessInfo.processInfo.systemUptime) : 120;
-    _socketFD = [transport openPort:port timeout:timeout canceled:_canceled error:error];
+    _socketFD = [transport openPort:port timeout:timeout canceled:_canceled allowGuestWake:allowGuestWake error:error];
     if (_socketFD < 0) return nil;
     return self;
 }

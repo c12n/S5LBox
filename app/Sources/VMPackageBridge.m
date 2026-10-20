@@ -95,7 +95,7 @@ static void AwaitFirstConnection(NSString *identifier) {
     __weak VMPackageBridge *weakSelf = self;
     NSTimeInterval statusDeadline=(operation=='S'||operation=='T') ? NSProcessInfo.processInfo.systemUptime+10 : 0;
     VMUSBService *service = [[VMUSBService alloc] initWithTransport:_transport port:operation=='T'?64322:64321
-        canceled:^BOOL{ return weakSelf.canceled; } deadline:statusDeadline error:error];
+        canceled:^BOOL{ return weakSelf.canceled; } deadline:statusDeadline allowGuestWake:operation!='T' error:error];
     if (!service) return nil;
     NSMutableData *hello = [NSMutableData dataWithBytes:"SPM2" length:4];
     [hello appendData:capability]; [hello appendBytes:&operation length:1];

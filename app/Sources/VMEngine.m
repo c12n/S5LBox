@@ -1110,6 +1110,13 @@ static double vm_engine_now_seconds(void) {
     return starting;
 }
 
+- (BOOL)isGuestDisplayAwake {
+    pthread_mutex_lock(&_lock);
+    BOOL awake = _state == VMEngineStateRunning && _havePublishedFrame && !_snapshotBlank;
+    pthread_mutex_unlock(&_lock);
+    return awake;
+}
+
 - (void)setInstructionCap:(uint64_t)cap {
     pthread_mutex_lock(&_lock);
     _instructionCap = cap;
