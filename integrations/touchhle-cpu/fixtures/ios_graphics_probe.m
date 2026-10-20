@@ -20,7 +20,7 @@
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:1]; }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:2]; }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:9]; }
 @end
 static void ReleaseFrame(void *context,const void *data,size_t size) { (void)data; (void)size; CFRelease(context); }
 @interface HLEGraphicsProbe : UIViewController
@@ -59,8 +59,14 @@ static void ReleaseFrame(void *context,const void *data,size_t size) { (void)dat
     CGFloat height=MIN(safe.size.height-132,(safe.size.width-24)*1.5),width=height/1.5;
     self.display.frame=CGRectMake(CGRectGetMidX(safe)-width/2,safe.origin.y+72,width,height);
 }
-- (void)inactive { if (self.control) s5lbox_hle_control_pause(self.control,true); }
-- (void)active { if (self.control) s5lbox_hle_control_pause(self.control,false); }
+- (void)inactive {
+    if (self.control) s5lbox_hle_control_pause(self.control,true);
+    [self.surface setGraphicsSuspended:YES];
+}
+- (void)active {
+    [self.surface setGraphicsSuspended:NO];
+    if (self.control) s5lbox_hle_control_pause(self.control,false);
+}
 - (void)homePressed {
     if (!self.control) return;
     s5lbox_hle_input_event event={0}; event.kind=8;

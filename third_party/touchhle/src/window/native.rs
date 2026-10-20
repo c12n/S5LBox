@@ -17,6 +17,9 @@ pub struct GLContext {
     handle: *mut c_void,
 }
 impl GLContext {
+    pub fn graphics_access(&self) -> crate::presentation::GraphicsAccess {
+        crate::presentation::GraphicsAccess::new(self.surface)
+    }
     pub fn is_current(&self) -> bool {
         unsafe { (self.surface.is_current.unwrap())(self.surface.context, self.handle) }
     }
@@ -330,7 +333,7 @@ mod tests {
     fn window(queue: &mut VecDeque<InputEvent>) -> Window {
         Window {
             surface: Presentation {
-                abi_version: 1,
+                abi_version: 2,
                 width: 320,
                 height: 480,
                 context: (queue as *mut VecDeque<InputEvent>).cast(),
@@ -344,6 +347,8 @@ mod tests {
                 text_input: None,
                 idle_timer: None,
                 acceleration: None,
+                graphics_enter: None,
+                graphics_leave: None,
             },
             internal: None,
             family: DeviceFamily::iPhone,

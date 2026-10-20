@@ -13,6 +13,9 @@
 - (BOOL)enqueueInput:(s5lbox_hle_input_event)event;
 @property(nonatomic,copy) void (^textInputChanged)(BOOL active);
 @property(nonatomic,copy) void (^idleTimerChanged)(BOOL enabled);
+// Main thread: closes the graphics gate and drains all contexts before return.
+// Resume opens it again. This does not depend on interpreter/file-I/O progress.
+- (void)setGraphicsSuspended:(BOOL)suspended;
 // Call on the runtime worker only, after the run returns, even after a fault.
 - (void)finish;
 @end

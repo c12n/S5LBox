@@ -52,7 +52,10 @@ int32_t s5lbox_hle_run_live(const s5lbox_hle_config *, const s5lbox_hle_live_con
  * kind: 1 down, 2 move, 3 up, 4 UTF-8 text, 5 backspace, 6 return,
  * 7 resign-active, 8 quit, 9 cancel. Coordinates are normalized to the surface.
  * poll_event returns 1 for an event, 0 for none, negative on failure.
- * The surface, callback targets and GL contexts must outlive the run. */
+ * The surface, callback targets and GL contexts must outlive the run.
+ * Presentation ABI 2 adds graphics_enter/leave. They bracket each native GLES
+ * borrow; the host must also guard creation, destruction and presentation.
+ * enter may wait while the host is inactive. Neither callback may throw. */
 typedef struct {
     uint32_t kind;
     int64_t finger;
@@ -72,6 +75,8 @@ typedef struct {
     void (*text_input)(void *,bool);
     void (*idle_timer)(void *,bool);
     void (*acceleration)(void *,float *three_values);
+    void (*graphics_enter)(void *);
+    void (*graphics_leave)(void *);
 } s5lbox_hle_presentation;
 /* flags must be zero. files may be null for a host-owned test app. */
 int32_t s5lbox_hle_run_presented(const s5lbox_hle_config *, const s5lbox_hle_live_config *,

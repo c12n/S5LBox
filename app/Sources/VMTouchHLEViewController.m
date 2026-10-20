@@ -137,6 +137,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(inactive) name:UIApplicationWillResignActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(active) name:UIApplicationDidBecomeActiveNotification object:nil];
     _inactive=UIApplication.sharedApplication.applicationState!=UIApplicationStateActive;
+    [_surface setGraphicsSuspended:_inactive];
     [self updateInputState];
     [self start];
 }
@@ -202,8 +203,10 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 - (void)inactive {
     _inactive=YES; [self updateInputState];
     if (_control) s5lbox_hle_control_pause(_control,true);
+    [_surface setGraphicsSuspended:YES];
 }
 - (void)active {
+    [_surface setGraphicsSuspended:_paused];
     _inactive=NO; [self updateInputState];
     if (_control) s5lbox_hle_control_pause(_control,_paused);
 }
@@ -211,7 +214,8 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     if (_finished) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
     if (_forceAvailable) { if (_control) s5lbox_hle_control_stop(_control); _bridge.canceled=YES; return; }
     if (_closing) return;
-    _closing=YES; _paused=NO; if (_control) s5lbox_hle_control_pause(_control,false);
+    _closing=YES; _paused=NO; [_surface setGraphicsSuspended:_inactive];
+    if (_control) s5lbox_hle_control_pause(_control,_inactive);
     [self updateInputState];
     s5lbox_hle_input_event event={0}; event.kind=8; [_surface enqueueInput:event];
     _status.text=@"Closing app…"; _status.textColor=UIColor.whiteColor; _status.hidden=NO;
@@ -229,6 +233,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     [sheet addAction:[UIAlertAction actionWithTitle:_paused?@"Resume":@"Pause" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         self->_paused=!self->_paused; [self updateInputState];
         if (self->_control) s5lbox_hle_control_pause(self->_control,self->_paused||self->_inactive);
+        [self->_surface setGraphicsSuspended:self->_paused||self->_inactive];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView=_controls; sheet.popoverPresentationController.sourceRect=_controls.bounds;

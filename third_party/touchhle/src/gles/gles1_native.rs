@@ -41,9 +41,13 @@ impl GLESContext for GLES1NativeContext {
         &'gl_ctx mut self,
         window: &'win mut Window,
     ) -> Box<dyn GLES + 'gl_ctx> {
+        #[cfg(any(target_os = "ios", feature = "native-window"))]
+        let graphics = self.gl_ctx.graphics_access();
         if self.gl_ctx.is_current() && self.is_loaded {
             return Box::new(GLES1Native {
                 _gl_lifetime: PhantomData,
+                #[cfg(any(target_os = "ios", feature = "native-window"))]
+                _graphics: graphics,
             });
         }
 
@@ -54,6 +58,8 @@ impl GLESContext for GLES1NativeContext {
         self.is_loaded = true;
         Box::new(GLES1Native {
             _gl_lifetime: PhantomData,
+            #[cfg(any(target_os = "ios", feature = "native-window"))]
+            _graphics: graphics,
         })
     }
 
@@ -62,9 +68,13 @@ impl GLESContext for GLES1NativeContext {
         make_current_fn: &mut dyn FnMut(&GLContext),
         loader_fn: &mut dyn FnMut(&'static str) -> *const std::ffi::c_void,
     ) -> Box<dyn GLES + 'gl_ctx> {
+        #[cfg(any(target_os = "ios", feature = "native-window"))]
+        let graphics = self.gl_ctx.graphics_access();
         if self.gl_ctx.is_current() && self.is_loaded {
             return Box::new(GLES1Native {
                 _gl_lifetime: PhantomData,
+                #[cfg(any(target_os = "ios", feature = "native-window"))]
+                _graphics: graphics,
             });
         }
 
@@ -73,12 +83,16 @@ impl GLESContext for GLES1NativeContext {
         self.is_loaded = true;
         Box::new(GLES1Native {
             _gl_lifetime: PhantomData,
+            #[cfg(any(target_os = "ios", feature = "native-window"))]
+            _graphics: graphics,
         })
     }
 }
 
 pub struct GLES1Native<'gl_ctx> {
     _gl_lifetime: PhantomData<&'gl_ctx ()>,
+    #[cfg(any(target_os = "ios", feature = "native-window"))]
+    _graphics: crate::presentation::GraphicsAccess,
 }
 
 impl GLES for GLES1Native<'_> {

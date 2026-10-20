@@ -1,5 +1,6 @@
 // Copyright (c) 2026 j0shua-SYSON. MIT licensed.
-// OpenGL contexts are confined to one runtime worker, including destruction.
+// Drawing and destruction run on one runtime worker. A gate excludes that
+// worker while the main thread drains contexts for an inactive transition.
 // The main thread consumes immutable frames; no EAGL layer crosses threads.
 #import "VMTouchHLESurface.h"
 #import <OpenGLES/EAGL.h>
@@ -14,12 +15,16 @@
 @implementation HLEGLContext
 @end
 static _Thread_local void *CurrentContext;
+static _Thread_local void *GraphicsOwner;
+static _Thread_local NSUInteger GraphicsDepth;
 
 @interface VMTouchHLESurface ()
 - (void *)createContext:(BOOL)shared;
 - (void)destroyContext:(void *)handle;
 - (int)presentFrame;
 - (int)pollEvent:(s5lbox_hle_input_event *)event;
+- (void)enterGraphics;
+- (void)leaveGraphics;
 @end
 static HLEGLContext *Current(void) { return (__bridge HLEGLContext *)CurrentContext; }
 static void BindFramebuffer(GLenum target,GLuint framebuffer) {
@@ -30,15 +35,22 @@ static void GetInteger(GLenum name,GLint *value) {
     if (name==GL_FRAMEBUFFER_BINDING_OES && (GLuint)*value==Current().framebuffer) *value=0;
 }
 static void *Create(void *owner,bool shared) {
-    @autoreleasepool { @try { return [(__bridge VMTouchHLESurface *)owner createContext:shared]; }
-        @catch (__unused NSException *error) { return NULL; } }
+    VMTouchHLESurface *surface=(__bridge VMTouchHLESurface *)owner;
+    [surface enterGraphics];
+    @autoreleasepool { @try { return [surface createContext:shared]; }
+        @catch (__unused NSException *error) { return NULL; }
+        @finally { [surface leaveGraphics]; } }
 }
 static void Destroy(void *owner,void *handle) {
-    @autoreleasepool { @try { [(__bridge VMTouchHLESurface *)owner destroyContext:handle]; }
-        @catch (__unused NSException *error) {} }
+    VMTouchHLESurface *surface=(__bridge VMTouchHLESurface *)owner;
+    [surface enterGraphics];
+    @autoreleasepool { @try { [surface destroyContext:handle]; }
+        @catch (__unused NSException *error) {}
+        @finally { [surface leaveGraphics]; } }
 }
 static int32_t MakeCurrent(void *owner,void *handle) {
-    (void)owner;
+    VMTouchHLESurface *surface=(__bridge VMTouchHLESurface *)owner;
+    [surface enterGraphics];
     @autoreleasepool { @try {
         HLEGLContext *context=(__bridge HLEGLContext *)handle;
         if (CurrentContext!=handle) {
@@ -47,7 +59,8 @@ static int32_t MakeCurrent(void *owner,void *handle) {
             CurrentContext=handle;
         }
         return 0;
-    } @catch (__unused NSException *error) { return -1; } }
+    } @catch (__unused NSException *error) { return -1; }
+      @finally { [surface leaveGraphics]; } }
 }
 static bool IsCurrent(void *owner,void *handle) { (void)owner; return handle && CurrentContext==handle; }
 static const void *GetProc(void *owner,const char *name) {
@@ -59,9 +72,14 @@ static const void *GetProc(void *owner,const char *name) {
     return library?dlsym(library,name):NULL;
 }
 static int32_t Present(void *owner) {
-    @autoreleasepool { @try { return [(__bridge VMTouchHLESurface *)owner presentFrame]; }
-        @catch (__unused NSException *error) { return -1; } }
+    VMTouchHLESurface *surface=(__bridge VMTouchHLESurface *)owner;
+    [surface enterGraphics];
+    @autoreleasepool { @try { return [surface presentFrame]; }
+        @catch (__unused NSException *error) { return -1; }
+        @finally { [surface leaveGraphics]; } }
 }
+static void EnterGraphics(void *owner) { [(__bridge VMTouchHLESurface *)owner enterGraphics]; }
+static void LeaveGraphics(void *owner) { [(__bridge VMTouchHLESurface *)owner leaveGraphics]; }
 static int32_t Poll(void *owner,s5lbox_hle_input_event *event) {
     @autoreleasepool { @try { return [(__bridge VMTouchHLESurface *)owner pollEvent:event]; }
         @catch (__unused NSException *error) { return -1; } }
@@ -82,20 +100,55 @@ static void IdleTimer(void *owner,bool enabled) {
     s5lbox_hle_input_event _events[256];
     NSUInteger _head,_count;
     BOOL _overflow;
+    NSCondition *_graphicsGate;
+    BOOL _graphicsSuspended,_graphicsBusy;
 }
 - (instancetype)initWithWidth:(uint32_t)width height:(uint32_t)height {
     if (!width || !height || width>4096 || height>4096) return nil;
     self=[super init];
-    if (self) { _width=width; _height=height; _contexts=[NSMutableSet set]; }
+    if (self) { _width=width; _height=height; _contexts=[NSMutableSet set]; _graphicsGate=[NSCondition new]; }
     return self;
 }
 - (s5lbox_hle_presentation)configuration {
     s5lbox_hle_presentation surface={0};
-    surface.abi_version=1; surface.width=_width; surface.height=_height; surface.context=(__bridge void *)self;
+    surface.abi_version=2; surface.width=_width; surface.height=_height; surface.context=(__bridge void *)self;
     surface.create_gl=Create; surface.destroy_gl=Destroy; surface.make_current=MakeCurrent;
     surface.is_current=IsCurrent; surface.get_proc=GetProc; surface.present=Present; surface.poll_event=Poll;
     surface.text_input=TextInput; surface.idle_timer=IdleTimer;
+    surface.graphics_enter=EnterGraphics; surface.graphics_leave=LeaveGraphics;
     return surface;
+}
+- (void)enterGraphics {
+    // Context callbacks can nest inside a Rust GLES borrow. They must not wait
+    // for suspension while the outer borrow is preventing that suspension.
+    if (GraphicsOwner==(__bridge void *)self) { GraphicsDepth++; return; }
+    [_graphicsGate lock];
+    while (_graphicsSuspended || _graphicsBusy) [_graphicsGate wait];
+    _graphicsBusy=YES;
+    GraphicsOwner=(__bridge void *)self; GraphicsDepth=1;
+    [_graphicsGate unlock];
+}
+- (void)leaveGraphics {
+    if (--GraphicsDepth) return;
+    GraphicsOwner=NULL;
+    [_graphicsGate lock]; _graphicsBusy=NO; [_graphicsGate broadcast]; [_graphicsGate unlock];
+}
+- (void)setGraphicsSuspended:(BOOL)suspended {
+    [_graphicsGate lock];
+    if (_graphicsSuspended==suspended) { [_graphicsGate unlock]; return; }
+    _graphicsSuspended=suspended;
+    if (suspended) {
+        while (_graphicsBusy) [_graphicsGate wait];
+        // No raw GLES borrow or context callback can overlap this drain.
+        // EAGL permits serialized access across threads; restore this thread's
+        // context without modifying the worker's thread-local current context.
+        EAGLContext *previous=EAGLContext.currentContext;
+        for (HLEGLContext *item in _contexts) {
+            if ([EAGLContext setCurrentContext:item.context]) glFinish();
+        }
+        [EAGLContext setCurrentContext:previous];
+    } else [_graphicsGate broadcast];
+    [_graphicsGate unlock];
 }
 - (void *)createContext:(BOOL)shared {
     HLEGLContext *item=[HLEGLContext new];
@@ -124,6 +177,9 @@ static void IdleTimer(void *owner,bool enabled) {
         GLuint framebuffer=item.framebuffer,color=item.color;
         if (framebuffer) glDeleteFramebuffersOES(1,&framebuffer);
         if (color) glDeleteRenderbuffersOES(1,&color);
+        // This context leaves the drain set below. Finish its pending work
+        // first, including deletion, even when a background transition races.
+        glFinish();
     }
     [EAGLContext setCurrentContext:nil]; CurrentContext=NULL;
     [_contexts removeObject:item];
@@ -170,7 +226,10 @@ static void IdleTimer(void *owner,bool enabled) {
     }
 }
 - (void)finish {
-    for (HLEGLContext *context in _contexts.allObjects) [self destroyContext:(__bridge void *)context];
-    _scratch=nil;
+    [self enterGraphics];
+    @try {
+        for (HLEGLContext *context in _contexts.allObjects) [self destroyContext:(__bridge void *)context];
+        _scratch=nil;
+    } @finally { [self leaveGraphics]; }
 }
 @end
