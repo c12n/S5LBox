@@ -55,6 +55,26 @@ __attribute__((objc_root_class)) @interface NSObject { Class isa; }
 + (id)setWithObject:(id)object;
 @end
 @interface UITouch : NSObject @end
+@interface NSTimer : NSObject
++ (id)scheduledTimerWithTimeInterval:(double)interval target:(id)target selector:(SEL)selector userInfo:(id)info repeats:(BOOL)repeats;
+- (void)invalidate;
+@end
+extern void *alcOpenDevice(const char *);
+extern void *alcCreateContext(void *,const int *);
+extern BOOL alcMakeContextCurrent(void *);
+extern void alcDestroyContext(void *);
+extern BOOL alcCloseDevice(void *);
+extern void alGenBuffers(int,unsigned *);
+extern void alDeleteBuffers(int,const unsigned *);
+extern void alBufferData(unsigned,int,const void *,int,int);
+extern void alGenSources(int,unsigned *);
+extern void alDeleteSources(int,const unsigned *);
+extern void alSourcei(unsigned,int,int);
+extern void alSourcef(unsigned,int,float);
+extern void alSourcePlay(unsigned);
+extern void alSourceStop(unsigned);
+extern void alGetSourcei(unsigned,int,int *);
+extern int alGetError(void);
 @interface CancelTarget : NSObject { @public unsigned ended,cancelled; }
 - (void)ended:(id)sender;
 - (void)cancelled:(id)sender;
@@ -71,6 +91,11 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     UIWindow *_window;
     UILabel *_label;
     unsigned _taps;
+    UIButton *_audioButton;
+    NSTimer *_audioTimer;
+    void *_audioDevice,*_audioContext;
+    unsigned _audioBuffer,_audioSource;
+    BOOL _audioPlaying;
 }
 @end
 @implementation HLEVisualDelegate
@@ -93,6 +118,11 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     [button setTitle:@"Test guest touch" forState:0];
     [button addTarget:self action:@selector(tapped:) forControlEvents:64];
     [_window addSubview:button];
+    _audioButton=[UIButton buttonWithType:1];
+    [_audioButton setFrame:(CGRect){{50,335},{220,64}}];
+    [_audioButton setTitle:@"Play audio" forState:0];
+    [_audioButton addTarget:self action:@selector(audioTapped:) forControlEvents:64];
+    [_window addSubview:_audioButton];
     [_window makeKeyAndVisible];
     puts("S5LBOX-HLE-VISUAL READY"); fflush(stdout);
     printf("S5LBOX-HLE-VISUAL RESTORED touches=%u exits=%d\n",_taps,
@@ -108,6 +138,42 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     if (file) { fprintf(file,"%u\n",_taps); fclose(file); }
     printf("S5LBOX-HLE-VISUAL TOUCH count=%u saved=%d\n",_taps,file!=NULL); fflush(stdout);
 }
+- (void)audioTick:(id)timer {
+    (void)timer;
+    if (!_audioPlaying) return;
+    alcMakeContextCurrent(_audioContext);
+    int position=0; alGetSourcei(_audioSource,0x1025,&position); // AL_SAMPLE_OFFSET
+    char title[64]; snprintf(title,sizeof title,"Audio: %d",position);
+    [_audioButton setTitle:[NSString stringWithUTF8String:title] forState:0];
+}
+- (void)audioTapped:(id)sender {
+    (void)sender;
+    if (!_audioContext) {
+        if (!_audioDevice) _audioDevice=alcOpenDevice(NULL);
+        if (_audioDevice) _audioContext=alcCreateContext(_audioDevice,NULL);
+        if (!_audioContext || !alcMakeContextCurrent(_audioContext)) {
+            if (_audioContext) { alcDestroyContext(_audioContext); _audioContext=NULL; }
+            [_audioButton setTitle:@"Audio unavailable" forState:0]; return;
+        }
+        short samples[44100];
+        for (unsigned i=0;i<44100;i++) samples[i]=(short)(((int)(i%100)-50)*200);
+        alGenBuffers(1,&_audioBuffer);
+        alBufferData(_audioBuffer,0x1101,samples,sizeof samples,44100); // MONO16
+        alGenSources(1,&_audioSource);
+        alSourcei(_audioSource,0x1009,(int)_audioBuffer); // AL_BUFFER
+        alSourcei(_audioSource,0x1007,1); // AL_LOOPING
+        alSourcef(_audioSource,0x100a,0.1f); // Quiet fixture; never changes host volume.
+        _audioTimer=[NSTimer scheduledTimerWithTimeInterval:0.25 target:self
+            selector:@selector(audioTick:) userInfo:0 repeats:1];
+    }
+    alcMakeContextCurrent(_audioContext);
+    _audioPlaying=!_audioPlaying;
+    if (_audioPlaying) alSourcePlay(_audioSource);
+    else { alSourceStop(_audioSource); [_audioButton setTitle:@"Play audio" forState:0]; }
+    int error=alGetError();
+    if (error) { _audioPlaying=0; [_audioButton setTitle:@"Audio error" forState:0]; }
+    printf("S5LBOX-HLE-VISUAL AUDIO playing=%d error=%d\n",_audioPlaying,error); fflush(stdout);
+}
 - (void)applicationWillTerminate:(UIApplication *)application {
     (void)application;
     NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];
@@ -115,6 +181,14 @@ extern int UIApplicationMain(int argc,char **argv,id principal,id delegate);
     // Intentionally do not call synchronize: the runtime must flush changes
     // made by termination callbacks, not only changes made before Home.
     [defaults setInteger:exits forKey:@"CompletedExits"];
+    [_audioTimer invalidate];
+    if (_audioContext) {
+        alcMakeContextCurrent(_audioContext);
+        if (_audioSource) alDeleteSources(1,&_audioSource);
+        if (_audioBuffer) alDeleteBuffers(1,&_audioBuffer);
+        alcMakeContextCurrent(NULL); alcDestroyContext(_audioContext);
+    }
+    if (_audioDevice) alcCloseDevice(_audioDevice);
     printf("S5LBOX-HLE-VISUAL TERMINATING exits=%d\n",exits); fflush(stdout);
 }
 @end

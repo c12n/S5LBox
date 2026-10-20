@@ -44,7 +44,9 @@ an A9 iPhone running iOS 15.8.5 with a freshly jailbroken 3.1.3 guest:
 
 The host tests additionally cover file isolation and locks, launch races,
 installer validation/removal, runtime exits/faults, and audio resource cleanup.
-The audio cleanup test uses a null output device; it does not verify playback.
+Audio tests use a null output device to verify teardown, frozen playback
+positions during pause, resume, and devices opened while paused. They do not
+verify audible output on the iPhone.
 
 Presentation ABI 2 brackets each native GLES borrow with a host graphics gate.
 Context creation, destruction and frame presentation use the same gate. On

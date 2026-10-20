@@ -35,7 +35,7 @@ New-Item -ItemType Directory -Force -Path $visual | Out-Null
 if ($LASTEXITCODE) { throw 'Visual fixture compile failed' }
 & $linker -arch armv6 -iphoneos_version_min 3.0 -syslibroot $sdkRoot `
     -undefined dynamic_lookup -o "$visual/HLEVisual" "$sdkRoot/usr/lib/crt1.o" `
-    "$outputRoot/visual.o" -lSystem -lobjc -framework Foundation -framework UIKit
+    "$outputRoot/visual.o" -lSystem -lobjc -framework Foundation -framework UIKit -framework OpenAL
 if ($LASTEXITCODE) { throw 'Visual fixture link failed' }
 Copy-Item -LiteralPath "$PSScriptRoot/visual.plist" -Destination "$visual/Info.plist"
 Write-Output $bundle
