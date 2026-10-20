@@ -11,12 +11,32 @@
 
 @interface HLEDisplayView : UIView <UIKeyInput>
 @property(nonatomic,weak) VMTouchHLESurface *surface;
+@property(nonatomic) BOOL inputEnabled;
 - (void)showFrame:(NSData *)data;
 @end
 static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     (void)bytes; (void)count; CFRelease(context);
 }
-@implementation HLEDisplayView
+@implementation HLEDisplayView {
+    NSMutableDictionary<NSNumber *,NSValue *> *_pressed;
+}
+@synthesize inputEnabled=_inputEnabled;
+- (void)setInputEnabled:(BOOL)enabled {
+    if (_inputEnabled==enabled) return;
+    if (!enabled) {
+        // Finish fingers already delivered to the guest. New taps during a
+        // pause must not become a delayed burst of input after Resume.
+        for (NSNumber *finger in _pressed) {
+            CGPoint point=_pressed[finger].CGPointValue;
+            s5lbox_hle_input_event event={0}; event.kind=3;
+            event.finger=finger.longLongValue; event.x=point.x; event.y=point.y;
+            [self.surface enqueueInput:event];
+        }
+        [_pressed removeAllObjects];
+    }
+    _inputEnabled=enabled;
+    self.userInteractionEnabled=enabled;
+}
 - (void)showFrame:(NSData *)data {
     uint32_t width=self.surface.width,height=self.surface.height;
     if (!data || !width || !height || data.length!=(NSUInteger)width*height*4) return;
@@ -31,24 +51,30 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     CGColorSpaceRelease(color); CGDataProviderRelease(provider);
 }
 - (void)touches:(NSSet<UITouch *> *)touches kind:(uint32_t)kind {
-    if (self.bounds.size.width<=0 || self.bounds.size.height<=0) return;
+    if (!_inputEnabled || self.bounds.size.width<=0 || self.bounds.size.height<=0) return;
     for (UITouch *touch in touches) {
         CGPoint point=[touch locationInView:self];
         s5lbox_hle_input_event event={0}; event.kind=kind;
         event.finger=(int64_t)(uintptr_t)(__bridge void *)touch;
         event.x=fmaxf(0,fminf(1,(float)(point.x/self.bounds.size.width)));
         event.y=fmaxf(0,fminf(1,(float)(point.y/self.bounds.size.height)));
-        [self.surface enqueueInput:event];
+        if ([self.surface enqueueInput:event]) {
+            if (!_pressed) _pressed=[NSMutableDictionary dictionary];
+            NSNumber *finger=@(event.finger);
+            if (kind==3) [_pressed removeObjectForKey:finger];
+            else _pressed[finger]=[NSValue valueWithCGPoint:CGPointMake(event.x,event.y)];
+        }
     }
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:1]; }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:2]; }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self touches:touches kind:3]; }
-- (BOOL)canBecomeFirstResponder { return YES; }
+- (BOOL)canBecomeFirstResponder { return _inputEnabled; }
 - (BOOL)hasText { return YES; }
-- (void)deleteBackward { s5lbox_hle_input_event event={0}; event.kind=5; [self.surface enqueueInput:event]; }
+- (void)deleteBackward { if (!_inputEnabled) return; s5lbox_hle_input_event event={0}; event.kind=5; [self.surface enqueueInput:event]; }
 - (void)insertText:(NSString *)text {
+    if (!_inputEnabled) return;
     if ([text isEqual:@"\n"]) { s5lbox_hle_input_event event={0}; event.kind=6; [self.surface enqueueInput:event]; return; }
     NSData *bytes=[text dataUsingEncoding:NSUTF8StringEncoding]; const uint8_t *p=bytes.bytes; NSUInteger left=bytes.length;
     while (left) {
@@ -77,7 +103,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     VMTouchHLESurface *_surface;
     VMPackageBridge *_bridge;
     const s5lbox_hle_control *_control;
-    BOOL _paused,_closing,_forceAvailable,_finished;
+    BOOL _paused,_closing,_forceAvailable,_finished,_inactive,_wantsTextInput;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor=UIColor.systemBackgroundColor;
@@ -103,13 +129,15 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     _surface.textInputChanged=^(BOOL enabled) {
         HLERunViewController *owner=weakSelf;
         if (!owner) return;
-        if (enabled && !owner->_closing) [owner->_display becomeFirstResponder];
-        else [owner->_display resignFirstResponder];
+        owner->_wantsTextInput=enabled;
+        [owner updateInputState];
     };
     _link=[CADisplayLink displayLinkWithTarget:self selector:@selector(frame)];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(inactive) name:UIApplicationWillResignActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(active) name:UIApplicationDidBecomeActiveNotification object:nil];
+    _inactive=UIApplication.sharedApplication.applicationState!=UIApplicationStateActive;
+    [self updateInputState];
     [self start];
 }
 - (void)viewDidLayoutSubviews {
@@ -122,6 +150,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 }
 - (void)start {
     _control=s5lbox_hle_control_create();
+    s5lbox_hle_control_pause(_control,_paused||_inactive);
     _bridge=[[VMPackageBridge alloc] initWithTransport:self.transport instanceID:self.instanceID];
     VMPackageBridge *bridge=_bridge; VMTouchHLESurface *surface=_surface;
     const s5lbox_hle_control *control=_control; VMGuestApplication *app=self.application;
@@ -149,7 +178,7 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 s5lbox_hle_control_release(control); self->_control=NULL; self->_finished=YES;
                 [self->_link invalidate]; self->_link=nil; [self->_spinner stopAnimating];
-                [self->_display resignFirstResponder];
+                [self updateInputState];
                 if (self->_closing || (result==S5LBOX_HLE_OK && !error)) [self dismissViewControllerAnimated:YES completion:nil];
                 else { self->_status.text=message; self->_status.hidden=NO; self->_status.textColor=UIColor.labelColor; self->_display.hidden=YES; }
             });
@@ -158,15 +187,32 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
 }
 - (void)frame {
     NSData *frame=[_surface takeFrame]; if (!frame) return;
-    [_display showFrame:frame]; if (!_closing) _status.hidden=YES; [_spinner stopAnimating];
+    [_display showFrame:frame]; if (!_closing && !_paused) _status.hidden=YES; [_spinner stopAnimating];
 }
-- (void)inactive { if (_control) s5lbox_hle_control_pause(_control,true); }
-- (void)active { if (_control) s5lbox_hle_control_pause(_control,_paused); }
+- (void)updateInputState {
+    _display.inputEnabled=!(_paused||_inactive||_closing||_finished);
+    if (_display.inputEnabled && _wantsTextInput) [_display becomeFirstResponder];
+    else [_display resignFirstResponder];
+    _link.paused=_paused||_inactive;
+    if (!_closing && !_finished) {
+        _status.text=_paused?@"Paused":@"Opening app…";
+        _status.hidden=!_paused && _surface.frameCount>0;
+    }
+}
+- (void)inactive {
+    _inactive=YES; [self updateInputState];
+    if (_control) s5lbox_hle_control_pause(_control,true);
+}
+- (void)active {
+    _inactive=NO; [self updateInputState];
+    if (_control) s5lbox_hle_control_pause(_control,_paused);
+}
 - (void)home {
     if (_finished) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
     if (_forceAvailable) { if (_control) s5lbox_hle_control_stop(_control); _bridge.canceled=YES; return; }
     if (_closing) return;
     _closing=YES; _paused=NO; if (_control) s5lbox_hle_control_pause(_control,false);
+    [self updateInputState];
     s5lbox_hle_input_event event={0}; event.kind=8; [_surface enqueueInput:event];
     _status.text=@"Closing app…"; _status.textColor=UIColor.whiteColor; _status.hidden=NO;
     [_display resignFirstResponder];
@@ -181,7 +227,8 @@ static void HLEReleaseFrame(void *context,const void *bytes,size_t count) {
     if (_closing || _finished) return;
     UIAlertController *sheet=[UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:_paused?@"Resume":@"Pause" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        self->_paused=!self->_paused; if (self->_control) s5lbox_hle_control_pause(self->_control,self->_paused);
+        self->_paused=!self->_paused; [self updateInputState];
+        if (self->_control) s5lbox_hle_control_pause(self->_control,self->_paused||self->_inactive);
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView=_controls; sheet.popoverPresentationController.sourceRect=_controls.bounds;
