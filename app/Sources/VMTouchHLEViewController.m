@@ -452,6 +452,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     VMGuestApplications *_discovery;
     VMPackageBridge *_setup;
     NSArray<VMGuestApplication *> *_apps;
+    NSString *_pendingSelection;
     BOOL _busy;
     UILabel *_message;
 }
@@ -521,7 +522,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
                     preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
                 [alert addAction:[UIAlertAction actionWithTitle:@"Set Up" style:UIAlertActionStyleDefault
-                    handler:^(__unused UIAlertAction *a) { [self installSupport]; }]];
+                    handler:^(__unused UIAlertAction *a) { self->_pendingSelection=app.identifier; [self installSupport]; }]];
                 [self presentViewController:alert animated:YES completion:nil];
             }
         }];
@@ -537,6 +538,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
 }
 - (void)setup {
     if (_busy) return;
+    _pendingSelection=nil;
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Set up touchHLE?"
         message:@"Install guest support and respring iPhone OS. Close guest apps first."
         preferredStyle:UIAlertControllerStyleAlert];
@@ -551,6 +553,7 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
     self.navigationItem.rightBarButtonItem.enabled=NO; [self message:@"Setting up touchHLE…"];
     _setup=[[VMPackageBridge alloc] initWithTransport:_transport instanceID:_instanceID];
     VMPackageBridge *setup=_setup;
+    NSString *selection=_pendingSelection; _pendingSelection=nil;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         NSError *error=nil; NSData *status=[setup status:&error];
         NSURL *package=[NSBundle.mainBundle URLForResource:@"s5lbox-hle-launch" withExtension:@"deb"];
@@ -558,12 +561,42 @@ static NSMapTable<NSString *,VMTouchHLECoordinator *> *HLECoordinators;
         else if (status) error=[NSError errorWithDomain:@"S5LBox.HLE" code:1 userInfo:@{NSLocalizedDescriptionKey:@"The guest launch package is missing from this build."}];
         BOOL okay=status && !error;
         if (okay && setup.finishAction) okay=[setup performFinish:status error:&error];
+        if (okay) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [self message:@"Waiting for iPhone OS…"]; });
+            // A successful package install is not a ready SpringBoard hook.
+            // Probe its authenticated handshake through the respring, with a
+            // fresh empty session so an old ticket cannot be replayed.
+            uuid_t bytes; [NSUUID.UUID getUUIDBytes:bytes];
+            NSData *session=[NSData dataWithBytes:bytes length:16];
+            NSData *probe=HLERouteRequest(1,session,0,@[]);
+            NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+45;
+            okay=NO;
+            while (!setup.canceled && NSProcessInfo.processInfo.systemUptime<deadline) {
+                error=nil; NSData *reply=[setup exchangeAppRoute:probe error:&error];
+                const uint8_t *p=reply.bytes;
+                if (reply.length==18 && !p[4]&&!p[5]&&!p[6]&&!p[7]) { okay=YES; error=nil; break; }
+                [NSThread sleepForTimeInterval:1];
+            }
+            if (!okay) error=HLEError(@"Guest support is installed, but iPhone OS has not reconnected. Let it finish the respring, then try again.");
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_busy=NO; self.navigationItem.hidesBackButton=NO; self.navigationController.modalInPresentation=NO;
-            self.navigationItem.rightBarButtonItem.enabled=YES;
-            [self message:okay?@"Guest setup completed. Wait for the respring, then refresh.":error.localizedDescription];
+            if (okay && selection.length) {
+                [self message:@"Updating app preference…"];
+                VMTouchHLECoordinator *coordinator=[VMTouchHLECoordinator forInstance:self->_instanceID];
+                if (coordinator) {
+                    [coordinator setIdentifier:selection usesHLE:YES completion:^(NSError *choiceError) {
+                        [self finishSetup:choiceError];
+                    }];
+                } else [self finishSetup:HLEError(@"The machine session has ended.")];
+            } else [self finishSetup:okay?nil:error];
         });
     });
+}
+- (void)finishSetup:(NSError *)error {
+    _busy=NO; self.navigationItem.hidesBackButton=NO; self.navigationController.modalInPresentation=NO;
+    self.navigationItem.rightBarButtonItem.enabled=YES;
+    if (error) [self message:error.localizedDescription];
+    else [self refresh];
 }
 - (void)dealloc { _discovery.canceled=YES; _setup.canceled=YES; }
 @end
