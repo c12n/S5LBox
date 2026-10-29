@@ -1602,6 +1602,25 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      */
     vm_boot_options_apply(options, option_count, &request, &report->options);
 
+    /*
+     * iOS 4 renamed one node the switches name: the USB OTG complex is
+     * /arm-io/usb-complex in the 8C148 device tree, not /arm-io/usb-otg as
+     * on 7E18 — same hardware, same usb-device/usb-host children. The
+     * option table is written against the 7E18 names, so translate the
+     * path for this build rather than let bring-up refuse a node that
+     * exists under its newer name. The gate above has already bound the
+     * kernel by SHA-256, so the tree this runs against is the verified
+     * 8C148 one. request.unmatch points into report->options.unmatch, so
+     * rewriting the entry rewrites the request.
+     */
+    if (kernel_size == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE) {
+        for (unsigned i = 0; i < report->options.unmatch_count; i++) {
+            if (report->options.unmatch[i] &&
+                strcmp(report->options.unmatch[i], "arm-io/usb-otg") == 0)
+                report->options.unmatch[i] = "arm-io/usb-complex";
+        }
+    }
+
     char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
     if (!join_path(ppp_marker, sizeof ppp_marker, paths->work,
                    VM_FW_BOOT_PPP_FILE)) {
