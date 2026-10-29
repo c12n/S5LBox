@@ -536,3 +536,49 @@ void vm_boot_options_reconcile_jailbreak(vm_boot_options_report_t *report,
     }
     recount_and_summarize(report);
 }
+
+void vm_boot_options_reconcile_ios4_graphics(
+        vm_boot_options_report_t *report,
+        s5l_bringup_request_t *request) {
+    /*
+     * iOS 4.2.1's AppleMBXController waits on the MBX status register's
+     * EVM_DALLOC bit during its start/graphics bring-up. The core's MBX
+     * model raises that event only for the iPhone OS 3.1.3 transactions it
+     * was measured against, so on this build the wait never completes: the
+     * guest burns the emulated CPU in the poll and the machine stops
+     * (observed on a phone 2026-10-29 at ~240.9M retired instructions,
+     * identically in both CPU engines, which is what cleared the engines
+     * and pointed at the device). This build's work images are provisioned
+     * for QuartzCore's software renderer, which needs no MBX at all, so
+     * the nub stays un-matched on 8C148 whatever the switch says. 7E18
+     * keeps the switch: its driver is the one the model was built from.
+     */
+    if (!report) return;
+    int mbx = vm_option_index("mbx");
+    if (mbx < 0 || (unsigned)mbx >= report->count) return;
+    vm_boot_option_status_t *row = &report->row[mbx];
+    if (!row->effective) return;
+
+    unsigned char kind = MAP_FIXED_OFF;
+    const char *note = NULL;
+    const char *path = NULL;
+    if (!mapped((unsigned)mbx, &kind, &note, &path) ||
+        kind != MAP_UNMATCH || !path || !*path)
+        return;
+
+    bool present = false;
+    for (unsigned i = 0; i < report->unmatch_count; i++)
+        if (report->unmatch[i] && strcmp(report->unmatch[i], path) == 0)
+            present = true;
+    if (!present && report->unmatch_count < VM_BOOT_OPTION_MAX)
+        report->unmatch[report->unmatch_count++] = path;
+    if (request) {
+        request->unmatch = report->unmatch_count ? report->unmatch : NULL;
+        request->unmatch_count = report->unmatch_count;
+    }
+    row->effective = false;
+    row->note = "iOS 4.2.1's graphics driver waits for an MBX completion "
+                "this emulator only models for iPhone OS 3.1.3, so the GPU "
+                "stays off on this build and rendering stays on the CPU.";
+    recount_and_summarize(report);
+}

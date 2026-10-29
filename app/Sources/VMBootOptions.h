@@ -195,6 +195,19 @@ void vm_boot_options_reconcile_jailbreak(vm_boot_options_report_t *report,
                                          s5l_bringup_request_t *request,
                                          bool installed);
 
+/*
+ * Force the MBX graphics row off for an iOS 4.2.1 (8C148) start. That
+ * build's AppleMBXController waits on an MBX completion the core only
+ * models for iPhone OS 3.1.3, so a matched GPU wedges the guest; the
+ * build renders through QuartzCore's software path instead. The row's
+ * report entry says so, in the same reconciled form as the network and
+ * jailbreak rows above. Callers pass only 8C148 starts here; 7E18 never
+ * calls it. `request` may be NULL when only the report is needed.
+ */
+void vm_boot_options_reconcile_ios4_graphics(
+    vm_boot_options_report_t *report,
+    s5l_bringup_request_t *request);
+
 /* Startup alert, distinct from the complete diagnostic summary. A committed
  * jailbreak owns both halves even when old developer switches are off; that
  * expected reconciliation needs no alert. Other mismatches remain visible.

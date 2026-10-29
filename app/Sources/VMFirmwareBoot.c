@@ -1645,6 +1645,19 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                 strcmp(report->options.unmatch[i], "arm-io/usb-otg") == 0)
                 report->options.unmatch[i] = "arm-io/usb-complex";
         }
+        /*
+         * The same build also keeps the PowerVR nub un-matched even when
+         * the graphics switch asks for it: 8C148's AppleMBXController
+         * waits on an MBX completion the core only models for 7E18's
+         * driver, and a matched GPU wedges the guest (on a phone
+         * 2026-10-29 the machine stopped at ~240.9M retired instructions
+         * in both CPU engines). The reconcile records the override in
+         * the options report the user sees; rendering stays on the CPU
+         * software path this build's work images are provisioned for,
+         * which is also how the desktop harness boots 8C148.
+         */
+        vm_boot_options_reconcile_ios4_graphics(&report->options,
+                                                &request);
     }
 
     char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
