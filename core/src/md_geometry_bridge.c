@@ -38,6 +38,15 @@ static bool word(const md_bridge_config_t *c, arm_cpu_t *cpu, uint32_t base,
     return true;
 }
 
+/*
+ * The flags word at +12 is the device entry's registration bits as
+ * _mdevadd leaves them: it ORs in bit 0 when its flag argument is zero
+ * and bit 2 when it is nonzero, one bit per call. A boot that registers
+ * through a single call (the xnu-1504 IOFindBSDRoot path) therefore
+ * shows exactly one of the two bits, so either bit proves registration;
+ * requiring both would reject that kernel's only registration. The
+ * token, page count and sector size checks above remain exact.
+ */
 static bool device(const md_geometry_bridge_t *b, arm_cpu_t *cpu, uint32_t *sector) {
     const md_bridge_config_t *c = &b->strategy->config;
     uint32_t lo, hi, pages, flags;
@@ -47,7 +56,7 @@ static bool device(const md_geometry_bridge_t *b, arm_cpu_t *cpu, uint32_t *sect
            word(c, cpu, b->sites.device_va, 12, &flags) &&
            word(c, cpu, b->sites.device_va, 16, sector) &&
            (((uint64_t)hi << 32) | lo) == (c->token_base >> 12) &&
-           pages == (c->media_size >> 12) && (flags & 5u) == 5u && *sector >= 512u;
+           pages == (c->media_size >> 12) && (flags & 5u) != 0u && *sector >= 512u;
 }
 
 arm_svc_result_t md_geometry_bridge_svc(void *context, arm_cpu_t *cpu, uint32_t pc,
