@@ -274,7 +274,7 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     _intro.adjustsFontForContentSizeCategory = YES;
     _intro.textColor = [UIColor secondaryLabelColor];
     _intro.text =
-        @"iPhone OS 3.1.3 for iPhone 3G";
+        @"iPhone OS 3.1.3 or iOS 4.2.1 for iPhone 3G";
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_intro];
     self.tableView.tableHeaderView = header;
@@ -707,7 +707,7 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
                 isRoot ? @"key" : @"key and IV"];
             cell.detailTextLabel.text = [_importer haveKeyForArtefact:which]
                 ? @"set for this session, tap to replace"
-                : @"automatic for iPhone1,2 · 7E18";
+                : @"automatic for iPhone1,2 · 7E18 / 8C148";
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }

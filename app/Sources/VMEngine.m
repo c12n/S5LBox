@@ -2875,7 +2875,7 @@ static void vm_engine_prepare_progress(void *ctx, uint64_t done,
     case VM_FW_BOOT_NEEDS_WORK_IMAGE:
         return @"Firmware imported. Each machine prepares its own writable "
                @"root filesystem the first time you open it, then boots "
-               @"iPhone OS 3.1.3.";
+               @"the imported system.";
     case VM_FW_BOOT_INCOMPLETE:
     default:
         break;

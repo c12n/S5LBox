@@ -27,6 +27,9 @@
 #include "file_block.h"
 #include "ios3_hle.h"
 #include "ios3_kernel_patch.h"
+#include "ios4_kernel_patch.h"
+#include "ios4_sb_ca_plist.h"
+#include "ios4_datamigrator_plist.h"
 #include "VMFirmwareHLE.h"
 #include "macho.h"
 #include "md_bridge.h"
@@ -84,11 +87,14 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #define EXTERNAL_MD_TOKEN_BASE UINT64_C(0xe0000000)
 #define EXTERNAL_MD_MAX_SIZE   UINT64_C(0x80000000)
 #define EXTERNAL_MD_RAW_MAJOR_VA UINT32_C(0xc0216108) /* 7E18 _mdevCMajor */
+#define EXTERNAL_MD_RAW_MAJOR_VA_IOS4 UINT32_C(0x80257318) /* 8C148 _mdevCMajor */
 #define EXTERNAL_MD_RAW_SLOT_COUNT UINT32_C(4)
 #define EXTERNAL_MD_RAW_RESERVE_SIZE \
     (EXTERNAL_MD_RAW_SLOT_COUNT * MD_RAW_BRIDGE_MAX_TRANSFER)
 #define IOS3_ROOTFS_FILE_SIZE  UINT64_C(433274880)
 #define IOS3_DEVICETREE_FILE_SIZE ((size_t)40544u)
+#define IOS4_ROOTFS_FILE_SIZE  UINT64_C(681500672)
+#define IOS4_DEVICETREE_FILE_SIZE ((size_t)42820u)
 #define BOOT_TOKD_ALIGNMENT          UINT64_C(0x4000)
 #define BOOT_MIN_BOOTSTRAP_HEADROOM  UINT64_C(0x11000)
 
@@ -104,6 +110,20 @@ static const uint8_t IOS3_DEVICETREE_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
     0xa2, 0xec, 0xaa, 0x26, 0x26, 0xae, 0x14, 0xc0,
     0x1a, 0x60, 0xd7, 0x77, 0x1d, 0xc5, 0x3f, 0xfe,
     0x6f, 0xd3, 0xa6, 0xaa, 0xc8, 0xb8, 0xba, 0x57
+};
+
+static const uint8_t IOS4_ROOTFS_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
+    0x52, 0x33, 0x44, 0xb9, 0x97, 0x2f, 0xb5, 0x55,
+    0xa6, 0x70, 0x94, 0x84, 0x93, 0xb3, 0xc9, 0x6f,
+    0x34, 0xed, 0x60, 0x16, 0xf2, 0x88, 0x33, 0x66,
+    0x10, 0xc3, 0x87, 0xd0, 0x45, 0x23, 0xa3, 0x58
+};
+
+static const uint8_t IOS4_DEVICETREE_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
+    0x26, 0x19, 0x45, 0x10, 0xca, 0x15, 0x9d, 0x3e,
+    0x01, 0x42, 0xc4, 0xb8, 0x14, 0x99, 0x4b, 0x60,
+    0xce, 0xfa, 0xd6, 0x6f, 0x77, 0xec, 0xe9, 0xa4,
+    0x8f, 0x96, 0xf7, 0xc9, 0xb2, 0xf4, 0xb5, 0x4b
 };
 
 static uint8_t *slurp(const char *path, size_t *len_out) {
@@ -440,6 +460,8 @@ typedef struct {
     bool rtc_patch;
     bool fstab_fixup;
     bool ca_software_render;
+    bool keybag_disable;
+    bool datamigrator_disable;
     /* guest state: persistent changes to the guest or its work image */
     bool activate;
     bool jb_codesign;
@@ -608,6 +630,23 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "un-matches the GPU, and SpringBoard dies in _mbx2DDisable forever.\n"
       "The replacement plist is the same 1490 bytes and must match exactly\n"
       "once, so no HFS+ catalog changes. Requires --external-md." },
+    { "keybag-disable", NULL, NULL, true, BOOT_GROUP_PATCH,
+      BOOT_FIELD(keybag_disable),
+      "iOS 4.2.1 only: rename the keybag daemon's program path inside\n"
+      "its LaunchDaemon plist in this run's work image, so launchd\n"
+      "cannot spawn it. keybagd's first act is loading the system\n"
+      "keybag a restore creates per device; a stock IPSW rootfs has\n"
+      "none, and on 8C148 the daemon answers that with a restore-mode\n"
+      "reboot on every boot. The rewrite is one byte of the same 189\n"
+      "and must match exactly once. Effective only with --external-md\n"
+      "and the 8C148 build; it is on by default there." },
+    { "datamigrator-disable", NULL, NULL, false, BOOT_GROUP_PATCH,
+      BOOT_FIELD(datamigrator_disable),
+      "experiment, iOS 4.2.1 only: rename the data migrator's program\n"
+      "path inside its LaunchDaemon plist in this run's work image,\n"
+      "so launchd cannot spawn it. Tests whether the from-IPSW first\n"
+      "boot migration is what gates the SpringBoard session. Off by\n"
+      "default; effective only with --external-md and 8C148." },
 
     { "activate", NULL, NULL, true, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(activate),
@@ -34062,6 +34101,28 @@ int main(int argc, char **argv) {
     bool        ca_software_render;
 
     /*
+     * --keybag-disable: iOS 4.2.1 only. keybagd loads the system keybag
+     * from /private/var/keybags/systembag.kb, a file a restore creates
+     * per device and a stock IPSW rootfs therefore lacks; its response
+     * to the missing bag is a restore-mode reboot, every boot. The
+     * work-image provisioner renames the daemon's program path by
+     * one byte so launchd cannot spawn it. Effective only under
+     * --external-md with the 8C148 build; --no-keybag-disable restores
+     * the stock (rebooting) behaviour. See keybag_plist_rewrite() in
+     * tools/rootfs_work.c.
+     */
+    bool        keybag_disable;
+
+    /*
+     * --datamigrator-disable (experiment): rename the iOS 4 data
+     * migrator's program path in its job plist so launchd cannot spawn
+     * it. The migrator is the suspected gate between userspace and the
+     * SpringBoard UI on a from-IPSW first boot; see the experiment in
+     * IOS4-REPORT.md.
+     */
+    bool        datamigrator_disable;
+
+    /*
      * --ppp: the guest half of docs/networking.md's Route D, and explicitly a
      * temporary workaround pending real drivers and controllers.
      *
@@ -34809,6 +34870,8 @@ int main(int argc, char **argv) {
     no_kpatch          = !cfg.v.rtc_patch;
     fstab_fixup        = cfg.v.fstab_fixup;
     ca_software_render = cfg.v.ca_software_render;
+    keybag_disable     = cfg.v.keybag_disable;
+    datamigrator_disable = cfg.v.datamigrator_disable;
     ppp                = cfg.v.ppp;
     nat                = cfg.v.nat;
     uart4_rx_irq       = cfg.v.uart4_rx_irq;
@@ -34889,11 +34952,13 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (phys_base != UINT32_C(0x08000000) ||
-            virt_base != UINT32_C(0xc0000000) ||
+            (virt_base != UINT32_C(0xc0000000) &&
+             virt_base != UINT32_C(0x80000000)) ||
             ram_size != (UINT32_C(128) << 20)) {
             fprintf(stderr,
-                    "--external-md requires -p 0x08000000, -V 0xc0000000, "
-                    "and effective -R 128\n");
+                    "--external-md requires -p 0x08000000, -V matching the "
+                    "kernel build (0xc0000000 for 3.1.3, 0x80000000 for "
+                    "4.2.1), and effective -R 128\n");
             return 1;
         }
         if (!external_md_source || !*external_md_source ||
@@ -35479,6 +35544,10 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < m.segment_count; i++) {
         macho_segment_t *s = &m.segments[i];
         if (!s->filesize) continue;
+        if (!s->vmsize) {
+            printf("  skip %-16s vm 0x%08x has no virtual size (not loaded, e.g. __CTF)\n", s->name, s->vmaddr);
+            continue;
+        }
         if (s->vmaddr < virt_base) {
             printf("  skip %-16s vm 0x%08x is below the virtual base\n", s->name, s->vmaddr);
             continue;
@@ -35517,7 +35586,45 @@ int main(int argc, char **argv) {
      *   tv_sec immediate (movs r3,#0x1e -> movs r3,#0) so that any such failure
      *   remains observable without hiding the later boot path.
      */
+    /* Set by the kernel gate below; selects every per-build external-md
+     * constant (device tree, rootfs identity, bridge sites) afterwards. */
+    bool external_ios4 = false;
     if (external_md) {
+        /* Dispatch on the exact file size; the selected gate then binds the
+         * build by SHA-256/UUID/topology, so a wrong guess fails closed. */
+        external_ios4 = len == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE;
+        if (external_ios4) {
+            ios4_kernel_patch_request_t request;
+            ios4_kernel_patch_report_t report;
+            memset(&request, 0, sizeof request);
+            memset(&report, 0, sizeof report);
+            request.kernel_file = img;
+            request.kernel_file_size = len;
+            request.ram = mach.ram;
+            request.ram_size = mach.ram_size;
+            request.ram_base = mach.ram_base;
+            request.virt_base = virt_base;
+
+            ios4_kernel_patch_status_t patch_status =
+                ios4_kernel_patch_apply(&request, &report);
+            if (patch_status != IOS4_KERNEL_PATCH_STATUS_OK) {
+                fprintf(stderr,
+                        "external-md kernel gate: %s; site=%s va=0x%llx "
+                        "pa=0x%llx expected=0x%llx actual=0x%llx\n",
+                        ios4_kernel_patch_status_string(patch_status),
+                        ios4_kernel_patch_site_string(report.site),
+                        (unsigned long long)report.virtual_address,
+                        (unsigned long long)report.physical_address,
+                        (unsigned long long)report.expected_value,
+                        (unsigned long long)report.actual_value);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            printf("kernel gate: exact iOS 4.2.1 kernel accepted; "
+                   "md0 bridge sites installed\n");
+        } else {
         ios3_kernel_patch_request_t request;
         ios3_kernel_patch_report_t report;
         memset(&request, 0, sizeof request);
@@ -35548,6 +35655,7 @@ int main(int argc, char **argv) {
         }
         printf("kernel gate: exact iPhone OS 3.1.3 kernel accepted; "
                "md0 bridge sites installed\n");
+        }
 
         dt = slurp(dtpath, &dt_n);
         if (!dt) {
@@ -35560,13 +35668,17 @@ int main(int argc, char **argv) {
             free(img);
             return 1;
         }
-        if (dt_n != IOS3_DEVICETREE_FILE_SIZE) {
+        const size_t expected_dt_size = external_ios4
+            ? IOS4_DEVICETREE_FILE_SIZE : IOS3_DEVICETREE_FILE_SIZE;
+        const uint8_t *expected_dt_sha256 = external_ios4
+            ? IOS4_DEVICETREE_SHA256 : IOS3_DEVICETREE_SHA256;
+        if (dt_n != expected_dt_size) {
             fprintf(stderr,
                     "external-md device-tree gate: size mismatch for %s "
                     "(got %llu, expected %llu); rootfs work image was not "
                     "created\n",
                     dtpath, (unsigned long long)dt_n,
-                    (unsigned long long)IOS3_DEVICETREE_FILE_SIZE);
+                    (unsigned long long)expected_dt_size);
             free(dt);
             s5l8900_free(&mach);
             ksyms_free(&KS);
@@ -35585,14 +35697,15 @@ int main(int argc, char **argv) {
             free(img);
             return 1;
         }
-        if (memcmp(dt_digest, IOS3_DEVICETREE_SHA256,
+        if (memcmp(dt_digest, expected_dt_sha256,
                    sizeof dt_digest) != 0) {
             fprintf(stderr,
                     "external-md device-tree gate: SHA-256 mismatch for %s\n"
-                    "  expected: "
-                    "4867c95fedf544bda2ecaa2626ae14c01a60d7771dc53ffe6fd3a6aac8b8ba57\n"
-                    "  actual  : ",
+                    "  expected: ",
                     dtpath);
+            for (size_t i = 0; i < sizeof dt_digest; i++)
+                fprintf(stderr, "%02x", expected_dt_sha256[i]);
+            fprintf(stderr, "\n  actual  : ");
             for (size_t i = 0; i < sizeof dt_digest; i++)
                 fprintf(stderr, "%02x", dt_digest[i]);
             fprintf(stderr, "\n  rootfs work image was not created\n");
@@ -35602,7 +35715,8 @@ int main(int argc, char **argv) {
             free(img);
             return 1;
         }
-        printf("device tree: exact iPhone OS 3.1.3 tree accepted (%u bytes)\n",
+        printf("device tree: exact %s tree accepted (%u bytes)\n",
+               external_ios4 ? "iOS 4.2.1" : "iPhone OS 3.1.3",
                (unsigned)dt_n);
 
         rootfs_work_options_t options;
@@ -35613,13 +35727,51 @@ int main(int argc, char **argv) {
          * below reaches the report without ever calling the provisioner. */
         result.ca_plist_offset = UINT64_MAX;
         result.ppp_plist_offset = UINT64_MAX;
+        result.keybag_plist_offset = UINT64_MAX;
         options.fstab_line = fstab_line;
-        options.ca_software_render = ca_software_render;
+        /* The streaming CA stage scans for the 3.1.3 XML job; 8C148's job
+         * is a binary plist and takes the file-rewrite below instead. */
+        options.ca_software_render = ca_software_render && !external_ios4;
+        /* The keybag job exists only on the iOS 4 image; requesting the
+         * rewrite for 3.1.3 would (correctly) refuse at the scan. */
+        options.keybag_job_disable = keybag_disable && external_ios4;
+        /* iOS 4 CA software render: the same CA_ENABLE_MBX2D=0 switch,
+         * delivered as a capacity-preserving catalog file rewrite of the
+         * binary SpringBoard job (1,069 -> 1,071 bytes inside its one
+         * allocated block). See ios4_sb_ca_plist.h. The data-migrator
+         * experiment rides the same array when its toggle is set. */
+        static const rootfs_work_file_rewrite_t ios4_sb_ca_rewrite = {
+            IOS4_SB_PLIST_PATH,
+            IOS4_SB_PLIST_STOCK, sizeof IOS4_SB_PLIST_STOCK,
+            IOS4_SB_PLIST_SOFTWARE_RENDER,
+            sizeof IOS4_SB_PLIST_SOFTWARE_RENDER,
+            0u, 0u, 0644,
+        };
+        static const rootfs_work_file_rewrite_t ios4_dm_rewrite = {
+            IOS4_DATAMIGRATOR_PLIST_PATH,
+            IOS4_DATAMIGRATOR_PLIST_STOCK,
+            sizeof IOS4_DATAMIGRATOR_PLIST_STOCK,
+            IOS4_DATAMIGRATOR_PLIST_DISABLED,
+            sizeof IOS4_DATAMIGRATOR_PLIST_DISABLED,
+            0u, 0u, 0644,
+        };
+        static rootfs_work_file_rewrite_t ios4_rewrites[2];
+        size_t ios4_rewrite_count = 0u;
+        if (external_ios4 && ca_software_render)
+            ios4_rewrites[ios4_rewrite_count++] = ios4_sb_ca_rewrite;
+        if (external_ios4 && datamigrator_disable)
+            ios4_rewrites[ios4_rewrite_count++] = ios4_dm_rewrite;
+        if (ios4_rewrite_count != 0u) {
+            options.file_rewrites = ios4_rewrites;
+            options.file_rewrite_count = ios4_rewrite_count;
+        }
         options.ppp_launchd_job = ppp;
         options.growth_bytes = (uint64_t)rd_grow_mb << 20;
         options.source_identity.required = true;
-        options.source_identity.expected_size = IOS3_ROOTFS_FILE_SIZE;
-        memcpy(options.source_identity.expected_sha256, IOS3_ROOTFS_SHA256,
+        options.source_identity.expected_size = external_ios4
+            ? IOS4_ROOTFS_FILE_SIZE : IOS3_ROOTFS_FILE_SIZE;
+        memcpy(options.source_identity.expected_sha256,
+               external_ios4 ? IOS4_ROOTFS_SHA256 : IOS3_ROOTFS_SHA256,
                sizeof options.source_identity.expected_sha256);
 
         /*
@@ -35980,6 +36132,14 @@ external_md_work_ready:
                    "              software path instead of the MBX2D one this"
                    " machine has no GPU for.)\n",
                    (unsigned long long)result.ca_plist_offset);
+        if (result.file_rewrites_applied != 0u ||
+            result.file_rewrites_satisfied != 0u)
+            printf("CA renderer: com.apple.SpringBoard.plist rewritten"
+                   " in place -> EnvironmentVariables CA_ENABLE_MBX2D=0\n"
+                   "             (binary plist 1069 -> 1071 bytes inside"
+                   " its single allocated block;\n"
+                   "              catalog logicalSize updated, extents"
+                   " unchanged.)\n");
         if (result.ppp_plist_offset != UINT64_MAX)
             printf("ppp        : com.apple.chud.pilotfish.plist @"
                    " image+0x%08llx\n"
@@ -36341,7 +36501,18 @@ external_md_work_ready:
         fprintf(stderr, "layout: a boot-data virtual address exceeds 32 bits\n");
         return 1;
     }
-    uint32_t rd_dt_addr = external_md ? (uint32_t)EXTERNAL_MD_TOKEN_BASE
+    /*
+     * iOS 4.2.1 wrinkle: xnu-1504's IOFindBSDRoot passes the RAMDisk
+     * memory-map word through ml_static_ptovirt before _mdevadd (the extra
+     * call at 0x801d51e4 that 7E18 does not make), so the planted word must
+     * satisfy ptovirt(word) == token base. With phys 0x08000000 / virt
+     * 0x80000000, ptovirt(a) = a + 0x78000000 (mod 2^32), hence
+     * 0x68000000. Measured: planting the token itself made mdevstrategy
+     * read from 0x58000400 = (ptovirt(0xe0000000) truncated) + 0x400.
+     */
+    uint32_t rd_dt_addr = external_md
+                        ? external_ios4 ? UINT32_C(0x68000000)
+                                        : (uint32_t)EXTERNAL_MD_TOKEN_BASE
                         : rd_form == RD_ADDR_PHYS    ? rd_pa
                         : rd_form == RD_ADDR_LITERAL ? rd_literal
                         : (uint32_t)rd_virt64;
@@ -36384,6 +36555,22 @@ external_md_work_ready:
             fprintf(stderr, "external-md: cannot publish exact DRAM geometry\n");
             free(dt);
             return 1;
+        }
+        /* /pram reg: iBoot reserves a persistent-RAM area at the top of
+         * DRAM and fills this in; the shipped cell is {0,0}. That was
+         * survivable on xnu-1357 (3.1.3) but xnu-1504 (iOS 4.2.1) maps the
+         * pram reg unconditionally during PE init and dereferences the
+         * io_map result: with {0,0} it maps VA 0xc0001000 (the io_map bump
+         * allocator's initial value) backed by nothing and faults reading
+         * the 'OOPS' panic-log magic — panic "sleh_abort at interrupt
+         * context" at ~150k instructions. Give it the top 64 KiB of DRAM,
+         * where iBoot puts it. Experiment-grade: the VM still advertises
+         * the full bank via /memory, so this is a boot-progress patch,
+         * not a finished memory reservation. */
+        if (dt_set_reg(dt, dt_n, "pram", "reg",
+                       phys_base + ram_size - 0x10000u, 0x10000u)) {
+            printf("  dt: /pram           reg                    {0x00000000,0x00000000} -> {0x%08x,0x00010000}\n",
+                   phys_base + ram_size - 0x10000u);
         }
         /*
          * /vram reg: iBoot allocates the scanout buffer and writes it here.
@@ -37140,9 +37327,11 @@ external_md_work_ready:
 
         md_bridge_config_t bridge_config;
         memset(&bridge_config, 0, sizeof bridge_config);
-        bridge_config.read_site.pc = IOS3_KERNEL_PATCH_MD_READ_VA;
+        bridge_config.read_site.pc = external_ios4
+            ? IOS4_KERNEL_PATCH_MD_READ_VA : IOS3_KERNEL_PATCH_MD_READ_VA;
         bridge_config.read_site.encoding = UINT32_C(0xdfe1);
-        bridge_config.write_site.pc = IOS3_KERNEL_PATCH_MD_WRITE_VA;
+        bridge_config.write_site.pc = external_ios4
+            ? IOS4_KERNEL_PATCH_MD_WRITE_VA : IOS3_KERNEL_PATCH_MD_WRITE_VA;
         bridge_config.write_site.encoding = UINT32_C(0xdfe2);
         bridge_config.token_base = EXTERNAL_MD_TOKEN_BASE;
         bridge_config.media_size = external_media_size;
@@ -37154,18 +37343,22 @@ external_md_work_ready:
         bridge_config.block = file_block_get(external_block_adapter);
         md_raw_bridge_config_t raw_config;
         memset(&raw_config, 0, sizeof raw_config);
-        raw_config.site.pc = IOS3_KERNEL_PATCH_RAW_WATCHER_VA;
+        raw_config.site.pc = external_ios4
+            ? IOS4_KERNEL_PATCH_RAW_WATCHER_VA
+            : IOS3_KERNEL_PATCH_RAW_WATCHER_VA;
         raw_config.site.encoding = UINT32_C(0xdfe3);
         raw_config.completion_site.pc =
-            IOS3_KERNEL_PATCH_RAW_WATCHER_VA + UINT32_C(2);
+            raw_config.site.pc + UINT32_C(2);
         raw_config.completion_site.encoding = UINT32_C(0xdfe4);
-        raw_config.uiomove_thumb_pc = IOS3_KERNEL_UIOMOVE_VA;
+        raw_config.uiomove_thumb_pc = external_ios4
+            ? IOS4_KERNEL_UIOMOVE_VA : IOS3_KERNEL_UIOMOVE_VA;
         raw_config.bounce_base_pa = raw_bounce_pa;
         raw_config.bounce_stride = MD_RAW_BRIDGE_MAX_TRANSFER;
         raw_config.bounce_slot_count = EXTERNAL_MD_RAW_SLOT_COUNT;
         raw_config.expected_device = 0u;
-        raw_config.expected_device_major_va = EXTERNAL_MD_RAW_MAJOR_VA;
-        raw_config.user_address_limit = UINT32_C(0xc0000000);
+        raw_config.expected_device_major_va = external_ios4
+            ? EXTERNAL_MD_RAW_MAJOR_VA_IOS4 : EXTERNAL_MD_RAW_MAJOR_VA;
+        raw_config.user_address_limit = virt_base;
         raw_config.media_size = external_media_size;
         raw_config.ram_base = UINT64_C(0x08000000);
         raw_config.ram_size = UINT64_C(128) << 20;
@@ -37225,7 +37418,9 @@ external_md_work_ready:
                (unsigned)EXTERNAL_MD_TOKEN_BASE,
                (unsigned long long)(EXTERNAL_MD_TOKEN_BASE +
                                     external_media_size),
-               external_md_work, IOS3_KERNEL_UIOMOVE_VA);
+               external_md_work,
+               external_ios4 ? IOS4_KERNEL_UIOMOVE_VA
+                             : IOS3_KERNEL_UIOMOVE_VA);
     }
 
     /*

@@ -14,6 +14,9 @@
 #include "VMFirmwareAudio.h"
 #include "VMResumeCheckpoint.h"
 #include "ios3_bringup_gate.h"
+#include "ios4_bringup_gate.h"
+#include "ios4_datamigrator_plist.h"
+#include "ios4_sb_ca_plist.h"
 #include "rootfs_work.h"
 
 #include <stdio.h>
@@ -23,6 +26,12 @@
 #include <errno.h>
 #endif
 #include <time.h>
+
+/* The exact stock iOS 4.2.1 (8C148) rootfs size, as the importer verified
+ * it; an imported image of this size takes the 8C148 provisioning stages
+ * in vm_firmware_boot_provision_cancellable(). The desktop bring-up keys
+ * the same dispatch off the same constant. */
+#define VM_FW_BOOT_IOS4_ROOTFS_SIZE UINT64_C(681500672)
 
 static uint64_t vm_firmware_rtc_now(void *ctx) {
     (void)ctx;
@@ -1571,8 +1580,18 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     /* One place decides both which kernel is acceptable and where its
      * memory-disk call sites are, so the bridges can never be armed against a
-     * kernel that was authorized somewhere else. */
-    ios3_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
+     * kernel that was authorized somewhere else. The build is identified by
+     * the exact kernel size the importer verified; the selected gate then
+     * binds the build by SHA-256 and refuses anything else, so the size is a
+     * dispatch hint, never the authorization. iOS 4.2.1's kernel also links
+     * at a different virtual base, which the request must name because the
+     * core's default is the 3.1.3 base. */
+    if (kernel_size == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE) {
+        request.virt_base = IOS4_KERNEL_PATCH_VIRT_BASE;
+        ios4_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
+    } else {
+        ios3_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
+    }
     /*
      * The user's switches, resolved into the request AFTER the fields above so
      * that a switch can never overwrite the media or the gate, and BEFORE
@@ -1952,6 +1971,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
 
     report->ok = true;
+    const char *os_name = kernel_size == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE
+        ? "iOS 4.2.1" : "iPhone OS 3.1.3";
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     (void)snprintf(report->summary, sizeof report->summary,
                    "iPhone OS 3.1.3 + EXPERIMENTAL native raster HLE");
@@ -1985,8 +2006,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        active_clock_work_budget);
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn "
-                       "(%s%s%s%s%s)",
+                       "%s restored at %.1f M insn "
+                       "(%s%s%s%s%s)", os_name,
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
                        compact_window_cache ? ", window-cache experiment" :
                            compact_ram_map ? ", persistent RAM-map experiment" : "",
@@ -1995,8 +2016,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        active_clock_budget_suffix);
     } else if (fresh_boot_after_poweroff) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 fresh boot after powered-off "
-                       "checkpoint (%s%s%s%s%s)", engine_mode,
+                       "%s fresh boot after powered-off "
+                       "checkpoint (%s%s%s%s%s)", os_name, engine_mode,
                        compact_window_cache ? ", window-cache experiment" :
                            compact_ram_map ? ", persistent RAM-map experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
@@ -2004,9 +2025,9 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        active_clock_budget_suffix);
     } else {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 kernel, root on /dev/md0 "
+                       "%s kernel, root on /dev/md0 "
                        "(%s%s%s%s%s)",
-                       engine_mode,
+                       os_name, engine_mode,
                        compact_window_cache ? ", window-cache experiment" :
                            compact_ram_map ? ", persistent RAM-map experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
@@ -2093,6 +2114,51 @@ bool vm_firmware_boot_provision_cancellable(const vm_firmware_boot_paths_t *path
      */
     options.ca_software_render = wanted.ca_software_render;
     options.ppp_launchd_job = wanted.ppp;
+
+    /*
+     * iOS 4.2.1 (8C148) images take their build-specific stages here, the
+     * same set the desktop bring-up applies to this build. The keybag job
+     * is disabled: a stock IPSW carries no system keybag (a real restore
+     * creates one), and keybagd's fatal exit on the missing file loops
+     * the guest back into restore mode before anything else can run. The
+     * data migrator is disabled for the same structural reason: a
+     * from-IPSW image is flagged as a build change with no previous
+     * build to migrate from, the migration never completes under
+     * emulation, and SpringBoard is gated behind it. The CA
+     * software-render switch rides the file-rewrite array instead of
+     * the streaming stage above: that stage scans for 3.1.3's XML job,
+     * while 8C148's SpringBoard job is a binary plist. The descriptors
+     * are static consts, so the array only has to outlive the create
+     * call below, which it does in this frame regardless.
+     */
+    static const rootfs_work_file_rewrite_t ios4_sb_ca_rewrite = {
+        IOS4_SB_PLIST_PATH,
+        IOS4_SB_PLIST_STOCK, sizeof IOS4_SB_PLIST_STOCK,
+        IOS4_SB_PLIST_SOFTWARE_RENDER,
+        sizeof IOS4_SB_PLIST_SOFTWARE_RENDER,
+        0u, 0u, 0644,
+    };
+    static const rootfs_work_file_rewrite_t ios4_dm_rewrite = {
+        IOS4_DATAMIGRATOR_PLIST_PATH,
+        IOS4_DATAMIGRATOR_PLIST_STOCK,
+        sizeof IOS4_DATAMIGRATOR_PLIST_STOCK,
+        IOS4_DATAMIGRATOR_PLIST_DISABLED,
+        sizeof IOS4_DATAMIGRATOR_PLIST_DISABLED,
+        0u, 0u, 0644,
+    };
+    static rootfs_work_file_rewrite_t ios4_rewrites[2];
+    const bool ios4_image =
+        file_size(source_path) == VM_FW_BOOT_IOS4_ROOTFS_SIZE;
+    if (ios4_image) {
+        size_t ios4_rewrite_count = 0u;
+        options.keybag_job_disable = true;
+        options.ca_software_render = false;
+        if (wanted.ca_software_render)
+            ios4_rewrites[ios4_rewrite_count++] = ios4_sb_ca_rewrite;
+        ios4_rewrites[ios4_rewrite_count++] = ios4_dm_rewrite;
+        options.file_rewrites = ios4_rewrites;
+        options.file_rewrite_count = ios4_rewrite_count;
+    }
 
     /*
      * ACTIVATION, which the app used to describe as unimplemented while the

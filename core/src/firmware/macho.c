@@ -72,7 +72,13 @@ macho_status_t macho_parse(const uint8_t *buf, size_t len, macho_t *out) {
             /* The segment's file extent must actually be inside the image. */
             if ((uint64_t)s->fileoff + s->filesize > (uint64_t)len)
                 return MACHO_ERR_MALFORMED;
-            if (s->filesize > s->vmsize) return MACHO_ERR_MALFORMED;
+            /* iOS 4 kernels carry a __CTF segment with vmsize 0 and a real
+             * file extent: it is debug data that is never mapped, so a
+             * zero-vmsize segment may legitimately have filesize > vmsize.
+             * Loaders must skip vmsize-0 segments instead of loading them.
+             * A loadable segment (vmsize > 0) with filesize > vmsize is
+             * still malformed. */
+            if (s->vmsize && s->filesize > s->vmsize) return MACHO_ERR_MALFORMED;
 
             if (s->vmsize) {
                 if (s->vmaddr < out->vm_low) out->vm_low = s->vmaddr;

@@ -97,6 +97,7 @@ void ios3_bringup_gate_configure_with_policy(s5l_bringup_request_t *request,
     request->md_write_site_pc = IOS3_KERNEL_PATCH_MD_WRITE_VA;
     request->md_raw_site_pc = IOS3_KERNEL_PATCH_RAW_WATCHER_VA;
     request->uiomove_pc = IOS3_KERNEL_UIOMOVE_VA;
+    request->md_major_va = UINT32_C(0xc0216108);   /* _mdevCMajor */
     request->md_geometry_sites = (md_geometry_sites_t){0};
     if (request->root_media &&
         request->root_media->size > MD_GEOMETRY_BOOTSTRAP_SIZE) {

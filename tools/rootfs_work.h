@@ -169,6 +169,9 @@ typedef enum rootfs_work_status {
     /* The PPP launchd job, which reuses the CA plist's mechanism exactly. */
     ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE,
     ROOTFS_WORK_PPP_PLIST_INVALID,
+    /* The keybag job disable, which reuses the same mechanism again. */
+    ROOTFS_WORK_KEYBAG_PLIST_NOT_UNIQUE,
+    ROOTFS_WORK_KEYBAG_PLIST_INVALID,
     ROOTFS_WORK_GROW_INVALID,
     /*
      * Catalog provisioning refusals.  Every one of them is decided during the
@@ -231,6 +234,8 @@ typedef enum rootfs_work_stage {
     ROOTFS_WORK_STAGE_CA_PLIST_WRITE,
     ROOTFS_WORK_STAGE_PPP_PLIST_SCAN,
     ROOTFS_WORK_STAGE_PPP_PLIST_WRITE,
+    ROOTFS_WORK_STAGE_KEYBAG_PLIST_SCAN,
+    ROOTFS_WORK_STAGE_KEYBAG_PLIST_WRITE,
     ROOTFS_WORK_STAGE_GROW_PLAN,
     ROOTFS_WORK_STAGE_GROW_WRITE,
     ROOTFS_WORK_STAGE_PROVISION_PLAN,
@@ -420,6 +425,30 @@ typedef struct rootfs_work_options {
      * totalBlocks and the file's single extent are all untouched.
      */
     bool ppp_launchd_job;
+
+    /*
+     * Opt-in, OFF by default: disable the iOS 4 keybag daemon's launchd
+     * job by renaming its program path inside the stock
+     * com.apple.mobile.keybagd.plist (binary plist, 189 bytes), in place.
+     *
+     * WHY. keybagd's first act is loading the system keybag from
+     * /private/var/keybags/systembag.kb. That file is created per device
+     * by the restore process; a stock IPSW rootfs does not contain it
+     * (nor the directory), and this machine performs no restore. On
+     * 8C148 the daemon's response to the missing bag is a console
+     * "FATAL KEYBAG ERROR: kb_load" and a reboot into restore mode, so
+     * the machine can never reach SpringBoard. iPhone OS 3 has no
+     * keybagd and no such stage. The one-byte rename
+     * (/usr/libexec/keybagd -> /usr/libexec/keybagX) leaves the job
+     * registered but unspawnable; launchd logs the failure and moves
+     * on. Data-protection class keys are unavailable in the session,
+     * which is the honest price: there is no keybag to load.
+     *
+     * Same mechanism as ca_software_render above: an exactly-once byte
+     * pattern, overwritten by exactly as many bytes, so logicalSize,
+     * totalBlocks and the file's single extent are all untouched.
+     */
+    bool keybag_job_disable;
 
     /*
      * Same incremental arithmetic as bootkernel's historical --grow
@@ -616,6 +645,8 @@ typedef struct rootfs_work_result {
     uint64_t ca_plist_offset;
     /* UINT64_MAX unless the PPP launchd-job rewrite actually ran. */
     uint64_t ppp_plist_offset;
+    /* UINT64_MAX unless the keybag-job disable rewrite actually ran. */
+    uint64_t keybag_plist_offset;
     /* Catalog provisioning, all zero unless entries were requested. */
     uint32_t provision_entries;
     /* Existing directories or symlinks accepted by an explicit reuse policy. */

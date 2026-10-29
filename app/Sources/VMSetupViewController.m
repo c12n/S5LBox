@@ -272,6 +272,8 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
     _ready = !running && [VMFirmwareImporter hasConfiguredFirmware];
     vm_fw_report_t report;
     BOOL haveReport = [_importer getLastReport:&report];
+    NSString *firmwareName = haveReport && [@(report.build) isEqual:@"8C148"]
+        ? @"iOS 4.2.1" : @"iPhone OS 3.1.3";
     BOOL failed = !running && !_ready && (downloadFailed || (haveReport && !vm_fw_report_is_prepared(&report)));
     self.modalInPresentation = running;
     self.navigationController.modalInPresentation = running;
@@ -281,7 +283,7 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
     _primary.enabled = !running;
     _primary.alpha = running ? 0.55 : 1;
     [_primary setTitle:receiving ? @"Downloading…" : running ? @"Preparing…"
-        : _ready ? @"Start iPhone OS" : downloadFailed ? @"Try again" : @"Download iPhone OS"
+        : _ready ? [NSString stringWithFormat:@"Start %@", firmwareName] : downloadFailed ? @"Try again" : @"Download iPhone OS"
         forState:UIControlStateNormal];
     _chooseAnother.hidden = running || _ready;
     _file.text = _importer.selectedURL.lastPathComponent;
@@ -326,20 +328,42 @@ static NSString *SetupFailureDetail(const vm_fw_report_t *report) {
         _status.text = @"Firmware ready";
         _statusIcon.image = [UIImage systemImageNamed:@"checkmark.circle.fill"];
         _statusIcon.tintColor = UIColor.systemGreenColor;
-        _detail.text = @"iPhone OS 3.1.3 for iPhone 3G";
+        _detail.text = [firmwareName stringByAppendingString:@" for iPhone 3G"];
     } else {
         _status.text = @"Firmware";
         _statusIcon.image = [UIImage systemImageNamed:@"square.and.arrow.down"];
         _statusIcon.tintColor = UIColor.systemBlueColor;
-        _detail.text = @"iPhone OS 3.1.3 for iPhone 3G";
+        _detail.text = @"iPhone OS 3.1.3 or iOS 4.2.1 for iPhone 3G";
     }
 }
 - (void)primaryTapped {
     if (_importer.isRunning || _downloader.running) return;
     if (_ready) { if (self.completion) self.completion(YES); return; }
+    UIAlertController *choose = [UIAlertController
+        alertControllerWithTitle:@"Download firmware"
+        message:@"Both builds are for iPhone 3G. iOS 4.2.1 is the newer system; "
+                @"iPhone OS 3.1.3 is the original target of this app."
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    [choose addAction:[UIAlertAction actionWithTitle:@"iPhone OS 3.1.3"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            (void)action;
+            [self startDownloadForBuild:VMFirmwareDownloadBuildIPhoneOS313];
+        }]];
+    [choose addAction:[UIAlertAction actionWithTitle:@"iOS 4.2.1"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            (void)action;
+            [self startDownloadForBuild:VMFirmwareDownloadBuildIOS421];
+        }]];
+    [choose addAction:[UIAlertAction actionWithTitle:@"Cancel"
+        style:UIAlertActionStyleCancel handler:nil]];
+    choose.popoverPresentationController.sourceView = _primary;
+    choose.popoverPresentationController.sourceRect = _primary.bounds;
+    [self presentViewController:choose animated:YES completion:nil];
+}
+- (void)startDownloadForBuild:(VMFirmwareDownloadBuild)build {
     _manualAttempt = NO;
     _importer.delegate = self;
-    [_downloader start];
+    [_downloader startForBuild:build];
     [self refresh];
 }
 - (void)closeTapped {

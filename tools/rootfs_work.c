@@ -243,6 +243,62 @@ typedef char ca_plist_is_size_neutral[
     (sizeof(CA_PLIST_SOFTWARE_RENDER) == sizeof(CA_PLIST_STOCK)) ? 1 : -1];
 
 /*
+ * /System/Library/LaunchDaemons/com.apple.mobile.keybagd.plist, stock
+ * iOS 4.2.1 (8C148).  Binary plist, 189 bytes, one extent, one allocation
+ * block.  Search pattern, not a template, exactly as above.
+ *
+ * The replacement differs in exactly ONE byte (offset 134): the final
+ * character of the ProgramArguments path, /usr/libexec/keybagd ->
+ * /usr/libexec/keybagX.  The job stays registered, launchd attempts the
+ * spawn, the exec fails, and the boot proceeds -- instead of keybagd
+ * running, finding no /private/var/keybags/systembag.kb (a stock IPSW
+ * rootfs never carries one; a restore creates it per device), printing
+ * "FATAL KEYBAG ERROR: kb_load" and rebooting into restore mode, which
+ * is what an unmodified 8C148 image does on this machine every time.
+ * See rootfs_work_options_t::keybag_job_disable for the full argument.
+ */
+static const uint8_t KEYBAG_PLIST_STOCK[] = {
+    0x62,0x70,0x6c,0x69,0x73,0x74,0x30,0x30,0xd5,0x01,0x02,0x03,
+    0x04,0x05,0x06,0x08,0x0a,0x08,0x07,0x5c,0x4d,0x61,0x63,0x68,
+    0x53,0x65,0x72,0x76,0x69,0x63,0x65,0x73,0x59,0x52,0x75,0x6e,
+    0x41,0x74,0x4c,0x6f,0x61,0x64,0x5f,0x10,0x10,0x50,0x72,0x6f,
+    0x67,0x72,0x61,0x6d,0x41,0x72,0x67,0x75,0x6d,0x65,0x6e,0x74,
+    0x73,0x58,0x4f,0x6e,0x44,0x65,0x6d,0x61,0x6e,0x64,0x55,0x4c,
+    0x61,0x62,0x65,0x6c,0xd1,0x07,0x08,0x5f,0x10,0x18,0x63,0x6f,
+    0x6d,0x2e,0x61,0x70,0x70,0x6c,0x65,0x2e,0x6d,0x6f,0x62,0x69,
+    0x6c,0x65,0x2e,0x6b,0x65,0x79,0x62,0x61,0x67,0x64,0x09,0x09,
+    0xa3,0x0b,0x0c,0x0d,0x5f,0x10,0x14,0x2f,0x75,0x73,0x72,0x2f,
+    0x6c,0x69,0x62,0x65,0x78,0x65,0x63,0x2f,0x6b,0x65,0x79,0x62,
+    0x61,0x67,0x64,0x52,0x2d,0x74,0x52,0x31,0x35,0x09,0x08,0x13,
+    0x20,0x2a,0x3d,0x46,0x4c,0x4f,0x6a,0x6b,0x6c,0x70,0x87,0x8a,
+    0x8d,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x0f,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x8e,
+};
+
+static const uint8_t KEYBAG_PLIST_JOB_DISABLED[] = {
+    0x62,0x70,0x6c,0x69,0x73,0x74,0x30,0x30,0xd5,0x01,0x02,0x03,
+    0x04,0x05,0x06,0x08,0x0a,0x08,0x07,0x5c,0x4d,0x61,0x63,0x68,
+    0x53,0x65,0x72,0x76,0x69,0x63,0x65,0x73,0x59,0x52,0x75,0x6e,
+    0x41,0x74,0x4c,0x6f,0x61,0x64,0x5f,0x10,0x10,0x50,0x72,0x6f,
+    0x67,0x72,0x61,0x6d,0x41,0x72,0x67,0x75,0x6d,0x65,0x6e,0x74,
+    0x73,0x58,0x4f,0x6e,0x44,0x65,0x6d,0x61,0x6e,0x64,0x55,0x4c,
+    0x61,0x62,0x65,0x6c,0xd1,0x07,0x08,0x5f,0x10,0x18,0x63,0x6f,
+    0x6d,0x2e,0x61,0x70,0x70,0x6c,0x65,0x2e,0x6d,0x6f,0x62,0x69,
+    0x6c,0x65,0x2e,0x6b,0x65,0x79,0x62,0x61,0x67,0x64,0x09,0x09,
+    0xa3,0x0b,0x0c,0x0d,0x5f,0x10,0x14,0x2f,0x75,0x73,0x72,0x2f,
+    0x6c,0x69,0x62,0x65,0x78,0x65,0x63,0x2f,0x6b,0x65,0x79,0x62,
+    0x61,0x67,0x58,0x52,0x2d,0x74,0x52,0x31,0x35,0x09,0x08,0x13,
+    0x20,0x2a,0x3d,0x46,0x4c,0x4f,0x6a,0x6b,0x6c,0x70,0x87,0x8a,
+    0x8d,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x0f,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x8e,
+};
+
+typedef char keybag_plist_is_size_neutral[
+    (sizeof(KEYBAG_PLIST_JOB_DISABLED) == sizeof(KEYBAG_PLIST_STOCK)) ? 1 : -1];
+
+/*
  * /System/Library/LaunchDaemons/com.apple.chud.pilotfish.plist, stock iPhone
  * OS 3.1.3 (7E18).  Plain XML, 530 bytes, one extent.  As above, this is the
  * search pattern rather than a template, and the rewrite refuses unless these
@@ -534,6 +590,7 @@ static void result_reset(rootfs_work_result_t *result) {
     result->fstab_offset = UINT64_MAX;
     result->ca_plist_offset = UINT64_MAX;
     result->ppp_plist_offset = UINT64_MAX;
+    result->keybag_plist_offset = UINT64_MAX;
     result->detail[0] = '\0';
 }
 
@@ -581,6 +638,8 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_CA_PLIST_INVALID: return "ca-plist-invalid";
     case ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE: return "ppp-plist-not-unique";
     case ROOTFS_WORK_PPP_PLIST_INVALID: return "ppp-plist-invalid";
+    case ROOTFS_WORK_KEYBAG_PLIST_NOT_UNIQUE: return "keybag-plist-not-unique";
+    case ROOTFS_WORK_KEYBAG_PLIST_INVALID: return "keybag-plist-invalid";
     case ROOTFS_WORK_GROW_INVALID: return "grow-invalid";
     case ROOTFS_WORK_PROVISION_INVALID: return "provision-invalid";
     case ROOTFS_WORK_PROVISION_UNSUPPORTED: return "provision-unsupported";
@@ -624,6 +683,8 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage) {
     case ROOTFS_WORK_STAGE_CA_PLIST_WRITE: return "ca-plist-write";
     case ROOTFS_WORK_STAGE_PPP_PLIST_SCAN: return "ppp-plist-scan";
     case ROOTFS_WORK_STAGE_PPP_PLIST_WRITE: return "ppp-plist-write";
+    case ROOTFS_WORK_STAGE_KEYBAG_PLIST_SCAN: return "keybag-plist-scan";
+    case ROOTFS_WORK_STAGE_KEYBAG_PLIST_WRITE: return "keybag-plist-write";
     case ROOTFS_WORK_STAGE_GROW_PLAN: return "grow-plan";
     case ROOTFS_WORK_STAGE_GROW_WRITE: return "grow-write";
     case ROOTFS_WORK_STAGE_PROVISION_PLAN: return "provision-plan";
@@ -2839,6 +2900,59 @@ static bool ca_plist_rewrite(host_file_t *file, uint64_t file_size,
                        result))
         return false;
     result->ca_plist_offset = hit;
+    return true;
+}
+
+/*
+ * Disable the iOS 4 keybag daemon's job, by the same mechanism as the CA
+ * rewrite above: locate the stock record by content, require exactly one
+ * occurrence, overwrite with exactly as many bytes.  The replacement
+ * differs from stock in a single byte (the program path's last letter),
+ * so the binary plist stays structurally identical and launchd simply
+ * fails to exec a daemon whose only possible outcome on this machine
+ * was a restore-mode reboot.  See KEYBAG_PLIST_STOCK for provenance.
+ *
+ * Only the unpublished temporary work image is touched; the immutable
+ * source is already closed by the time this runs.
+ */
+static bool keybag_plist_rewrite(host_file_t *file, uint64_t file_size,
+                                 uint8_t *buffer, size_t buffer_size,
+                                 rootfs_work_result_t *result) {
+    size_t prefix[sizeof(KEYBAG_PLIST_STOCK)];
+    const size_t pattern_size = sizeof(KEYBAG_PLIST_STOCK);
+    const size_t replacement_size = sizeof(KEYBAG_PLIST_JOB_DISABLED);
+    uint64_t hit = UINT64_MAX;
+    unsigned hits = 0;
+
+    if (replacement_size != pattern_size) {
+        result_fail(result, ROOTFS_WORK_KEYBAG_PLIST_INVALID,
+                    ROOTFS_WORK_STAGE_KEYBAG_PLIST_WRITE, 0,
+                    "keybag plist replacement is %zu bytes, not the stock %zu",
+                    replacement_size, pattern_size);
+        return false;
+    }
+    if (!pattern_scan_unique(file, file_size, KEYBAG_PLIST_STOCK, pattern_size,
+                             prefix, buffer, buffer_size, &hit, &hits,
+                             ROOTFS_WORK_STAGE_KEYBAG_PLIST_SCAN, result))
+        return false;
+    if (hits > 1u) {
+        result_fail(result, ROOTFS_WORK_KEYBAG_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_KEYBAG_PLIST_SCAN, 0,
+                    "stock keybagd launchd plist occurs more than once");
+        return false;
+    }
+    if (hits != 1u) {
+        result_fail(result, ROOTFS_WORK_KEYBAG_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_KEYBAG_PLIST_SCAN, 0,
+                    "stock keybagd launchd plist occurs 0 times; exactly 1 "
+                    "is required");
+        return false;
+    }
+    if (!checked_write(file, file_size, hit, KEYBAG_PLIST_JOB_DISABLED,
+                       replacement_size, ROOTFS_WORK_STAGE_KEYBAG_PLIST_WRITE,
+                       result))
+        return false;
+    result->keybag_plist_offset = hit;
     return true;
 }
 
@@ -10321,6 +10435,15 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     if (selected.ppp_launchd_job &&
         !ppp_plist_rewrite(&temporary, work_size, buffer,
                            selected.io_buffer_bytes, result))
+        goto done;
+    /* Also opt-in and off by default: a stock image keeps a stock keybag
+     * daemon, and on any image that HAS a system keybag this rewrite
+     * would be vandalism.  It exists for images that provably cannot
+     * have one -- an unrestored stock rootfs on a machine with no
+     * restore flow -- where the daemon's only outcome is a reboot. */
+    if (selected.keybag_job_disable &&
+        !keybag_plist_rewrite(&temporary, work_size, buffer,
+                              selected.io_buffer_bytes, result))
         goto done;
     if (!grow_volume(&temporary, &work_size, selected.growth_bytes,
                      selected.minimum_volume_bytes, &copied_volume, buffer,

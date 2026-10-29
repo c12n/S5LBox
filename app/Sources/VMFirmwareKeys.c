@@ -17,7 +17,12 @@ static const public_keys_t catalog[] = {
     { "iPhone1,2", "3.1.3", "7E18", "n82ap", "s5l8900x",
       "d0dfac22c03212f8a75fc9c69fe548b6", "31e711201cf4dcf47be5be2a5b1b87a1",
       "9532919c4b4ff636f0559ff25be64f35", "77cbb8d3e874efa1364cab1bbd38a8fc",
-      "bf5eb72cd65e9c37cf9920707cb6b4f7ecc10b38cfec6b167002ac9fd6a3ab6643e45005" }
+      "bf5eb72cd65e9c37cf9920707cb6b4f7ecc10b38cfec6b167002ac9fd6a3ab6643e45005" },
+    /* Keys:Jasper 8C148 (iPhone1,2), The Apple Wiki (fetched 2026-10-28). */
+    { "iPhone1,2", "4.2.1", "8C148", "n82ap", "s5l8900x",
+      "899504f05b254e543d98fcff61d1dc03", "63e4f6107e33379100b2f3e1cc0fdd94",
+      "1fa64d180acddd10346a70a2edccf494", "34e494314bbc370905c88564b76f3257",
+      "82c9280927224637c77a96a26d22f42f2ca08fa9a798a8d06fbc8202fc83ec7f45dda79e" }
 };
 
 const char *vm_fw_public_keys_source(void) {

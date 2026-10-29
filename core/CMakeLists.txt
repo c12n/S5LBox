@@ -495,7 +495,7 @@ endif()
 add_test(NAME app_firmware_audio_policy COMMAND test_vmfirmwareaudio)
 target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vmfirmwareboot PRIVATE
-    emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)
+    emucore host_ios3_bringup_gate host_ios4_bringup_gate host_file_block host_rootfs_work nethost)
 set_target_properties(test_vmfirmwareboot PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES
@@ -912,7 +912,7 @@ add_executable(test_vminstancepaths
 )
 target_include_directories(test_vminstancepaths PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vminstancepaths PRIVATE
-    emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)
+    emucore host_ios3_bringup_gate host_ios4_bringup_gate host_file_block host_rootfs_work nethost)
 set_target_properties(test_vminstancepaths PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES
@@ -1240,6 +1240,24 @@ else()
         -Wall -Wextra -Werror -pedantic)
 endif()
 
+# The iOS 4.2.1 (8C148) twin of the 7E18 manifest above: same fail-closed
+# shape, audited xnu-1504.58.28 identity, topology and patch sites.
+add_library(host_ios4_kernel_patch STATIC ../tools/ios4_kernel_patch.c)
+target_include_directories(host_ios4_kernel_patch PUBLIC ../tools include)
+target_link_libraries(host_ios4_kernel_patch
+    PUBLIC host_guest_patch host_sha256
+    PRIVATE emucore)
+set_target_properties(host_ios4_kernel_patch PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_ios4_kernel_patch PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_ios4_kernel_patch PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+
 # The gate as a bring-up hook: one adapter, shared by the desktop test below
 # and by the iOS app, so a kernel is authorized by the same code in both.
 add_library(host_ios3_bringup_gate STATIC ../tools/ios3_bringup_gate.c)
@@ -1297,6 +1315,39 @@ else()
         -Wall -Wextra -Werror -pedantic)
 endif()
 add_test(NAME exact_ios3_kernel_patch COMMAND test_ios3_kernel_patch)
+
+# The iOS 4.2.1 bring-up gate adapter, twin of host_ios3_bringup_gate.
+add_library(host_ios4_bringup_gate STATIC ../tools/ios4_bringup_gate.c)
+target_include_directories(host_ios4_bringup_gate PUBLIC ../tools include)
+target_link_libraries(host_ios4_bringup_gate
+    PUBLIC host_ios4_kernel_patch emucore)
+set_target_properties(host_ios4_bringup_gate PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_ios4_bringup_gate PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_ios4_bringup_gate PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+
+# Firmware-backed gate test for 8C148: skips without
+# S5LBOX_TEST_FIRMWARE_DIR_IOS4, like the other firmware-backed cases.
+add_executable(test_ios4_kernel_patch tests/test_ios4_kernel_patch.c)
+target_link_libraries(test_ios4_kernel_patch PRIVATE
+    host_ios4_kernel_patch host_ios3_kernel_patch host_ios4_bringup_gate)
+set_target_properties(test_ios4_kernel_patch PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_ios4_kernel_patch PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_ios4_kernel_patch PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+add_test(NAME exact_ios4_kernel_patch COMMAND test_ios4_kernel_patch)
 
 # Provisioning a writable rootfs image is host filesystem work, not emulated
 # machine behavior.  The implementation is intentionally standalone and uses
@@ -1451,7 +1502,8 @@ add_test(NAME snapshot_store COMMAND test_snapshot_store)
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_audio_capture host_file_block host_guest_patch
-    host_ios3_hle host_ios3_kernel_patch host_mt_drag host_payload_tar
+    host_ios3_hle host_ios3_kernel_patch host_ios4_kernel_patch host_mt_drag
+    host_payload_tar
     host_rootfs_work host_vm_firmware_hle nethost)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the

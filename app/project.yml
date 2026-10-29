@@ -54,7 +54,7 @@ targets:
       # no business in a phone binary.
       - path: ../tools/sha256.c
         group: core
-      # BOOTING APPLE'S KERNEL needs five more of those files, and no more.
+      # BOOTING APPLE'S KERNEL needs seven more of those files, and no more.
       # Each is portable C that already has a host test and is already built by
       # core/CMakeLists.txt, so none of it is first compiled here:
       #
@@ -62,6 +62,9 @@ targets:
       #   ios3_kernel_patch.c  the exact 7E18 identity gate and its five patch
       #                        sites -- host POLICY, deliberately not in the
       #                        portable core (see core/include/md_bridge.h)
+      #   ios4_bringup_gate.c  the 8C148 twin of the gate above
+      #   ios4_kernel_patch.c  the exact 8C148 identity gate and its patch
+      #                        sites, on the same host-policy footing
       #   guest_patch.c        the bounded, all-or-nothing patch transaction
       #   file_block.c         the writable work image as a vm_block_t
       #   rootfs_work.c        makes that work image from the imported rootfs
@@ -71,6 +74,8 @@ targets:
       # 27,000 lines of diagnostics -- which has no business in a phone binary.
       - path: ../tools/ios3_bringup_gate.c
         group: core
+      - path: ../tools/ios4_bringup_gate.c
+        group: core
       # The normal build links the already-tested replacement library but does
       # not arm it. A manual ios-build dispatch with experimental_hle=true adds
       # S5LBOX_IOS3_HLE_EXPERIMENT, and only that candidate installs the exact-
@@ -79,6 +84,8 @@ targets:
       - path: ../tools/ios3_hle.c
         group: core
       - path: ../tools/ios3_kernel_patch.c
+        group: core
+      - path: ../tools/ios4_kernel_patch.c
         group: core
       - path: ../tools/guest_patch.c
         group: core

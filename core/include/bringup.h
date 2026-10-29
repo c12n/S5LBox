@@ -327,6 +327,32 @@ typedef struct {
     bool no_lcd_panel_id;     /* A/B control for the Merlot panel ID      */
     bool no_memory_node;      /* leave /memory reg at the template's zero */
 
+    /* When nonzero, this value -- not the bridge token base -- is what
+     * /chosen/memory-map:RAMDisk publishes as the medium's address.
+     * iOS 4.2.1 needs it: xnu-1504's IOFindBSDRoot passes the word
+     * through ml_static_ptovirt before _mdevadd (xnu-1357 passes it
+     * raw), so the ios4 bring-up gate plants the pre-translation value
+     * whose ptovirt image is exactly the token base. Zero (the 3.1.3
+     * configuration) publishes the token base itself. */
+    uint32_t root_dt_address_override;
+
+    /* The kernel's virtual base: the address its __TEXT segment is linked
+     * at, against which every segment, entry point and gate site is
+     * resolved. Zero selects S5L_BRINGUP_VIRT_BASE (0xc0000000, the
+     * iPhone OS 3.1.3 link base). iOS 4.2.1's kernel links at 0x80000000
+     * instead; the caller that identified the build names it here, and
+     * the exact-identity gate still refuses any kernel whose bytes do
+     * not match the manifest for the base it was handed. */
+    uint32_t virt_base;
+
+    /* The guest VA of the memory-disk major variable (_mdvcmajor /
+     * _mdevCMajor) the raw bridge checks its device against. Zero
+     * selects the iPhone OS 3.1.3 address the core has always used;
+     * a build whose kernel lays that variable out elsewhere (iOS
+     * 4.2.1) names its own, through its bring-up gate like every
+     * other firmware address in this request. */
+    uint32_t md_major_va;
+
     /*
      * iPhone OS 3's two-part code-signing policy input. When true, bring-up
      * sets /chosen/debug-enabled to 1 and appends the three established

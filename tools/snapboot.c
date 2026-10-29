@@ -546,7 +546,7 @@ int main(int argc, char **argv) {
 
     for (unsigned i = 0; i < mo.segment_count; i++) {
         macho_segment_t *s = &mo.segments[i];
-        if (!s->filesize || s->vmaddr < virt_base) continue;
+        if (!s->filesize || !s->vmsize || s->vmaddr < virt_base) continue;
         s5l8900_load(&mach, s->vmaddr - virt_base + phys_base, img + s->fileoff, s->filesize);
     }
 

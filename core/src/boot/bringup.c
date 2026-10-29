@@ -505,7 +505,8 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
                            S5L_BRINGUP_STAGE_ARGUMENTS,
                            "no machine or no request");
 
-    const uint32_t virt_base = S5L_BRINGUP_VIRT_BASE;
+    const uint32_t virt_base = request->virt_base
+        ? request->virt_base : S5L_BRINGUP_VIRT_BASE;
     const uint32_t phys_base = machine->ram_base;
     const uint32_t ram_size  = machine->ram_size;
 
@@ -771,7 +772,9 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
                                (unsigned long long)media_size,
                                (unsigned)S5L_BRINGUP_MD_TOKEN_BASE);
         result->root_media_size = media_size;
-        result->root_dt_address = (uint32_t)S5L_BRINGUP_MD_TOKEN_BASE;
+        result->root_dt_address = request->root_dt_address_override
+            ? request->root_dt_address_override
+            : (uint32_t)S5L_BRINGUP_MD_TOKEN_BASE;
         result->root_dt_size = media_size > MD_GEOMETRY_BOOTSTRAP_SIZE ?
             MD_GEOMETRY_BOOTSTRAP_SIZE : (uint32_t)media_size;
     }
@@ -786,7 +789,7 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
      */
     for (unsigned i = 0; i < image.segment_count; i++) {
         const macho_segment_t *segment = &image.segments[i];
-        if (!segment->filesize) continue;
+        if (!segment->filesize || !segment->vmsize) continue;
         if (segment->vmaddr < virt_base) continue;
         uint64_t segment_pa, segment_end;
         if (!add_u64(phys_base, (uint64_t)segment->vmaddr - virt_base,
@@ -907,6 +910,19 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         result->devicetree_patches++;
     }
 
+    /* /pram reg: iBoot reserves persistent RAM at the top of DRAM and
+     * fills this in; the shipped template carries {0,0}. xnu-1357
+     * tolerates the zero, but xnu-1504 (iOS 4.2.1) maps the pram reg
+     * unconditionally during PE init and dereferences the io_map
+     * result, faulting on the unbacked VA the zero produces. Publish
+     * the top 64 KiB of DRAM, where iBoot puts it, whenever the node
+     * exists; a tree without the node is left alone. The bank is still
+     * advertised in full via /memory, as in bootkernel -- an
+     * experiment-grade reservation, not a finished memory carve-out. */
+    if (dt_set_reg(tree_ram, tree_len, "pram", "reg",
+                   phys_base + ram_size - 0x10000u, 0x10000u))
+        result->devicetree_patches++;
+
     /*
      * /vram reg is the property that decides whether userspace may WRITE to
      * the screen. With it left at {0,0}, IOSurfaceDeviceMemoryRegion::init
@@ -936,6 +952,9 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
      * number verbatim, and mdevstrategy then bcopy()s from (mdBase << 12) as a
      * kernel virtual address. Here that address is the synthetic token the
      * bridge answers for, so the bcopy traps instead of reading DRAM.
+     * (iOS 4.2.1's kernel DOES convert it -- ml_static_ptovirt sits on its
+     * IOFindBSDRoot path -- which is what root_dt_address_override is for:
+     * the published word is chosen so the converted value is the token.)
      */
     if (want_root) {
         if (!dt_memmap_add(tree_ram, tree_len, "RAMDisk",
@@ -1120,8 +1139,9 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         raw.bounce_stride           = MD_RAW_BRIDGE_MAX_TRANSFER;
         raw.bounce_slot_count       = S5L_BRINGUP_MD_RAW_SLOT_COUNT;
         raw.expected_device         = 0u; /* md0 minor; major is guest-owned */
-        raw.expected_device_major_va = S5L_BRINGUP_MD_RAW_MAJOR_VA;
-        raw.user_address_limit      = S5L_BRINGUP_USER_ADDRESS_LIMIT;
+        raw.expected_device_major_va = request->md_major_va
+            ? request->md_major_va : S5L_BRINGUP_MD_RAW_MAJOR_VA;
+        raw.user_address_limit      = virt_base;
         raw.media_size              = media_size;
         raw.ram_base                = machine->ram_base;
         raw.ram_size                = machine->ram_size;

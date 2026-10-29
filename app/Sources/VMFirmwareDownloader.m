@@ -5,9 +5,27 @@
 #include <math.h>
 
 NSNotificationName const VMFirmwareDownloadDidChangeNotification = @"VMFirmwareDownloadDidChangeNotification";
-static NSString *const MetadataURL = @"https://api.ipsw.me/v4/ipsw/iPhone1,2/7E18";
+static NSString *const MetadataURL313 = @"https://api.ipsw.me/v4/ipsw/iPhone1,2/7E18";
+static NSString *const MetadataURL421 = @"https://api.ipsw.me/v4/ipsw/iPhone1,2/8C148";
 static const NSUInteger MetadataLimit = 64 * 1024;
+// Both stock IPSWs fit: 3.1.3 is ~228 MB and 4.2.1 is ~323 MB on the wire
+// (their root filesystems expand well past this once extracted, which is
+// what the free-space headroom at download time accounts for).
 static const uint64_t ArchiveLimit = 512ull * 1024 * 1024;
+
+static NSString *BuildVersion(VMFirmwareDownloadBuild build) {
+    return build == VMFirmwareDownloadBuildIOS421 ? @"4.2.1" : @"3.1.3";
+}
+static NSString *BuildID(VMFirmwareDownloadBuild build) {
+    return build == VMFirmwareDownloadBuildIOS421 ? @"8C148" : @"7E18";
+}
+static NSString *BuildName(VMFirmwareDownloadBuild build) {
+    return build == VMFirmwareDownloadBuildIOS421 ? @"iOS 4.2.1" : @"iPhone OS 3.1.3";
+}
+static NSString *BuildArchiveName(VMFirmwareDownloadBuild build) {
+    return [NSString stringWithFormat:@"iPhone1,2_%@_%@_Restore.ipsw",
+            BuildVersion(build), BuildID(build)];
+}
 
 static NSError *DownloadError(NSString *message) {
     return [NSError errorWithDomain:@"com.j0shua.S5LBox.FirmwareDownload" code:1
@@ -23,12 +41,17 @@ static NSError *DownloadError(NSString *message) {
         [@[@"secure-appldnld.apple.com", @"appldnld.apple.com", @"updates.cdn-apple.com"] containsObject:host ?: @""];
 }
 + (instancetype)metadataFromData:(NSData *)data error:(NSError **)error {
+    return [self metadataFromData:data build:VMFirmwareDownloadBuildIPhoneOS313 error:error];
+}
++ (instancetype)metadataFromData:(NSData *)data build:(VMFirmwareDownloadBuild)build error:(NSError **)error {
     id json = data.length && data.length <= MetadataLimit
         ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
     if (![json isKindOfClass:NSDictionary.class] ||
-        ![json[@"identifier"] isEqual:@"iPhone1,2"] || ![json[@"version"] isEqual:@"3.1.3"] ||
-        ![json[@"buildid"] isEqual:@"7E18"]) {
-        if (error) *error = DownloadError(@"Firmware information is unavailable or doesn’t match iPhone OS 3.1.3. Try again or import an IPSW.");
+        ![json[@"identifier"] isEqual:@"iPhone1,2"] || ![json[@"version"] isEqual:BuildVersion(build)] ||
+        ![json[@"buildid"] isEqual:BuildID(build)]) {
+        if (error) *error = DownloadError([NSString stringWithFormat:
+            @"Firmware information is unavailable or doesn’t match %@. Try again or import an IPSW.",
+            BuildName(build)]);
         return nil;
     }
     NSString *hash = [json[@"sha256sum"] isKindOfClass:NSString.class] ? [json[@"sha256sum"] lowercaseString] : nil;
@@ -54,6 +77,7 @@ static NSError *DownloadError(NSString *message) {
 @property (atomic, readwrite, getter=isRunning) BOOL running;
 @property (atomic, readwrite) BOOL cancellationRequested;
 @property (atomic, readwrite) VMFirmwareDownloadPhase phase;
+@property (atomic, readwrite) VMFirmwareDownloadBuild build;
 @property (atomic, readwrite) double fraction;
 @property (atomic, strong, readwrite, nullable) NSError *error;
 @property (atomic, strong, nullable) NSURL *archiveURL;
@@ -135,8 +159,12 @@ static NSError *DownloadError(NSString *message) {
     return YES;
 }
 - (void)start {
+    [self startForBuild:VMFirmwareDownloadBuildIPhoneOS313];
+}
+- (void)startForBuild:(VMFirmwareDownloadBuild)build {
     NSAssert(NSThread.isMainThread, @"Start firmware downloads on main");
     if (self.running || _importer.isRunning) return;
+    self.build = build;
     self.running = YES; self.cancellationRequested = NO; self.error = nil;
     self.phase = VMFirmwareDownloadResolving; self.fraction = -1;
     [self notify];
@@ -147,7 +175,8 @@ static NSError *DownloadError(NSString *message) {
         self->_metadata = [NSMutableData data];
         self->_descriptor = nil; self->_received = 0;
         self->_session = [NSURLSession sessionWithConfiguration:self->_configuration delegate:self delegateQueue:self->_queue];
-        [self requestURL:[NSURL URLWithString:MetadataURL]];
+        [self requestURL:[NSURL URLWithString:self.build == VMFirmwareDownloadBuildIOS421
+            ? MetadataURL421 : MetadataURL313]];
     }];
 }
 - (void)requestURL:(NSURL *)url {
@@ -252,19 +281,27 @@ static NSError *DownloadError(NSString *message) {
         [self finish:DownloadError([NSString stringWithFormat:@"Download interrupted. %@ Try again or import an IPSW.", error.localizedDescription]) cancelled:NO]; return;
     }
     if (self.phase == VMFirmwareDownloadResolving) {
-        _descriptor = [VMFirmwareDownloadMetadata metadataFromData:_metadata error:&error];
+        _descriptor = [VMFirmwareDownloadMetadata metadataFromData:_metadata build:self.build error:&error];
         _metadata = nil;
         if (!_descriptor) { [self finish:error cancelled:NO]; return; }
         NSNumber *available = nil;
         [_cache getResourceValue:&available forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:NULL];
-        if (available && available.unsignedLongLongValue < _descriptor.size + 700ull * 1024 * 1024) {
-            [self finish:DownloadError(@"Free up at least 1 GB of storage, then try again.") cancelled:NO]; return;
+        // Extraction headroom past the archive itself: the 4.2.1 root
+        // filesystem expands to ~650 MB where 3.1.3's is ~415 MB, and a
+        // machine's writable copy is made from the extraction.
+        uint64_t headroom = self.build == VMFirmwareDownloadBuildIOS421
+            ? 1400ull * 1024 * 1024 : 700ull * 1024 * 1024;
+        if (available && available.unsignedLongLongValue < _descriptor.size + headroom) {
+            unsigned long long needGB =
+                (_descriptor.size + headroom + 1024ull * 1024 * 1024 - 1) / (1024ull * 1024 * 1024);
+            [self finish:DownloadError([NSString stringWithFormat:
+                @"Free up at least %llu GB of storage, then try again.", needGB]) cancelled:NO]; return;
         }
         _attempt = [_cache URLByAppendingPathComponent:[@"attempt-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
         if (![NSFileManager.defaultManager createDirectoryAtURL:_attempt withIntermediateDirectories:NO attributes:nil error:&error]) {
             _attempt = nil; [self finish:error cancelled:NO]; return;
         }
-        self.archiveURL = [_attempt URLByAppendingPathComponent:@"iPhone1,2_3.1.3_7E18_Restore.ipsw"];
+        self.archiveURL = [_attempt URLByAppendingPathComponent:BuildArchiveName(self.build)];
         _output = [NSOutputStream outputStreamWithURL:self.archiveURL append:NO];
         [_output open];
         if (_output.streamStatus != NSStreamStatusOpen || !ios3_sha256_init(&_digest)) {

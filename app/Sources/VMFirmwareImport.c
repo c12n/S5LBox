@@ -116,7 +116,7 @@ const char *vm_fw_strerror(vm_fw_status_t st) {
         case VM_FW_ERR_NO_ROOT_PARTITION:    return "the disk image contains no Apple_HFSX partition";
         case VM_FW_ERR_OUTPUT_REFUSED:       return "the destination would not accept the result";
         case VM_FW_ERR_SCRATCH_REFUSED:      return "there is nowhere to put the temporary copy this needs";
-        case VM_FW_ERR_UNSUPPORTED_BUILD:    return "Choose iPhone OS 3.1.3 (7E18) for iPhone 3G (iPhone1,2).";
+        case VM_FW_ERR_UNSUPPORTED_BUILD:    return "Choose iPhone OS 3.1.3 (7E18) or iOS 4.2.1 (8C148) for iPhone 3G (iPhone1,2).";
         case VM_FW_ERR_VERIFICATION:         return "Firmware verification failed. Choose an unmodified IPSW and try again.";
         default:                             return "unknown import error";
     }
@@ -227,7 +227,7 @@ vm_fw_status_t vm_fw_keys_set_root(vm_fw_keys_t *keys, const char *key_hex) {
 /* Known-good references                                                     */
 /* ------------------------------------------------------------------------ */
 /*
- * The only build this project has ever verified end to end. Hashes are of the
+ * The builds this project has verified end to end. Hashes are of the
  * FINAL artefacts, not of any IPSW member, so they identify what the emulator
  * accepts rather than what Apple shipped -- and they contain no Apple data.
  *
@@ -259,6 +259,26 @@ static const vm_fw_reference_t k_references[] = {
             { 0xc3,0x25,0x1e,0x7f,0x09,0x2c,0x93,0x9d,0x58,0x18,0xe9,0x20,
               0x86,0xcb,0x47,0x68,0x09,0x81,0xcf,0xb0,0x37,0x31,0xde,0x7b,
               0x55,0xd2,0x38,0xc9,0x42,0xeb,0x5e,0x82 }
+        }
+    },
+    {
+        /* Verified end to end on the desktop harness 2026-10-28: kernel
+         * boots via --external-md to launchd (see IOS4 work notes). */
+        "iPhone1,2", "8C148",
+        { 8343552u, 42820u, 681500672u },
+        {
+            /* kernel.macho */
+            { 0x92,0x03,0xb4,0x34,0xe7,0xc4,0xa1,0x84,0xe7,0xee,0x4f,0xe4,
+              0x7c,0x85,0x45,0x1c,0x13,0x0e,0xa5,0xc1,0x7d,0xe1,0xd0,0x5b,
+              0x55,0x7f,0xcb,0x27,0xe7,0x60,0x54,0x89 },
+            /* devicetree.bin */
+            { 0x26,0x19,0x45,0x10,0xca,0x15,0x9d,0x3e,0x01,0x42,0xc4,0xb8,
+              0x14,0x99,0x4b,0x60,0xce,0xfa,0xd6,0x6f,0x77,0xec,0xe9,0xa4,
+              0x8f,0x96,0xf7,0xc9,0xb2,0xf4,0xb5,0x4b },
+            /* rootfs.img */
+            { 0x52,0x33,0x44,0xb9,0x97,0x2f,0xb5,0x55,0xa6,0x70,0x94,0x84,
+              0x93,0xb3,0xc9,0x6f,0x34,0xed,0x60,0x16,0xf2,0x88,0x33,0x66,
+              0x10,0xc3,0x87,0xd0,0x45,0x23,0xa3,0x58 }
         }
     }
 };

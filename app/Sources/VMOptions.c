@@ -165,6 +165,15 @@ static const vm_option_omission_t VM_OMITTED[] = {
     { "uart4-rx-irq",
       "a control for one bisection of the uart4 receive path, and it only "
       "means anything alongside --ppp, which this app does not offer" },
+    { "keybag-disable",
+      "host-side work-image provisioning for the iOS 4.2.1 external-md "
+      "bring-up (the restore-created system keybag a stock IPSW lacks); "
+      "the app drives the standard 3.1.3 bring-up, which has no keybagd "
+      "job to disable" },
+    { "datamigrator-disable",
+      "a bootkernel experiment toggle for the iOS 4 first-boot session "
+      "investigation; disabling a system daemon is a diagnostic step, "
+      "not a phone boot setting" },
 };
 
 #define VM_OMITTED_COUNT \
