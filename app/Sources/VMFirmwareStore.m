@@ -30,8 +30,14 @@ static NSString *selectedGeneration(NSString *root) {
     NSArray<NSString *> *names = @[@"kernel.macho", @"devicetree.bin", @"rootfs.img"];
     const uint64_t stock[] = {7942144, 40544, 433274880};
     for (NSUInteger i = 0; i < names.count; i++) {
+        /* A recorded policy is written by an import that already verified the
+         * artefacts it produced (against its own build's stock catalogue, or
+         * with checksums explicitly skipped), so its sizes are the authority
+         * for this generation — including builds whose stock sizes differ
+         * from 7E18's, such as iOS 4.2.1 (8C148). Only a directory with no
+         * recorded policy (a legacy, manually prepared install) is held to
+         * the stock 7E18 sizes. */
         uint64_t size = recorded ? policy.sizes[i] : stock[i];
-        if (!policy.skip_stock_checksums && size != stock[i]) return NO;
         NSDictionary *info = [NSFileManager.defaultManager attributesOfItemAtPath:
             [directory stringByAppendingPathComponent:names[i]] error:NULL];
         if (![info[NSFileType] isEqual:NSFileTypeRegular] ||

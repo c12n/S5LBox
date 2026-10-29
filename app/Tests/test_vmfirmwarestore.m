@@ -197,8 +197,26 @@ int main(int argc, const char *argv[]) {
         active = [VMFirmwareStore activeDirectoryInRoot:testRoot];
         policy.skip_stock_checksums = false;
         assert(vm_fw_policy_write(active.fileSystemRepresentation, &policy));
-        assert(![VMFirmwareStore hasPreparedFilesInDirectory:active]); // Non-stock sizes require explicit policy.
+        assert([VMFirmwareStore hasPreparedFilesInDirectory:active]); // A recorded policy's sizes stand on their own: the import already verified what it produced.
+        policy.sizes[0] = 513;
+        assert(vm_fw_policy_write(active.fileSystemRepresentation, &policy));
+        assert(![VMFirmwareStore hasPreparedFilesInDirectory:active]); // Files that diverge from their recorded policy are incomplete.
         assert(!prepared.canChangeChecksumVerification); // A damaged set does not unlock the switch.
+        // A catalogue-verified stock import of another build (iOS 4.2.1, 8C148)
+        // publishes with checksum verification on: its recorded sizes are not 7E18's.
+        NSString *ios4 = [VMFirmwareStore createStagingDirectoryInRoot:testRoot error:NULL];
+        assert(ios4);
+        NSDictionary *ios4Sizes = @{@"kernel.macho": @8343552, @"devicetree.bin": @42820, @"rootfs.img": @681500672};
+        for (NSString *name in ios4Sizes) {
+            NSString *file = [ios4 stringByAppendingPathComponent:name];
+            int fd = open(file.fileSystemRepresentation, O_RDWR | O_CREAT | O_EXCL, 0600);
+            assert(fd >= 0 && ftruncate(fd, [ios4Sizes[name] longLongValue]) == 0);
+            assert(close(fd) == 0);
+        }
+        vm_fw_policy_t ios4Policy = {false, {8343552, 42820, 681500672}};
+        assert(vm_fw_policy_write(ios4.fileSystemRepresentation, &ios4Policy));
+        assert([VMFirmwareStore publishDirectory:ios4 inRoot:testRoot error:NULL]);
+        assert([[VMFirmwareStore activeDirectoryInRoot:testRoot] isEqual:ios4]);
         testRoot = fixtureRoot;
         assert([fm removeItemAtPath:testRoot error:NULL]); // Only this test's UUID root.
         puts("firmware store: publication, rollback, legacy paths, cancellation and retained importer state passed");
