@@ -108,17 +108,44 @@ jobs:
               sys.exit("no iOS 26 simulator runtime on this image")
           rt = sorted(ios26, key=lambda r: r["name"])[-1]
           types = j(["xcrun", "simctl", "list", "-j", "devicetypes"])["devicetypes"]
-          phones = sorted((t for t in types if t["name"].startswith("iPhone")),
-                          key=lambda t: t["name"])
-          dt = phones[-1]
+          import re
+          def rank(t):
+              m = re.match(r"iPhone (\d+)", t["name"])
+              if m:
+                  num = int(m.group(1))
+              elif "SE (3rd" in t["name"]:
+                  num = 13
+              else:
+                  return None  # X/XS/XR and older: not supported by iOS 26
+              tier = 3 if "Pro Max" in t["name"] else \
+                     2 if "Pro" in t["name"] else \
+                     1 if "Plus" in t["name"] else 0
+              return (num, tier)
+          phones = [(rank(t), t) for t in types
+                    if t["name"].startswith("iPhone")]
+          phones = sorted((p for p in phones if p[0] is not None),
+                          key=lambda p: p[0], reverse=True)
+          if not phones:
+              sys.exit("no iOS 26-compatible iPhone device type found")
           print("runtime:", rt["name"], rt["identifier"])
-          print("device :", dt["name"], dt["identifier"])
+          for r, t in phones:
+              print("candidate:", t["name"], t["identifier"])
           with open("simrun/sim.env", "w") as f:
               f.write("RUNTIME_ID=%s\n" % rt["identifier"])
-              f.write("DEVICE_TYPE=%s\n" % dt["identifier"])
+          with open("simrun/devices.txt", "w") as f:
+              for r, t in phones:
+                  f.write(t["identifier"] + "\n")
           PY
           source simrun/sim.env
-          UDID=$(xcrun simctl create S5LBoxSim "$DEVICE_TYPE" "$RUNTIME_ID")
+          UDID=""
+          while read -r dtype; do
+            if UDID=$(xcrun simctl create S5LBoxSim "$dtype" "$RUNTIME_ID" 2>/dev/null); then
+              echo "created with device type $dtype"
+              break
+            fi
+            UDID=""
+          done < simrun/devices.txt
+          test -n "$UDID"
           echo "UDID=$UDID"
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID"
