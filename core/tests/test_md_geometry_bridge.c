@@ -142,6 +142,28 @@ static void test_sizes(void) {
         }
     }
 }
+static void test_register_1504_arrangement(void) {
+    /* xnu-1504 (iOS 4.2.1) reaches the register site with r0 holding the
+     * token virtual address (its ml_static_ptovirt result), r1 a
+     * caller-saved leftover, r2 the bootstrap byte size and r3 = 1. The
+     * op must accept that arrangement and still expand r2 to the full
+     * media page count, and must keep rejecting a wrong size or flag. */
+    setup(MD_GEOMETRY_MAX_SIZE);
+    cpu.r[0] = 0xe0000000u;
+    cpu.r[1] = 0x80221070u;
+    cpu.r[2] = 0x80000000u;
+    cpu.r[3] = 1;
+    CHECK(svc(0x200, 0xdfe5) == ARM_SVC_HANDLED);
+    CHECK(cpu.r[2] == MD_GEOMETRY_MAX_SIZE / 4096);
+    cpu.r[0] = 0xe0000000u;
+    cpu.r[2] = 0x80000000u;
+    cpu.r[3] = 0;
+    CHECK(svc(0x200, 0xdfe5) == ARM_SVC_ERROR);
+    cpu.r[0] = 0xe0000000u;
+    cpu.r[2] = 0x40000000u;
+    cpu.r[3] = 1;
+    CHECK(svc(0x200, 0xdfe5) == ARM_SVC_ERROR);
+}
 static void unchanged_failure(uint32_t pc, uint32_t op, arm_svc_result_t result) {
     arm_cpu_t before = cpu;
     uint8_t previous[sizeof ram];
@@ -246,6 +268,7 @@ static void test_interpreter_and_io(void) {
 }
 int main(void) {
     test_sizes();
+    test_register_1504_arrangement();
     test_rejections();
     test_interpreter_and_io();
     printf("md geometry: %u checks, %u failures\n", checks, failures);

@@ -80,7 +80,28 @@ arm_svc_result_t md_geometry_bridge_svc(void *context, arm_cpu_t *cpu, uint32_t 
         uint32_t bootstrap = c->media_size > MD_GEOMETRY_BOOTSTRAP_SIZE
                                  ? MD_GEOMETRY_BOOTSTRAP_SIZE
                                  : (uint32_t)c->media_size;
-        if (cpu->r[0] != 1u || cpu->r[1] != (c->token_base >> 12) ||
+        /*
+         * Two kernel generations reach this site with different register
+         * arrangements, and both are exact:
+         *
+         * - xnu-1506 (iPhone OS 3.1.3): r0 = 1, r1 = token_base >> 12,
+         *   with the size shift still to run on r2.
+         * - xnu-1504 (iOS 4.2.1): IOFindBSDRoot converts the memory-map
+         *   address with ml_static_ptovirt on its way to _mdevadd, so r0
+         *   carries the token virtual address itself, r1 is a caller-saved
+         *   leftover (a property-name pointer) that the next instruction
+         *   overwrites from r0, and r2 still holds the byte size. The
+         *   caller's following instructions derive the page numbers from
+         *   r0 and from the r2 this op returns, exactly as on 3.1.3.
+         *
+         * The site address and encoding come from the gate and already pin
+         * the call site; r2 (bootstrap byte size) and r3 (the caller's
+         * registration flag) authenticate the call in both arrangements.
+         */
+        bool arranged_1506 = cpu->r[0] == 1u &&
+                             cpu->r[1] == (c->token_base >> 12);
+        bool arranged_1504 = cpu->r[0] == (uint32_t)c->token_base;
+        if ((!arranged_1506 && !arranged_1504) ||
             cpu->r[2] != bootstrap || cpu->r[3] != 1u)
             return ARM_SVC_ERROR;
         cpu->r[2] = (uint32_t)(c->media_size >> 12);
