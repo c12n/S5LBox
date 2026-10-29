@@ -1,0 +1,228 @@
+name: ios-sim-bisect
+
+# Experiment: run the app in an iOS 26 Simulator on the runner, with a
+# pre-seeded iOS 4.2.1 (8C148) CPU-software machine, using the app's own
+# documented automation launch argument
+# (--s5lbox-automation-open-first-machine, PrepareAndReopen mode: the first
+# machine is opened through the normal path, the root filesystem is
+# provisioned, and the machine is reopened so the firmware boots unattended).
+# Screenshots and the app's log stream are uploaded as artifacts so the
+# guest's display behaviour in the simulator can be compared with a physical
+# device. Triggered by pushing this file or manually; not a release path.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ios4-421-support]
+    paths:
+      - '.github/workflows/ios-sim-bisect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sim-run:
+    name: iOS 26 Simulator guest run (8C148, CPU software, v3 tree)
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # The experiment tree: the v3 build (the one release whose 4.2.1 guest
+      # rendered on a physical device), checked out beside the workflow.
+      - uses: actions/checkout@v4
+        with:
+          ref: ios4-421-v3
+          path: src
+
+      - name: Select newest installed Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Install XcodeGen (pinned)
+        run: |
+          set -euo pipefail
+          XCODEGEN_VERSION=2.46.0
+          curl -fsSL -o /tmp/xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+          sudo /tmp/xcodegen/xcodegen/install.sh
+          xcodegen --version
+
+      - name: Download iOS 4.2.1 (8C148) IPSW
+        run: |
+          set -euo pipefail
+          mkdir -p simrun
+          python3 - <<'PY'
+          import json, urllib.request
+          with urllib.request.urlopen(
+                  "https://api.ipsw.me/v4/ipsw/iPhone1,2/8C148") as r:
+              d = json.load(r)
+          print("ipsw url:", d["url"])
+          open("simrun/ipsw-url.txt", "w").write(d["url"])
+          PY
+          curl -fL --retry 3 -o simrun/iPhone1,2_4.2.1_8C148_Restore.ipsw \
+            "$(cat simrun/ipsw-url.txt)"
+          ls -lh simrun/
+
+      - name: Build host fwimport and import the firmware set
+        run: |
+          set -euo pipefail
+          cmake -S src -B hostbuild -DCMAKE_BUILD_TYPE=Release > simrun/cmake.log 2>&1 || { tail -100 simrun/cmake.log; exit 1; }
+          cmake --build hostbuild --target fwimport --parallel 3 >> simrun/cmake.log 2>&1 || { tail -100 simrun/cmake.log; exit 1; }
+          mkdir -p simrun/fw421imp
+          hostbuild/core/fwimport simrun/iPhone1,2_4.2.1_8C148_Restore.ipsw \
+            --auto --out simrun/fw421imp
+          ls -lh simrun/fw421imp
+
+      - name: Build the app for the iOS Simulator
+        working-directory: src/app
+        run: |
+          set -euo pipefail
+          mkdir -p Generated
+          python3 ../tools/gen_a64_static.py \
+            Generated/a64_static_handlers.S
+          test -s Generated/a64_static_handlers.S
+          xcodegen generate
+          xcodebuild \
+            -project S5LBox.xcodeproj \
+            -target S5LBox \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -arch arm64 \
+            CONFIGURATION_BUILD_DIR="$PWD/dist-sim" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          test -d "$PWD/dist-sim/S5LBox.app"
+
+      - name: Create and boot an iOS 26 simulator
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, subprocess, sys
+          def j(args):
+              return json.loads(subprocess.check_output(args))
+          runtimes = j(["xcrun", "simctl", "list", "-j", "runtimes"])["runtimes"]
+          ios26 = [r for r in runtimes
+                   if r.get("isAvailable") and r["name"].startswith("iOS 26")]
+          if not ios26:
+              print("available runtimes:", file=sys.stderr)
+              for r in runtimes:
+                  print(" ", r["name"], r.get("isAvailable"), file=sys.stderr)
+              sys.exit("no iOS 26 simulator runtime on this image")
+          rt = sorted(ios26, key=lambda r: r["name"])[-1]
+          types = j(["xcrun", "simctl", "list", "-j", "devicetypes"])["devicetypes"]
+          import re
+          def rank(t):
+              m = re.match(r"iPhone (\d+)", t["name"])
+              if m:
+                  num = int(m.group(1))
+              elif "SE (3rd" in t["name"]:
+                  num = 13
+              else:
+                  return None  # X/XS/XR and older: not supported by iOS 26
+              tier = 3 if "Pro Max" in t["name"] else \
+                     2 if "Pro" in t["name"] else \
+                     1 if "Plus" in t["name"] else 0
+              return (num, tier)
+          phones = [(rank(t), t) for t in types
+                    if t["name"].startswith("iPhone")]
+          phones = sorted((p for p in phones if p[0] is not None),
+                          key=lambda p: p[0], reverse=True)
+          if not phones:
+              sys.exit("no iOS 26-compatible iPhone device type found")
+          print("runtime:", rt["name"], rt["identifier"])
+          for r, t in phones:
+              print("candidate:", t["name"], t["identifier"])
+          with open("simrun/sim.env", "w") as f:
+              f.write("RUNTIME_ID=%s\n" % rt["identifier"])
+          with open("simrun/devices.txt", "w") as f:
+              for r, t in phones:
+                  f.write(t["identifier"] + "\n")
+          PY
+          source simrun/sim.env
+          UDID=""
+          while read -r dtype; do
+            if UDID=$(xcrun simctl create S5LBoxSim "$dtype" "$RUNTIME_ID" 2>/dev/null); then
+              echo "created with device type $dtype"
+              break
+            fi
+            UDID=""
+          done < simrun/devices.txt
+          test -n "$UDID"
+          echo "UDID=$UDID"
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Install the app and seed the 4.2.1 CPU-software machine
+        run: |
+          set -euo pipefail
+          xcrun simctl install "$UDID" src/app/dist-sim/S5LBox.app
+          DATA=$(xcrun simctl get_app_container "$UDID" com.j0shua.S5LBox data)
+          echo "data container: $DATA"
+          GEN="prepared-5EED421C-0000-4000-8000-000000000001"
+          mkdir -p "$DATA/Documents/firmware/$GEN" \
+                   "$DATA/Documents/Machines/5eed421c00000001"
+          cp simrun/fw421imp/kernel.macho simrun/fw421imp/devicetree.bin \
+             simrun/fw421imp/rootfs.img "$DATA/Documents/firmware/$GEN/"
+          printf '%s' "$GEN" > "$DATA/Documents/firmware/current-firmware.txt"
+          printf 'ios3vm-instances 1\n5eed421c00000001 %s 0 0 0000cff0 iOS 4.2.1 CPU software\n' \
+            "$(date +%s)" > "$DATA/Documents/Machines/machines.txt"
+          printf 's5lbox-machine-graphics 1\nmbx 0\nca-software-render 1\n' \
+            > "$DATA/Documents/Machines/5eed421c00000001/.graphics-v1"
+          python3 - "$DATA/Documents/firmware/$GEN/import-policy-v1" <<'PY'
+          import struct, sys
+          sizes = (8343552, 42820, 681500672)
+          b = bytearray(48)
+          b[0:15] = b"S5LBoxFWPolicy1"
+          b[16] = 0
+          for i, s in enumerate(sizes):
+              struct.pack_into("<Q", b, 24 + i * 8, s)
+          open(sys.argv[1], "wb").write(bytes(b))
+          PY
+          find "$DATA/Documents" -type f -exec ls -lh {} \;
+
+      - name: Launch with the automation argument and watch
+        run: |
+          set -euo pipefail
+          mkdir -p shots
+          (xcrun simctl spawn "$UDID" log stream --style compact \
+             --predicate 'process == "S5LBox"' > simrun/simlog.txt 2>&1 &)
+          # Pre-grant the microphone so the first-launch TCC alert cannot
+          # cover the emulator view for the whole watch (run #3's confounder).
+          xcrun simctl privacy "$UDID" grant microphone com.j0shua.S5LBox || true
+          xcrun simctl launch "$UDID" com.j0shua.S5LBox \
+            --s5lbox-automation-open-first-machine
+          sleep 10
+          for i in $(seq 0 17); do
+            xcrun simctl io "$UDID" screenshot \
+              "shots/shot-$(printf %03d $i).png" || true
+            sleep 60
+          done
+          xcrun simctl io "$UDID" screenshot shots/shot-final.png || true
+          xcrun simctl terminate "$UDID" com.j0shua.S5LBox || true
+          sleep 2
+          pkill -f "log stream" || true
+          xcrun simctl spawn "$UDID" log show --last 45m --style compact \
+            --predicate 'process == "S5LBox"' > simrun/logshow.txt 2>&1 || true
+          DATA=$(xcrun simctl get_app_container "$UDID" com.j0shua.S5LBox data)
+          find "$DATA/Documents" -type f -exec ls -lh {} \; \
+            > simrun/container.txt || true
+          xcrun simctl shutdown "$UDID" || true
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-sim-bisect
+          path: |
+            shots/
+            simrun/simlog.txt
+            simrun/logshow.txt
+            simrun/container.txt
+            simrun/cmake.log
+          if-no-files-found: warn
