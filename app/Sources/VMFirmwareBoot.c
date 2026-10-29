@@ -1589,6 +1589,32 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     if (kernel_size == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE) {
         request.virt_base = IOS4_KERNEL_PATCH_VIRT_BASE;
         ios4_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        /*
+         * The compact engine is validated against 7E18's code, not this
+         * guest's. On a phone on 2026-10-29 it ran 4.2.1 for 240.9M
+         * instructions and then requested a halt mid-function in ordinary
+         * kernel code (terminal status 2 at pc 0x801d51ec, SVC/Thumb),
+         * stopping a machine the user was actively using. The interpreter
+         * runs this exact guest for billions of instructions in the harness
+         * without a terminal status, so 8C148 machines use it — the same
+         * selection the engine.interpreter marker makes, applied by build
+         * instead of by file. forced_interpreter is set so the powered-off
+         * checkpoint path reapplies the same control after its reset.
+         */
+        if (!s5l8900_static_a64_set_enabled(machine, false)) {
+            free(kernel);
+            free(tree);
+            (void)file_block_close(boot->media);
+            set_detail(report->detail, sizeof report->detail,
+                       "The interpreter selection for iOS 4.2.1 could not "
+                       "disable the compact engine.");
+            set_detail(report->summary, sizeof report->summary,
+                       "interpreter selection unavailable");
+            return false;
+        }
+        forced_interpreter = true;
+#endif
     } else {
         ios3_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
     }
