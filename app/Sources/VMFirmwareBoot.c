@@ -1629,18 +1629,21 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                 report->options.unmatch[i] = "arm-io/usb-complex";
         }
         /*
-         * The graphics switch is NOT reconciled for this build. An
-         * earlier build forced the PowerVR nub un-matched on the theory
-         * that 8C148's AppleMBXController wedged the guest polling an
-         * MBX status bit (seen only in the desktop harness, at the same
-         * ~240.9M retired count as the phone's halt). The phone halt was
-         * proven to be the memory-disk registration rejection instead,
-         * and with the GPU hidden the phone's fully booted guest never
-         * presented a frame (0 fps at 1.7B instructions, 2026-10-29) —
-         * while the 8C148 session that did reach the home screen ran
-         * with the switch as set. The switch therefore reaches the
-         * machine exactly as the user set it, as on 7E18.
+         * The same build also keeps the PowerVR nub un-matched even when
+         * the graphics switch asks for it. With the nub matched, a phone
+         * run on 2026-10-29 wedged before launchd: the stall report
+         * showed every sample inside 0x804b2940-0x804b297f, the
+         * AppleMBXController status poll whose completion the core only
+         * models for 7E18's driver (the same wedge the desktop harness
+         * shows). That is a separate fault from the ~234.5M halts, which
+         * were the memory-disk registration rejection fixed in the
+         * bridge; both are real, and this build carries both fixes. The
+         * reconcile records the override in the options report the user
+         * sees; rendering uses the CPU software path this build's work
+         * images are provisioned for.
          */
+        vm_boot_options_reconcile_ios4_graphics(&report->options,
+                                                &request);
     }
 
     char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
