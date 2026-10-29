@@ -1589,32 +1589,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     if (kernel_size == (size_t)IOS4_KERNEL_PATCH_FILE_SIZE) {
         request.virt_base = IOS4_KERNEL_PATCH_VIRT_BASE;
         ios4_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
-#if defined(S5LBOX_STATIC_A64_ENGINE)
         /*
-         * The compact engine is validated against 7E18's code, not this
-         * guest's. On a phone on 2026-10-29 it ran 4.2.1 for 240.9M
-         * instructions and then requested a halt mid-function in ordinary
-         * kernel code (terminal status 2 at pc 0x801d51ec, SVC/Thumb),
-         * stopping a machine the user was actively using. The interpreter
-         * runs this exact guest for billions of instructions in the harness
-         * without a terminal status, so 8C148 machines use it — the same
-         * selection the engine.interpreter marker makes, applied by build
-         * instead of by file. forced_interpreter is set so the powered-off
-         * checkpoint path reapplies the same control after its reset.
+         * No engine is forced for this build. An earlier build forced the
+         * interpreter here on the theory that the compact engine requested
+         * the deterministic halt at pc 0x801d51ec; the interpreter build
+         * then halted at the same pc and count, which exonerated both
+         * engines — the halt was the memory-disk bridge rejecting this
+         * kernel's registration call, fixed in the bridge itself. Engine
+         * selection stays the marker files' business, exactly as on 7E18.
          */
-        if (!s5l8900_static_a64_set_enabled(machine, false)) {
-            free(kernel);
-            free(tree);
-            (void)file_block_close(boot->media);
-            set_detail(report->detail, sizeof report->detail,
-                       "The interpreter selection for iOS 4.2.1 could not "
-                       "disable the compact engine.");
-            set_detail(report->summary, sizeof report->summary,
-                       "interpreter selection unavailable");
-            return false;
-        }
-        forced_interpreter = true;
-#endif
     } else {
         ios3_bringup_gate_configure_with_policy(&request, NULL, firmware_policy.skip_stock_checksums);
     }
@@ -1646,18 +1629,18 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                 report->options.unmatch[i] = "arm-io/usb-complex";
         }
         /*
-         * The same build also keeps the PowerVR nub un-matched even when
-         * the graphics switch asks for it: 8C148's AppleMBXController
-         * waits on an MBX completion the core only models for 7E18's
-         * driver, and a matched GPU wedges the guest (on a phone
-         * 2026-10-29 the machine stopped at ~240.9M retired instructions
-         * in both CPU engines). The reconcile records the override in
-         * the options report the user sees; rendering stays on the CPU
-         * software path this build's work images are provisioned for,
-         * which is also how the desktop harness boots 8C148.
+         * The graphics switch is NOT reconciled for this build. An
+         * earlier build forced the PowerVR nub un-matched on the theory
+         * that 8C148's AppleMBXController wedged the guest polling an
+         * MBX status bit (seen only in the desktop harness, at the same
+         * ~240.9M retired count as the phone's halt). The phone halt was
+         * proven to be the memory-disk registration rejection instead,
+         * and with the GPU hidden the phone's fully booted guest never
+         * presented a frame (0 fps at 1.7B instructions, 2026-10-29) —
+         * while the 8C148 session that did reach the home screen ran
+         * with the switch as set. The switch therefore reaches the
+         * machine exactly as the user set it, as on 7E18.
          */
-        vm_boot_options_reconcile_ios4_graphics(&report->options,
-                                                &request);
     }
 
     char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
