@@ -185,6 +185,9 @@ jobs:
           mkdir -p shots
           (xcrun simctl spawn "$UDID" log stream --style compact \
              --predicate 'process == "S5LBox"' > simrun/simlog.txt 2>&1 &)
+          # Pre-grant the microphone so the first-launch TCC alert cannot
+          # cover the emulator view for the whole watch (run #3's confounder).
+          xcrun simctl privacy "$UDID" grant microphone com.j0shua.S5LBox || true
           xcrun simctl launch "$UDID" com.j0shua.S5LBox \
             --s5lbox-automation-open-first-machine
           sleep 10
@@ -197,6 +200,8 @@ jobs:
           xcrun simctl terminate "$UDID" com.j0shua.S5LBox || true
           sleep 2
           pkill -f "log stream" || true
+          xcrun simctl spawn "$UDID" log show --last 45m --style compact \
+            --predicate 'process == "S5LBox"' > simrun/logshow.txt 2>&1 || true
           DATA=$(xcrun simctl get_app_container "$UDID" com.j0shua.S5LBox data)
           find "$DATA/Documents" -type f -exec ls -lh {} \; \
             > simrun/container.txt || true
@@ -210,6 +215,7 @@ jobs:
           path: |
             shots/
             simrun/simlog.txt
+            simrun/logshow.txt
             simrun/container.txt
             simrun/cmake.log
           if-no-files-found: warn
