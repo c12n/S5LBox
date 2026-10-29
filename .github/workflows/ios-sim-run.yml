@@ -66,6 +66,7 @@ jobs:
           set -euo pipefail
           cmake -S . -B hostbuild -DCMAKE_BUILD_TYPE=Release > simrun/cmake.log 2>&1 || { tail -100 simrun/cmake.log; exit 1; }
           cmake --build hostbuild --target fwimport --parallel 3 >> simrun/cmake.log 2>&1 || { tail -100 simrun/cmake.log; exit 1; }
+          mkdir -p simrun/fw421imp
           hostbuild/core/fwimport simrun/iPhone1,2_4.2.1_8C148_Restore.ipsw \
             --auto --out simrun/fw421imp
           ls -lh simrun/fw421imp
